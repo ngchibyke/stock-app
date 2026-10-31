@@ -104,6 +104,7 @@ impl TestApp {
             providers: Arc::new(providers),
             payment_redirect_url: TEST_REDIRECT_URL.into(),
             verify_gate: Arc::new(gate),
+            postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
         };
         Self {
             router: build_app(state.clone()),

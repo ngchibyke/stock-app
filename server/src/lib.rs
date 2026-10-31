@@ -44,6 +44,8 @@ pub struct AppState {
     pub payment_redirect_url: String,
     /// Cooldown and concurrency cap on outbound payment verify calls.
     pub verify_gate: Arc<payments::VerifyGate>,
+    /// Postcode check for delivery addresses (`ManualPostcode` until a NIPOST adapter exists).
+    pub postcodes: Arc<dyn delivery::postcode::PostcodeProvider>,
 }
 
 async fn health() -> Json<Value> {
@@ -96,6 +98,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(cart::routes::router())
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
+        .merge(delivery::addresses::router())
         .merge(payments::webhooks::router())
         .merge(admin::routes::router())
         // Must follow every route: it applies to the method routers registered so far.

@@ -85,6 +85,8 @@ async fn main() -> anyhow::Result<()> {
         providers: Arc::new(providers),
         payment_redirect_url: config.public_redirect_url.clone(),
         verify_gate: Arc::new(server::payments::VerifyGate::default()),
+        // REVISIT(nipost): swap in a real adapter once NIPOST's API is documented.
+        postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
     };
 
     match command {
