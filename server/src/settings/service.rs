@@ -27,6 +27,12 @@ pub struct Settings {
     pub payout_settlement_buffer_hours: i32,
     /// Kill switch for the ship-deadline job (auto-refund + seller strike).
     pub jobs_ship_deadline_enabled: bool,
+    /// Minutes after local midnight (Africa/Lagos) at which the next-day promise rolls over.
+    pub delivery_cutoff_minutes: i32,
+    /// How long a delivery option shown at checkout can be used.
+    pub courier_quote_ttl_minutes: i32,
+    pub courier_price_tolerance_bps: i32,
+    pub courier_category_id: i64,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -46,7 +52,7 @@ impl Settings {
 const SELECT: &str = "SELECT platform_cut_bps, fee_small_kobo, fee_large_kobo, \
     fee_threshold_kobo, stamp_duty_kobo, stamp_duty_threshold_kobo, enabled_methods, \
     payout_provider, checkout_ttl_minutes, ship_deadline_hours, release_after_hours, \
-    backstop_days, payout_settlement_buffer_hours, jobs_ship_deadline_enabled, updated_at \
+    backstop_days, payout_settlement_buffer_hours, jobs_ship_deadline_enabled, delivery_cutoff_minutes, courier_quote_ttl_minutes, \n    courier_price_tolerance_bps, courier_category_id, updated_at \
     FROM platform_settings WHERE id";
 
 pub async fn load(db: &PgPool) -> Result<Settings, AppError> {
@@ -74,6 +80,10 @@ pub struct SettingsPatch {
     pub backstop_days: Option<i32>,
     pub payout_settlement_buffer_hours: Option<i32>,
     pub jobs_ship_deadline_enabled: Option<bool>,
+    pub delivery_cutoff_minutes: Option<i32>,
+    pub courier_quote_ttl_minutes: Option<i32>,
+    pub courier_price_tolerance_bps: Option<i32>,
+    pub courier_category_id: Option<i64>,
     /// Required: the `updated_at` the owner last read. A later edit by someone
     /// else makes this one stale (409 `stale_settings`), so two owners cannot
     /// silently overwrite each other's changes.
@@ -106,6 +116,10 @@ impl SettingsPatch {
             && self.backstop_days.is_none()
             && self.payout_settlement_buffer_hours.is_none()
             && self.jobs_ship_deadline_enabled.is_none()
+            && self.delivery_cutoff_minutes.is_none()
+            && self.courier_quote_ttl_minutes.is_none()
+            && self.courier_price_tolerance_bps.is_none()
+            && self.courier_category_id.is_none()
     }
 
     fn validate(&self) -> Result<(), AppError> {
@@ -131,6 +145,25 @@ impl SettingsPatch {
             0,
             72,
         )?;
+        in_range(
+            "delivery_cutoff_minutes",
+            self.delivery_cutoff_minutes,
+            0,
+            1439,
+        )?;
+        in_range(
+            "courier_quote_ttl_minutes",
+            self.courier_quote_ttl_minutes,
+            5,
+            1440,
+        )?;
+        in_range(
+            "courier_price_tolerance_bps",
+            self.courier_price_tolerance_bps,
+            0,
+            5000,
+        )?;
+        in_range("courier_category_id", self.courier_category_id, 1, i64::MAX)?;
         if let Some(p) = &self.payout_provider
             && !KNOWN_PAYOUT_PROVIDERS.contains(&p.as_str())
         {
@@ -223,6 +256,10 @@ pub async fn update(db: &PgPool, actor: Uuid, patch: SettingsPatch) -> Result<Se
             backstop_days,
             payout_settlement_buffer_hours,
             jobs_ship_deadline_enabled,
+            delivery_cutoff_minutes,
+            courier_quote_ttl_minutes,
+            courier_price_tolerance_bps,
+            courier_category_id,
         );
     }
     if changed.is_empty() {

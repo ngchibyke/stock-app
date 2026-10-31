@@ -367,3 +367,44 @@ async fn stale_patch_is_rejected(pool: PgPool) {
     .await;
     assert_eq!(res.status, 200, "{}", res.json);
 }
+
+#[sqlx::test]
+async fn delivery_settings_round_trip_and_validate(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.make_owner().await;
+    let j = get(&app, &owner).await.json;
+    assert_eq!(j["delivery_cutoff_minutes"], 1080);
+    assert_eq!(j["courier_quote_ttl_minutes"], 30);
+    assert_eq!(j["courier_price_tolerance_bps"], 1000);
+    assert_eq!(j["courier_category_id"], 90097994);
+
+    let res = patch(
+        &app,
+        &owner,
+        json!({
+            "delivery_cutoff_minutes": 1020,
+            "courier_quote_ttl_minutes": 60,
+            "courier_price_tolerance_bps": 500,
+            "courier_category_id": 12345
+        }),
+    )
+    .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let j = get(&app, &owner).await.json;
+    assert_eq!(j["delivery_cutoff_minutes"], 1020);
+    assert_eq!(j["courier_quote_ttl_minutes"], 60);
+    assert_eq!(j["courier_price_tolerance_bps"], 500);
+    assert_eq!(j["courier_category_id"], 12345);
+
+    for bad in [
+        json!({ "delivery_cutoff_minutes": 1440 }),
+        json!({ "delivery_cutoff_minutes": -1 }),
+        json!({ "courier_quote_ttl_minutes": 4 }),
+        json!({ "courier_quote_ttl_minutes": 1441 }),
+        json!({ "courier_price_tolerance_bps": 5001 }),
+        json!({ "courier_category_id": 0 }),
+    ] {
+        let res = patch(&app, &owner, bad.clone()).await;
+        assert_eq!(res.status, 422, "{bad}: {}", res.json);
+    }
+}

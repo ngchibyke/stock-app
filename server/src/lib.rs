@@ -6,6 +6,7 @@ pub mod cart;
 pub mod checkout;
 pub mod config;
 pub mod crypto;
+pub mod delivery;
 pub mod error;
 pub mod escrow;
 pub mod extract;
