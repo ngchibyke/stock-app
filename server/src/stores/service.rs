@@ -5,9 +5,16 @@ use sqlx::{PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{audit, crypto::FieldCipher, error::AppError};
+use crate::{
+    audit,
+    crypto::FieldCipher,
+    delivery::area::{AreaCouncil, normalize_postcode},
+    error::AppError,
+    phone::normalize_ng_phone,
+};
 
 pub const MAX_STORES_PER_USER: i64 = 2;
+pub const MAX_SELF_DELIVERY_FEE_KOBO: i64 = 5_000_000;
 const SERVICE_STATE: &str = "FCT";
 const MAX_SLUG_ATTEMPTS: u32 = 1000;
 /// Slugs that collide with static routes (e.g. `/stores/mine`); never allocated as-is.
@@ -22,6 +29,10 @@ pub struct NewStore {
     pub pickup_state: String,
     pub delivery_courier: bool,
     pub delivery_self: bool,
+    pub pickup_area_council: Option<String>,
+    pub pickup_postcode: Option<String>,
+    pub business_phone: Option<String>,
+    pub self_delivery_fee_kobo: Option<i64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -32,6 +43,11 @@ pub struct StorePatch {
     pub pickup_state: Option<String>,
     pub delivery_courier: Option<bool>,
     pub delivery_self: Option<bool>,
+    pub pickup_area_council: Option<String>,
+    /// Blank clears the postcode.
+    pub pickup_postcode: Option<String>,
+    pub business_phone: Option<String>,
+    pub self_delivery_fee_kobo: Option<i64>,
 }
 
 const REDACTED: &str = "[redacted]";
@@ -46,6 +62,16 @@ impl std::fmt::Debug for NewStore {
             .field("pickup_state", &self.pickup_state)
             .field("delivery_courier", &self.delivery_courier)
             .field("delivery_self", &self.delivery_self)
+            .field("pickup_area_council", &self.pickup_area_council)
+            .field(
+                "pickup_postcode",
+                &self.pickup_postcode.as_ref().map(|_| REDACTED),
+            )
+            .field(
+                "business_phone",
+                &self.business_phone.as_ref().map(|_| REDACTED),
+            )
+            .field("self_delivery_fee_kobo", &self.self_delivery_fee_kobo)
             .finish()
     }
 }
@@ -62,6 +88,16 @@ impl std::fmt::Debug for StorePatch {
             .field("pickup_state", &self.pickup_state)
             .field("delivery_courier", &self.delivery_courier)
             .field("delivery_self", &self.delivery_self)
+            .field("pickup_area_council", &self.pickup_area_council)
+            .field(
+                "pickup_postcode",
+                &self.pickup_postcode.as_ref().map(|_| REDACTED),
+            )
+            .field(
+                "business_phone",
+                &self.business_phone.as_ref().map(|_| REDACTED),
+            )
+            .field("self_delivery_fee_kobo", &self.self_delivery_fee_kobo)
             .finish()
     }
 }
@@ -80,10 +116,17 @@ pub struct Store {
     pub delivery_self: bool,
     pub status: String,
     pub created_at: OffsetDateTime,
+    pub pickup_area_council: Option<AreaCouncil>,
+    pub pickup_postcode: Option<String>,
+    pub pickup_courier_address_code: Option<i64>,
+    pub business_phone_enc: Option<Vec<u8>>,
+    pub self_delivery_fee_kobo: Option<i64>,
 }
 
 const COLUMNS: &str = "id, owner_id, name, slug, description, pickup_address_enc, pickup_state, \
-                       delivery_courier, delivery_self, status::text AS status, created_at";
+                       delivery_courier, delivery_self, status::text AS status, created_at, \
+                       pickup_area_council, pickup_postcode, pickup_courier_address_code, \
+                       business_phone_enc, self_delivery_fee_kobo";
 
 /// The public shape: never carries the pickup address.
 #[derive(Debug, Serialize)]
@@ -100,12 +143,17 @@ pub struct PublicStore {
     pub created_at: OffsetDateTime,
 }
 
-/// The owner-only shape: the public shape plus the decrypted pickup address.
+/// The owner-only shape: the public shape plus the decrypted pickup address and
+/// the delivery details.
 #[derive(Serialize)]
 pub struct OwnerStore {
     #[serde(flatten)]
     pub store: PublicStore,
     pub pickup_address: String,
+    pub pickup_area_council: Option<AreaCouncil>,
+    pub pickup_postcode: Option<String>,
+    pub business_phone: Option<String>,
+    pub self_delivery_fee_kobo: Option<i64>,
 }
 
 impl std::fmt::Debug for OwnerStore {
@@ -113,6 +161,41 @@ impl std::fmt::Debug for OwnerStore {
         f.debug_struct("OwnerStore")
             .field("store", &self.store)
             .field("pickup_address", &REDACTED)
+            .field("pickup_area_council", &self.pickup_area_council)
+            .field("pickup_postcode", &REDACTED)
+            .field("business_phone", &REDACTED)
+            .field("self_delivery_fee_kobo", &self.self_delivery_fee_kobo)
+            .finish()
+    }
+}
+
+/// What checkout needs to know about how a store delivers (Task 6). Decrypted;
+/// `Debug` redacts the personal fields.
+#[derive(Clone)]
+pub struct StoreDelivery {
+    pub courier: bool,
+    pub self_fee_kobo: Option<i64>,
+    pub business_phone: Option<String>,
+    pub pickup_area: Option<AreaCouncil>,
+    pub pickup_address: String,
+    pub pickup_courier_address_code: Option<i64>,
+}
+
+impl std::fmt::Debug for StoreDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreDelivery")
+            .field("courier", &self.courier)
+            .field("self_fee_kobo", &self.self_fee_kobo)
+            .field(
+                "business_phone",
+                &self.business_phone.as_ref().map(|_| REDACTED),
+            )
+            .field("pickup_area", &self.pickup_area)
+            .field("pickup_address", &REDACTED)
+            .field(
+                "pickup_courier_address_code",
+                &self.pickup_courier_address_code,
+            )
             .finish()
     }
 }
@@ -136,6 +219,14 @@ impl Store {
         Ok(OwnerStore {
             store: self.public(),
             pickup_address: cipher.decrypt(&self.pickup_address_enc)?,
+            pickup_area_council: self.pickup_area_council,
+            pickup_postcode: self.pickup_postcode.clone(),
+            business_phone: self
+                .business_phone_enc
+                .as_deref()
+                .map(|b| cipher.decrypt(b))
+                .transpose()?,
+            self_delivery_fee_kobo: self.self_delivery_fee_kobo,
         })
     }
 }
@@ -205,6 +296,43 @@ fn validate_delivery(courier: bool, own: bool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Checks the full delivery state: each method switched on needs its details.
+fn validate_delivery_details(
+    courier: bool,
+    own: bool,
+    fee: Option<i64>,
+    has_phone: bool,
+    area: Option<AreaCouncil>,
+) -> Result<(), AppError> {
+    if let Some(fee) = fee
+        && !(0..=MAX_SELF_DELIVERY_FEE_KOBO).contains(&fee)
+    {
+        return Err(AppError::Validation(format!(
+            "self_delivery_fee_kobo must be between 0 and {MAX_SELF_DELIVERY_FEE_KOBO}"
+        )));
+    }
+    let required = |msg: &str| AppError::Unprocessable("delivery_details_required", msg.into());
+    if own && (fee.is_none() || !has_phone) {
+        return Err(required(match (fee.is_none(), has_phone) {
+            (true, false) => "Self-delivery needs a fee and a business phone",
+            (true, true) => "Self-delivery needs a fee",
+            _ => "Self-delivery needs a business phone",
+        }));
+    }
+    if courier && area.is_none() {
+        return Err(required("Courier delivery needs a pickup area council"));
+    }
+    Ok(())
+}
+
+/// Blank means absent.
+fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
+    match raw.trim() {
+        "" => Ok(None),
+        p => Ok(Some(normalize_postcode(p)?)),
+    }
+}
+
 pub async fn create_store(
     db: &PgPool,
     cipher: &FieldCipher,
@@ -216,7 +344,33 @@ pub async fn create_store(
     validate_description(&input.description)?;
     let address = validate_address(&input.pickup_address)?;
     validate_delivery(input.delivery_courier, input.delivery_self)?;
+    let area: Option<AreaCouncil> = input
+        .pickup_area_council
+        .as_deref()
+        .filter(|a| !a.trim().is_empty())
+        .map(str::parse)
+        .transpose()?;
+    let postcode = input
+        .pickup_postcode
+        .as_deref()
+        .map(parse_postcode)
+        .transpose()?
+        .flatten();
+    let phone = input
+        .business_phone
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(normalize_ng_phone)
+        .transpose()?;
+    validate_delivery_details(
+        input.delivery_courier,
+        input.delivery_self,
+        input.self_delivery_fee_kobo,
+        phone.is_some(),
+        area,
+    )?;
     let address_enc = cipher.encrypt(&address);
+    let phone_enc = phone.as_deref().map(|p| cipher.encrypt(p));
 
     let mut tx = db.begin().await.context("begin")?;
     // Serialise concurrent creates for the same user (lock order: users row first).
@@ -250,8 +404,9 @@ pub async fn create_store(
         // The unique index decides; a taken slug (even a deleted store's) yields no row.
         let inserted: Option<Store> = sqlx::query_as(&format!(
             "INSERT INTO stores (owner_id, name, slug, description, pickup_address_enc, pickup_state, \
-                                 delivery_courier, delivery_self) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                                 delivery_courier, delivery_self, pickup_area_council, pickup_postcode, \
+                                 business_phone_enc, self_delivery_fee_kobo) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
              ON CONFLICT (slug) DO NOTHING RETURNING {COLUMNS}"
         ))
         .bind(owner)
@@ -262,6 +417,10 @@ pub async fn create_store(
         .bind(&input.pickup_state)
         .bind(input.delivery_courier)
         .bind(input.delivery_self)
+        .bind(area)
+        .bind(&postcode)
+        .bind(&phone_enc)
+        .bind(input.self_delivery_fee_kobo)
         .fetch_optional(&mut *tx)
         .await
         .context("insert store")?;
@@ -342,9 +501,84 @@ pub async fn update_store(
     let own = patch.delivery_self.unwrap_or(current.delivery_self);
     validate_delivery(courier, own)?;
 
+    let area = match patch
+        .pickup_area_council
+        .as_deref()
+        .filter(|a| !a.trim().is_empty())
+    {
+        Some(a) => Some(a.parse::<AreaCouncil>()?),
+        None => current.pickup_area_council,
+    };
+    let postcode = match patch.pickup_postcode.as_deref() {
+        Some(p) => parse_postcode(p)?,
+        None => current.pickup_postcode.clone(),
+    };
+    let new_phone = patch
+        .business_phone
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(normalize_ng_phone)
+        .transpose()?;
+    let fee = patch
+        .self_delivery_fee_kobo
+        .or(current.self_delivery_fee_kobo);
+    let phone_enc = match &new_phone {
+        Some(p) => Some(cipher.encrypt(p)),
+        None => current.business_phone_enc.clone(),
+    };
+
+    let mut changed: Vec<&str> = Vec::new();
+    if courier != current.delivery_courier {
+        changed.push("delivery_courier");
+    }
+    if own != current.delivery_self {
+        changed.push("delivery_self");
+    }
+    if area != current.pickup_area_council {
+        changed.push("pickup_area_council");
+    }
+    if postcode != current.pickup_postcode {
+        changed.push("pickup_postcode");
+    }
+    if fee != current.self_delivery_fee_kobo {
+        changed.push("self_delivery_fee_kobo");
+    }
+    if let Some(p) = &new_phone {
+        let same = current
+            .business_phone_enc
+            .as_deref()
+            .map(|b| cipher.decrypt(b))
+            .transpose()?
+            .is_some_and(|old| &old == p);
+        if !same {
+            changed.push("business_phone");
+        }
+    }
+    let touched = patch.delivery_courier.is_some()
+        || patch.delivery_self.is_some()
+        || patch.pickup_area_council.is_some()
+        || patch.pickup_postcode.is_some()
+        || patch.business_phone.is_some()
+        || patch.self_delivery_fee_kobo.is_some();
+    // A legacy store with NULL delivery fields stays editable until a delivery field is touched.
+    if touched {
+        validate_delivery_details(courier, own, fee, phone_enc.is_some(), area)?;
+    }
+    // A moved pickup invalidates the courier's saved address code (Task 6 refills it).
+    let pickup_moved = patch.pickup_address.is_some()
+        || changed.contains(&"pickup_area_council")
+        || changed.contains(&"pickup_postcode");
+    let courier_code = if pickup_moved {
+        None
+    } else {
+        current.pickup_courier_address_code
+    };
+
     let store: Store = sqlx::query_as(&format!(
         "UPDATE stores SET name = $2, description = $3, pickup_address_enc = $4, pickup_state = $5, \
-                           delivery_courier = $6, delivery_self = $7 \
+                           delivery_courier = $6, delivery_self = $7, pickup_area_council = $8, \
+                           pickup_postcode = $9, business_phone_enc = $10, \
+                           self_delivery_fee_kobo = $11, pickup_courier_address_code = $12 \
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(id)
@@ -354,20 +588,59 @@ pub async fn update_store(
     .bind(&state)
     .bind(courier)
     .bind(own)
+    .bind(area)
+    .bind(&postcode)
+    .bind(&phone_enc)
+    .bind(fee)
+    .bind(courier_code)
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;
+    // Field names only, never values.
+    let detail = if changed.is_empty() {
+        json!({})
+    } else {
+        json!({ "delivery_fields_changed": changed })
+    };
     audit::record(
         &mut tx,
         Some(owner),
         "store.updated",
         "store",
         Some(id),
-        json!({}),
+        detail,
     )
     .await?;
     tx.commit().await.context("commit")?;
     Ok(store)
+}
+
+/// How a live store delivers, decrypted, for checkout.
+pub async fn delivery_profile(
+    db: &PgPool,
+    cipher: &FieldCipher,
+    store_id: Uuid,
+) -> Result<StoreDelivery, AppError> {
+    let store: Store = sqlx::query_as(&format!(
+        "SELECT {COLUMNS} FROM stores WHERE id = $1 AND deleted_at IS NULL"
+    ))
+    .bind(store_id)
+    .fetch_optional(db)
+    .await
+    .context("load store delivery")?
+    .ok_or(AppError::NotFound)?;
+    Ok(StoreDelivery {
+        courier: store.delivery_courier,
+        self_fee_kobo: store.self_delivery_fee_kobo,
+        business_phone: store
+            .business_phone_enc
+            .as_deref()
+            .map(|b| cipher.decrypt(b))
+            .transpose()?,
+        pickup_area: store.pickup_area_council,
+        pickup_address: cipher.decrypt(&store.pickup_address_enc)?,
+        pickup_courier_address_code: store.pickup_courier_address_code,
+    })
 }
 
 pub async fn delete_store(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), AppError> {
@@ -433,13 +706,21 @@ mod debug_tests {
             pickup_state: "FCT".into(),
             delivery_courier: true,
             delivery_self: false,
+            pickup_area_council: Some("amac".into()),
+            pickup_postcode: Some("FC01SECRET99".into()),
+            business_phone: Some("08031234567".into()),
+            self_delivery_fee_kobo: Some(100),
         };
         let patch = StorePatch {
             pickup_address: Some("12 Secret Close, Wuse".into()),
+            business_phone: Some("08031234567".into()),
+            pickup_postcode: Some("FC01SECRET99".into()),
             ..Default::default()
         };
         for printed in [format!("{new:?}"), format!("{patch:?}")] {
             assert!(!printed.contains("Secret"), "{printed}");
+            assert!(!printed.contains("SECRET"), "{printed}");
+            assert!(!printed.contains("0803"), "{printed}");
             assert!(printed.contains("[redacted]"), "{printed}");
         }
         // Fields without personal data stay visible for debugging.

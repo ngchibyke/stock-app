@@ -12,7 +12,8 @@ fn store_body(name: &str) -> Value {
         "pickup_address": "12 Unique Street, Wuse 2",
         "pickup_state": "FCT",
         "delivery_courier": true,
-        "delivery_self": false
+        "delivery_self": false,
+        "pickup_area_council": "amac"
     })
 }
 
@@ -248,4 +249,215 @@ async fn reserved_slug_is_skipped(pool: PgPool) {
         .await;
     assert_eq!(got.status, 200);
     assert_eq!(got.json["name"], "Mine");
+}
+
+fn self_body(name: &str) -> Value {
+    json!({
+        "name": name,
+        "pickup_address": "12 Unique Street, Wuse 2",
+        "pickup_state": "FCT",
+        "delivery_courier": false,
+        "delivery_self": true
+    })
+}
+
+#[sqlx::test]
+async fn self_delivery_store_requires_fee_and_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let res = app
+        .request(
+            Method::POST,
+            "/stores",
+            Some(self_body("Own")),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+    assert_eq!(
+        res.json["error"]["message"],
+        "Self-delivery needs a fee and a business phone"
+    );
+    let mut body = self_body("Own");
+    body["self_delivery_fee_kobo"] = json!(150_000);
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+    body["business_phone"] = json!("08031234567");
+    let res = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    // Patch: switching self-delivery on for a store without the details is rejected.
+    let created = create(&app, &token, "Courier Only").await;
+    let id = created.json["id"].as_str().unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "delivery_self": true })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+}
+
+#[sqlx::test]
+async fn courier_store_requires_pickup_area(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let mut body = store_body("Courier");
+    body.as_object_mut().unwrap().remove("pickup_area_council");
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+    body["pickup_area_council"] = json!("Kano");
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.json["error"]["code"], "outside_service_area");
+    body["pickup_area_council"] = json!("bwari");
+    body["pickup_postcode"] = json!("fc 01-ab12cde");
+    let res = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    assert_eq!(res.json["pickup_area_council"], "bwari");
+    assert_eq!(res.json["pickup_postcode"], "FC01AB12CDE");
+}
+
+#[sqlx::test]
+async fn legacy_store_without_delivery_fields_can_still_be_renamed(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Legacy").await;
+    let id = created.json["id"].as_str().unwrap();
+    sqlx::query("UPDATE stores SET pickup_area_council = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "name": "Legacy Renamed" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    // Touching a delivery field validates the merged state.
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "pickup_postcode": "" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+}
+
+#[sqlx::test]
+async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let mut body = self_body("Phone Shop");
+    body["self_delivery_fee_kobo"] = json!(150_000);
+    body["business_phone"] = json!("0803 123 4567");
+    body["pickup_area_council"] = json!("amac");
+    body["pickup_postcode"] = json!("FC01AB12CDE");
+    let res = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    assert_eq!(res.json["business_phone"], "+2348031234567");
+    assert_eq!(res.json["self_delivery_fee_kobo"], 150_000);
+    let slug = res.json["slug"].as_str().unwrap().to_string();
+    let id: uuid::Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
+
+    let raw: Vec<u8> = sqlx::query_scalar("SELECT business_phone_enc FROM stores")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let needle = b"8031234567";
+    assert!(!raw.windows(needle.len()).any(|w| w == needle));
+
+    let public = app
+        .request(Method::GET, &format!("/stores/{slug}"), None, Some(&token))
+        .await;
+    assert_eq!(public.status, 200);
+    for key in [
+        "business_phone",
+        "self_delivery_fee_kobo",
+        "pickup_postcode",
+        "pickup_area_council",
+        "pickup_address",
+    ] {
+        assert!(
+            public.json.get(key).is_none(),
+            "{key} leaked: {}",
+            public.json
+        );
+    }
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(&token))
+        .await;
+    assert_eq!(mine.json[0]["business_phone"], "+2348031234567");
+    assert_eq!(mine.json[0]["self_delivery_fee_kobo"], 150_000);
+
+    // delivery_profile decrypts.
+    let profile = server::stores::service::delivery_profile(&pool, &app.state.cipher, id)
+        .await
+        .unwrap();
+    assert_eq!(profile.business_phone.as_deref(), Some("+2348031234567"));
+    assert_eq!(profile.self_fee_kobo, Some(150_000));
+    assert_eq!(profile.pickup_address, "12 Unique Street, Wuse 2");
+    assert!(profile.pickup_courier_address_code.is_none());
+    assert!(!format!("{profile:?}").contains("8031234567"));
+
+    // The audit row names changed fields, never values.
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "business_phone": "08099887766", "self_delivery_fee_kobo": 0 })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let detail: String =
+        sqlx::query_scalar("SELECT detail::text FROM audit_log WHERE action = 'store.updated'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(detail.contains("business_phone") && detail.contains("self_delivery_fee_kobo"));
+    assert!(!detail.contains("8099887766") && !detail.contains("150000"));
+}
+
+#[sqlx::test]
+async fn self_delivery_fee_capped(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let mut body = self_body("Pricey");
+    body["business_phone"] = json!("08031234567");
+    body["self_delivery_fee_kobo"] = json!(5_000_001);
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    body["self_delivery_fee_kobo"] = json!(-1);
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    body["self_delivery_fee_kobo"] = json!(5_000_000);
+    let res = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
 }
