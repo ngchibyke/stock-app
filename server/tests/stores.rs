@@ -387,22 +387,33 @@ async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
     let needle = b"8031234567";
     assert!(!raw.windows(needle.len()).any(|w| w == needle));
 
-    let public = app
-        .request(Method::GET, &format!("/stores/{slug}"), None, Some(&token))
-        .await;
-    assert_eq!(public.status, 200);
-    for key in [
-        "business_phone",
-        "self_delivery_fee_kobo",
-        "pickup_postcode",
-        "pickup_area_council",
-        "pickup_address",
-    ] {
-        assert!(
-            public.json.get(key).is_none(),
-            "{key} leaked: {}",
-            public.json
-        );
+    // Make the store public, then look at it anonymously and as another signed-in user.
+    sqlx::query("UPDATE stores SET status = 'active', pickup_courier_address_code = 4242")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, other) = app.sign_up_verified("08022222222").await;
+    for viewer in [None, Some(other.as_str())] {
+        let public = app
+            .request(Method::GET, &format!("/stores/{slug}"), None, viewer)
+            .await;
+        assert_eq!(public.status, 200, "{}", public.json);
+        for key in [
+            "business_phone",
+            "self_delivery_fee_kobo",
+            "pickup_postcode",
+            "pickup_area_council",
+            "pickup_courier_address_code",
+            "pickup_address",
+        ] {
+            assert!(
+                public.json.get(key).is_none(),
+                "{key} leaked: {}",
+                public.json
+            );
+        }
+        let text = public.json.to_string();
+        assert!(!text.contains("8031234567") && !text.contains("FC01AB12CDE"));
     }
     let mine = app
         .request(Method::GET, "/stores/mine", None, Some(&token))
@@ -417,7 +428,7 @@ async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
     assert_eq!(profile.business_phone.as_deref(), Some("+2348031234567"));
     assert_eq!(profile.self_fee_kobo, Some(150_000));
     assert_eq!(profile.pickup_address, "12 Unique Street, Wuse 2");
-    assert!(profile.pickup_courier_address_code.is_none());
+    assert_eq!(profile.pickup_courier_address_code, Some(4242));
     assert!(!format!("{profile:?}").contains("8031234567"));
 
     // The audit row names changed fields, never values.
@@ -460,4 +471,57 @@ async fn self_delivery_fee_capped(pool: PgPool) {
         .request(Method::POST, "/stores", Some(body), Some(&token))
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
+}
+
+#[sqlx::test]
+async fn moving_the_pickup_resets_the_courier_address_code(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Moves").await;
+    let id = created.json["id"].as_str().unwrap().to_string();
+    let patches = [
+        json!({ "pickup_address": "7 New Road, Garki" }),
+        json!({ "pickup_area_council": "kuje" }),
+        json!({ "pickup_postcode": "FC01AB12CDE" }),
+    ];
+    for patch in patches {
+        sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let res = app
+            .request(
+                Method::PATCH,
+                &format!("/stores/{id}"),
+                Some(patch.clone()),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{patch}: {}", res.json);
+        let code: Option<i64> =
+            sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(code, None, "{patch}");
+    }
+    // An unrelated patch keeps it.
+    sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "name": "Still Here" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let code: Option<i64> = sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(code, Some(4242));
 }
