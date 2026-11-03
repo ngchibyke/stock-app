@@ -1,7 +1,8 @@
-//! Delivery and tracking: service area, promised date and (in later tasks)
-//! addresses, couriers and checkout options.
+//! Delivery and tracking: service area, promised date, addresses, checkout
+//! delivery options and (in later tasks) shipments and tracking.
 
 pub mod addresses;
 pub mod area;
+pub mod options;
 pub mod postcode;
 pub mod promise;

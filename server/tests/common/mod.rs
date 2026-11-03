@@ -30,6 +30,11 @@ pub const TEST_FIELD_KEY: [u8; 32] = [7u8; 32];
 pub const TEST_INDEX_KEY: [u8; 32] = [9u8; 32];
 pub const TEST_PASSWORD: &str = "correct-horse-1";
 pub const TEST_REDIRECT_URL: &str = "http://localhost:8080/checkout/return";
+/// The business phone of stores made by `make_active_store_with_product`.
+pub const STORE_PHONE: &str = "08031234567";
+/// The address line `buyer_address` saves (personal data: tests check it is never
+/// stored or shown in plaintext where it should not be).
+pub const BUYER_ADDRESS_LINE: &str = "4 Quiet Close, Maitama";
 
 /// A published product with one variant in an active store; see
 /// [`TestApp::make_active_store_with_product`].
@@ -372,9 +377,13 @@ impl TestApp {
                     "name": store_name,
                     "pickup_address": "12 Unique Street, Wuse 2",
                     "pickup_state": "FCT",
+                    // Both methods: self-delivery at fee 0 is what `checkout` picks by
+                    // default, so part-2 tests keep their meaning (ruling P4).
                     "delivery_courier": true,
-                    "delivery_self": false,
-                    "pickup_area_council": "amac"
+                    "delivery_self": true,
+                    "pickup_area_council": "amac",
+                    "business_phone": STORE_PHONE,
+                    "self_delivery_fee_kobo": 0
                 })),
                 Some(&seller_token),
             )
@@ -503,12 +512,99 @@ impl TestApp {
         .await
     }
 
-    /// POST /checkout with `method`.
+    /// The buyer's first saved address, or a new one in AMAC; returns its id.
+    pub async fn buyer_address(&self, token: &str) -> Uuid {
+        let list = self
+            .request(Method::GET, "/me/addresses", None, Some(token))
+            .await;
+        assert_eq!(list.status, 200, "list addresses: {}", list.json);
+        if let Some(first) = list.json.as_array().and_then(|a| a.first()) {
+            return first["id"].as_str().unwrap().parse().unwrap();
+        }
+        self.add_address(token, "amac").await
+    }
+
+    /// Saves a new address in `area` for the buyer; returns its id.
+    pub async fn add_address(&self, token: &str, area: &str) -> Uuid {
+        let res = self
+            .request(
+                Method::POST,
+                "/me/addresses",
+                Some(json!({
+                    "recipient_name": "Ada Buyer",
+                    "phone": "08077777777",
+                    "address_line": BUYER_ADDRESS_LINE,
+                    "landmark": "Opposite the blue gate",
+                    "area_council": area
+                })),
+                Some(token),
+            )
+            .await;
+        assert_eq!(res.status, 201, "add address: {}", res.json);
+        res.json["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    /// POST /checkout/delivery-options for `address_id`.
+    pub async fn delivery_options(&self, token: &str, address_id: Uuid) -> TestResponse {
+        self.request(
+            Method::POST,
+            "/checkout/delivery-options",
+            Some(json!({ "address_id": address_id })),
+            Some(token),
+        )
+        .await
+    }
+
+    /// The default checkout body (ruling P4): the buyer's address and, for every
+    /// store in the cart, its self-delivery option (fee 0 on stores made by
+    /// `make_active_store_with_product`). When options cannot be quoted (an empty
+    /// cart, say) `deliveries` is empty, so checkout answers with its own error.
+    pub async fn checkout_body(&self, token: &str, method: &str) -> Value {
+        let address_id = self.buyer_address(token).await;
+        let res = self.delivery_options(token, address_id).await;
+        let mut deliveries = Vec::new();
+        if res.status == 200 {
+            for store in res.json["stores"].as_array().unwrap() {
+                let own = store["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|o| o["method"] == "self");
+                if let Some(option) = own {
+                    deliveries.push(json!({
+                        "store_id": store["store_id"],
+                        "option_id": option["id"],
+                    }));
+                }
+            }
+        }
+        json!({ "method": method, "address_id": address_id, "deliveries": deliveries })
+    }
+
+    /// POST /checkout with `method`, the buyer's address and self-delivery for
+    /// every store (see [`checkout_body`](Self::checkout_body)).
     pub async fn checkout(&self, token: &str, method: &str) -> TestResponse {
+        let body = self.checkout_body(token, method).await;
+        self.request(Method::POST, "/checkout", Some(body), Some(token))
+            .await
+    }
+
+    /// POST /checkout with explicit choices: `deliveries` is `[(store_id, option_id)]`.
+    pub async fn checkout_with(
+        &self,
+        token: &str,
+        method: &str,
+        address_id: Uuid,
+        deliveries: &[(Uuid, Uuid)],
+    ) -> TestResponse {
+        let deliveries: Vec<Value> = deliveries
+            .iter()
+            .map(|(s, o)| json!({ "store_id": s, "option_id": o }))
+            .collect();
         self.request(
             Method::POST,
             "/checkout",
-            Some(json!({ "method": method })),
+            Some(json!({ "method": method, "address_id": address_id, "deliveries": deliveries })),
             Some(token),
         )
         .await

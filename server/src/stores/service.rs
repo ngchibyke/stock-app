@@ -174,6 +174,9 @@ impl std::fmt::Debug for OwnerStore {
 #[derive(Clone)]
 pub struct StoreDelivery {
     pub courier: bool,
+    /// `delivery_self`: a fee left on the row after self-delivery is switched
+    /// off must not be offered.
+    pub self_delivery: bool,
     pub self_fee_kobo: Option<i64>,
     pub business_phone: Option<String>,
     pub pickup_area: Option<AreaCouncil>,
@@ -185,6 +188,7 @@ impl std::fmt::Debug for StoreDelivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StoreDelivery")
             .field("courier", &self.courier)
+            .field("self_delivery", &self.self_delivery)
             .field("self_fee_kobo", &self.self_fee_kobo)
             .field(
                 "business_phone",
@@ -321,6 +325,10 @@ fn validate_delivery_details(
     }
     if courier && area.is_none() {
         return Err(required("Courier delivery needs a pickup area council"));
+    }
+    // The courier needs a sender phone to collect the parcel (ruling T6d).
+    if courier && !has_phone {
+        return Err(required("Courier delivery needs a business phone"));
     }
     Ok(())
 }
@@ -564,10 +572,12 @@ pub async fn update_store(
     if touched {
         validate_delivery_details(courier, own, fee, phone_enc.is_some(), area)?;
     }
-    // A moved pickup invalidates the courier's saved address code (Task 6 refills it).
+    // A moved pickup, or a new sender phone, invalidates the courier's saved
+    // address code (checkout's delivery options refill it).
     let pickup_moved = patch.pickup_address.is_some()
         || changed.contains(&"pickup_area_council")
-        || changed.contains(&"pickup_postcode");
+        || changed.contains(&"pickup_postcode")
+        || changed.contains(&"business_phone");
     let courier_code = if pickup_moved {
         None
     } else {
@@ -631,6 +641,7 @@ pub async fn delivery_profile(
     .ok_or(AppError::NotFound)?;
     Ok(StoreDelivery {
         courier: store.delivery_courier,
+        self_delivery: store.delivery_self,
         self_fee_kobo: store.self_delivery_fee_kobo,
         business_phone: store
             .business_phone_enc

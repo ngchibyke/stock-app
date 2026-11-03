@@ -102,6 +102,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
         .merge(delivery::addresses::router())
+        .merge(delivery::options::router())
         .merge(payments::webhooks::router())
         .merge(admin::routes::router())
         // Must follow every route: it applies to the method routers registered so far.

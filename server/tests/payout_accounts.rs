@@ -21,6 +21,7 @@ async fn seller_store(app: &TestApp) -> (String, Uuid, String) {
                 "pickup_address": "12 Unique Street, Wuse 2",
                 "pickup_state": "FCT",
                 "delivery_courier": true,
+                "business_phone": "08031234567",
                 "delivery_self": false,
                 "pickup_area_council": "amac"
             })),

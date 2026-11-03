@@ -22,7 +22,9 @@
 //!      the payment is booked, then every order is refunded (stock untouched).
 //!
 //!    Paid: checkout and orders `paid`, deadlines and the payout fee schedule
-//!    snapshotted from the settings, provider fee split across orders, ledger
+//!    snapshotted from the settings, each delivery order's `promised_date`
+//!    recomputed from `paid_at` (never earlier than the date shown at checkout),
+//!    provider fee split across orders, ledger
 //!    `buyer_funds -T`, `escrow +T` per order, provider hold ->
 //!    `provider_flagged`, the cart lines cleared.
 //! 4. For a webhook, the event is marked processed in that same transaction, or
@@ -34,11 +36,13 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::json;
 use sqlx::PgConnection;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::service::{db_err, lock_reserved};
 use crate::{
     AppState, audit,
+    delivery::promise::{load_holidays, promised_date},
     error::AppError,
     escrow::refund::{begin_refund, send_refund},
     ledger::{self, Account, Entry},
@@ -227,11 +231,18 @@ async fn apply(
     source: Source<'_>,
 ) -> Result<SettleOutcome, AppError> {
     let settings = settings::load(&state.db).await?;
+    let holidays = load_holidays(&state.db).await?;
     let mut tx = state.db.begin().await.context("begin")?;
     sqlx::query(LOCK_TIMEOUT)
         .execute(&mut *tx)
         .await
         .map_err(db_err("set lock_timeout"))?;
+    // `now()` is fixed for the transaction: it is the `paid_at` written below.
+    let paid_at: OffsetDateTime = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err("read transaction time"))?;
+    let promised = promised_date(paid_at, settings.delivery_cutoff_minutes, &holidays);
 
     // product_variants (id order) -> checkouts -> orders.
     let items = lock_reserved(&mut tx, checkout_id).await?;
@@ -394,7 +405,9 @@ async fn apply(
                     ship_by = now() + make_interval(hours => $3), \
                     backstop_at = now() + make_interval(days => $4), \
                     fee_small_kobo = $5, fee_large_kobo = $6, fee_threshold_kobo = $7, \
-                    stamp_duty_kobo = $8, stamp_duty_threshold_kobo = $9 \
+                    stamp_duty_kobo = $8, stamp_duty_threshold_kobo = $9, \
+                    promised_date = CASE WHEN delivery_method IS NULL THEN NULL \
+                                         ELSE GREATEST(promised_date, $10) END \
              WHERE id = $1",
         )
         .bind(order_id)
@@ -406,6 +419,7 @@ async fn apply(
         .bind(fees.threshold)
         .bind(fees.stamp_duty_kobo)
         .bind(fees.stamp_duty_threshold)
+        .bind(promised)
         .execute(&mut *tx)
         .await
         .map_err(db_err("mark order paid"))?;

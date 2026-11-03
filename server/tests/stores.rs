@@ -12,6 +12,7 @@ fn store_body(name: &str) -> Value {
         "pickup_address": "12 Unique Street, Wuse 2",
         "pickup_state": "FCT",
         "delivery_courier": true,
+        "business_phone": "08031234567",
         "delivery_self": false,
         "pickup_area_council": "amac"
     })
@@ -329,6 +330,93 @@ async fn courier_store_requires_pickup_area(pool: PgPool) {
     assert_eq!(res.status, 201, "{}", res.json);
     assert_eq!(res.json["pickup_area_council"], "bwari");
     assert_eq!(res.json["pickup_postcode"], "FC01AB12CDE");
+}
+
+#[sqlx::test]
+async fn courier_store_requires_business_phone(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let mut body = store_body("Courier");
+    body.as_object_mut().unwrap().remove("business_phone");
+    let res = app
+        .request(Method::POST, "/stores", Some(body.clone()), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+    assert_eq!(
+        res.json["error"]["message"],
+        "Courier delivery needs a business phone"
+    );
+    body["business_phone"] = json!("08031234567");
+    let res = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    // A legacy courier store without a phone stays editable until a delivery field is touched.
+    let id = res.json["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE stores SET business_phone_enc = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "name": "Renamed" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "pickup_area_council": "kuje" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_details_required");
+}
+
+#[sqlx::test]
+async fn new_business_phone_resets_the_courier_address_code(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Calls").await;
+    let id = created.json["id"].as_str().unwrap().to_string();
+    let code = || async {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT pickup_courier_address_code FROM stores")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The same number again keeps it.
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "business_phone": "0803 123 4567" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(code().await, Some(4242));
+    // The courier's sender contact changed: the code is refetched (Task 6).
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "business_phone": "08099887766" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(code().await, None);
 }
 
 #[sqlx::test]

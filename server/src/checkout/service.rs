@@ -2,6 +2,12 @@
 //! when the payment settles, see [`commit_reserved`]) and creates one checkout plus one order per store,
 //! then asks the payment provider for a payment page.
 //!
+//! Delivery (Part 3): the body names the buyer's address and one stored delivery
+//! option per store (see [`crate::delivery::options`]). Each order snapshots its
+//! option (method, fee, courier quote, promised date) and the address, encrypted;
+//! the checkout total is the items plus every delivery fee. The platform cut is
+//! taken on items only.
+//!
 //! Locking follows the global order `users -> stores -> products ->
 //! product_variants -> access_codes -> checkouts -> orders -> payouts`. The
 //! create transaction locks the buyer's user row, then the variants (standalone
@@ -29,6 +35,9 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     cart::service::{BUYABLE, own_store_item},
+    delivery::options::{
+        ChosenOption, DeliveryChoice, DeliveryMethod, checkout_address, chosen_options,
+    },
     error::AppError,
     limits::MAX_CHECKOUT_TOTAL_KOBO,
     money::{checked_sum, cut_kobo},
@@ -50,6 +59,16 @@ pub struct CreatedOrder {
     pub order_id: Uuid,
     pub store_name: String,
     pub items_total_kobo: i64,
+    pub delivery_fee_kobo: i64,
+}
+
+/// What the buyer asked for. Carries ids only: every amount is the server's.
+#[derive(Debug, Clone)]
+pub struct CheckoutRequest {
+    pub method: String,
+    pub address_id: Uuid,
+    /// One `{store_id, option_id}` per store in the cart.
+    pub deliveries: Vec<DeliveryChoice>,
 }
 
 /// The `POST /checkout` response body.
@@ -125,16 +144,26 @@ struct OrderDraft {
     lines: Vec<Line>,
     items_total_kobo: i64,
     platform_cut_kobo: i64,
+    delivery: ChosenOption,
 }
 
 /// Creates a checkout for the buyer's whole cart. See the module docs.
 pub async fn create(
     state: &AppState,
     buyer: Uuid,
-    method: &str,
+    request: &CheckoutRequest,
     idempotency_key: Option<&str>,
 ) -> Result<Outcome, AppError> {
+    let method = request.method.as_str();
     let settings = settings::load(&state.db).await?;
+    // The delivery address (the buyer's own, inside the FCT), snapshotted on every
+    // order as encrypted JSON: never stored or logged in plaintext.
+    let (address_enc, delivery_area) = {
+        let address = checkout_address(&state.db, &state.cipher, buyer, request.address_id).await?;
+        let json = serde_json::to_string(&address).context("serialize delivery address")?;
+        (state.cipher.encrypt(&json), address.area_council)
+    };
+
     let mut tx = state.db.begin().await.context("begin")?;
     sqlx::query(LOCK_TIMEOUT)
         .execute(&mut *tx)
@@ -259,6 +288,25 @@ pub async fn create(
         });
     }
 
+    // Exactly one valid delivery option per store, quoted for these exact lines.
+    let carts: BTreeMap<Uuid, Vec<(Uuid, i32)>> = by_store
+        .iter()
+        .map(|(store, lines)| {
+            (
+                *store,
+                lines.iter().map(|l| (l.variant_id, l.quantity)).collect(),
+            )
+        })
+        .collect();
+    let mut chosen = chosen_options(
+        &mut tx,
+        buyer,
+        request.address_id,
+        &request.deliveries,
+        &carts,
+    )
+    .await?;
+
     let mut orders: Vec<(Uuid, OrderDraft)> = Vec::with_capacity(by_store.len());
     for (store_id, lines) in by_store {
         let totals = lines
@@ -270,18 +318,36 @@ pub async fn create(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let items_total_kobo = checked_sum(&totals)?;
+        let delivery = chosen
+            .remove(&store_id)
+            .ok_or_else(|| anyhow::anyhow!("validated delivery option missing"))?;
         orders.push((
             store_id,
             OrderDraft {
+                // The platform cut applies to items only, never to delivery.
                 platform_cut_kobo: cut_kobo(items_total_kobo, settings.platform_cut_bps),
                 items_total_kobo,
                 lines,
+                delivery,
             },
         ));
     }
-    // Delivery is 0 in this plan, so the checkout total is the sum of the items totals.
-    let order_totals: Vec<i64> = orders.iter().map(|(_, o)| o.items_total_kobo).collect();
+    // The buyer pays the items plus every order's delivery fee.
+    let order_totals = orders
+        .iter()
+        .map(|(_, o)| {
+            o.items_total_kobo
+                .checked_add(o.delivery.fee_kobo)
+                .ok_or_else(too_large)
+        })
+        .collect::<Result<Vec<i64>, _>>()?;
     let total_kobo = checked_sum(&order_totals)?;
+    let delivery_kobo = checked_sum(
+        &orders
+            .iter()
+            .map(|(_, o)| o.delivery.fee_kobo)
+            .collect::<Vec<_>>(),
+    )?;
     if total_kobo > MAX_CHECKOUT_TOTAL_KOBO {
         return Err(too_large());
     }
@@ -328,10 +394,20 @@ pub async fn create(
         created.ok_or_else(|| anyhow::anyhow!("could not allocate a checkout reference"))?;
 
     for (store_id, order) in &orders {
+        let d = &order.delivery;
+        // The courier quote is what the courier will charge (ruling T6f).
+        let courier_quote = match d.method {
+            DeliveryMethod::Courier => d.charged_kobo,
+            DeliveryMethod::SelfDelivery => None,
+        };
         let order_id: Uuid = sqlx::query_scalar(
             "INSERT INTO orders (checkout_id, store_id, buyer_id, items_total_kobo, \
-                                 platform_cut_bps, platform_cut_kobo) \
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+                                 platform_cut_bps, platform_cut_kobo, delivery_fee_kobo, \
+                                 delivery_method, delivery_option_id, delivery_address_enc, \
+                                 delivery_area, promised_date, courier_request_token, \
+                                 courier_id, service_code, courier_quote_kobo) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+             RETURNING id",
         )
         .bind(checkout_id)
         .bind(store_id)
@@ -339,6 +415,16 @@ pub async fn create(
         .bind(order.items_total_kobo)
         .bind(settings.platform_cut_bps)
         .bind(order.platform_cut_kobo)
+        .bind(d.fee_kobo)
+        .bind(d.method)
+        .bind(d.id)
+        .bind(&address_enc)
+        .bind(delivery_area)
+        .bind(d.promised_date)
+        .bind(courier_quote.and(d.request_token.as_deref()))
+        .bind(courier_quote.and(d.courier_id.as_deref()))
+        .bind(courier_quote.and(d.service_code.as_deref()))
+        .bind(courier_quote)
         .fetch_one(&mut *tx)
         .await
         .context("insert order")?;
@@ -365,7 +451,12 @@ pub async fn create(
         "checkout.created",
         "checkout",
         Some(checkout_id),
-        json!({ "orders": orders.len(), "total_kobo": total_kobo, "method": method }),
+        json!({
+            "orders": orders.len(),
+            "total_kobo": total_kobo,
+            "delivery_kobo": delivery_kobo,
+            "method": method
+        }),
     )
     .await?;
     tx.commit().await.map_err(db_err("commit checkout"))?;
@@ -487,8 +578,9 @@ async fn load_created(conn: &mut PgConnection, checkout_id: Uuid) -> Result<Crea
             .fetch_one(&mut *conn)
             .await
             .context("load checkout")?;
-    let orders: Vec<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT o.id, s.name, o.items_total_kobo FROM orders o JOIN stores s ON s.id = o.store_id \
+    let orders: Vec<(Uuid, String, i64, i64)> = sqlx::query_as(
+        "SELECT o.id, s.name, o.items_total_kobo, o.delivery_fee_kobo \
+         FROM orders o JOIN stores s ON s.id = o.store_id \
          WHERE o.checkout_id = $1 ORDER BY s.name, o.id",
     )
     .bind(checkout_id)
@@ -502,11 +594,14 @@ async fn load_created(conn: &mut PgConnection, checkout_id: Uuid) -> Result<Crea
         total_kobo,
         orders: orders
             .into_iter()
-            .map(|(order_id, store_name, items_total_kobo)| CreatedOrder {
-                order_id,
-                store_name,
-                items_total_kobo,
-            })
+            .map(
+                |(order_id, store_name, items_total_kobo, delivery_fee_kobo)| CreatedOrder {
+                    order_id,
+                    store_name,
+                    items_total_kobo,
+                    delivery_fee_kobo,
+                },
+            )
             .collect(),
     })
 }

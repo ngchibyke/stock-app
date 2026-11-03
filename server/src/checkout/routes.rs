@@ -7,8 +7,10 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::service::{self, CheckoutView, Created, Outcome};
-use crate::{AppState, auth::AuthUser, error::AppError, extract::AppJson};
+use super::service::{self, CheckoutRequest, CheckoutView, Created, Outcome};
+use crate::{
+    AppState, auth::AuthUser, delivery::options::DeliveryChoice, error::AppError, extract::AppJson,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -18,10 +20,15 @@ pub fn router() -> Router<AppState> {
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
+/// `{method, address_id, deliveries: [{store_id, option_id}]}`: one delivery option
+/// per store in the cart, from `POST /checkout/delivery-options`. No amounts: the
+/// server prices everything.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckoutBody {
     method: String,
+    address_id: Uuid,
+    deliveries: Vec<DeliveryChoice>,
 }
 
 fn parse_id(key: &str) -> Result<Uuid, AppError> {
@@ -56,7 +63,12 @@ async fn create(
     AppJson(body): AppJson<CheckoutBody>,
 ) -> Result<(StatusCode, Json<Created>), AppError> {
     let key = idempotency_key(&headers)?;
-    match service::create(&state, user.id, &body.method, key.as_deref()).await? {
+    let request = CheckoutRequest {
+        method: body.method,
+        address_id: body.address_id,
+        deliveries: body.deliveries,
+    };
+    match service::create(&state, user.id, &request, key.as_deref()).await? {
         Outcome::Created(c) => Ok((StatusCode::CREATED, Json(c))),
         // A replay answers exactly like the original request.
         Outcome::Replayed(c) => Ok((StatusCode::CREATED, Json(c))),

@@ -40,6 +40,25 @@ pub fn promised_date(paid_at: OffsetDateTime, cutoff_minutes: i32, holidays: &[D
     day
 }
 
+/// The day a courier is asked to collect a parcel quoted at `now`: today
+/// (Africa/Lagos) when it is before the cut-off and a delivery day, otherwise the
+/// next delivery day. Sundays and `holidays` are skipped, as in [`promised_date`].
+pub fn next_pickup_date(now: OffsetDateTime, cutoff_minutes: i32, holidays: &[Date]) -> Date {
+    let local = now.to_offset(LAGOS);
+    let minutes = i32::from(local.hour()) * 60 + i32::from(local.minute());
+    let mut day = local.date();
+    if minutes < cutoff_minutes && is_delivery_day(day, holidays) {
+        return day;
+    }
+    for _ in 0..MAX_SKIP {
+        day = day.next_day().expect("date in range");
+        if is_delivery_day(day, holidays) {
+            break;
+        }
+    }
+    day
+}
+
 /// Holidays the owner maintains in `bank_holidays` (from two days back onwards).
 pub async fn load_holidays(db: &PgPool) -> Result<Vec<Date>, AppError> {
     let from = OffsetDateTime::now_utc().to_offset(LAGOS).date() - Duration::days(2);
@@ -84,6 +103,41 @@ mod tests {
             promised_date(paid, 1080, &[date!(2026 - 11 - 02), date!(2026 - 11 - 03)]),
             date!(2026 - 11 - 04)
         );
+    }
+
+    #[test]
+    fn pickup_is_today_before_cutoff_on_a_delivery_day() {
+        let now = datetime!(2026-11-02 17:59 +1);
+        assert_eq!(next_pickup_date(now, 1080, &[]), date!(2026 - 11 - 02));
+        // Saturday is a delivery day.
+        let sat = datetime!(2026-10-31 09:00 +1);
+        assert_eq!(next_pickup_date(sat, 1080, &[]), date!(2026 - 10 - 31));
+    }
+
+    #[test]
+    fn pickup_after_cutoff_is_the_next_delivery_day() {
+        // The exact cut-off minute counts as after.
+        let now = datetime!(2026-11-02 18:00 +1);
+        assert_eq!(next_pickup_date(now, 1080, &[]), date!(2026 - 11 - 03));
+        // Saturday evening: Sunday skipped.
+        let sat = datetime!(2026-10-31 19:00 +1);
+        assert_eq!(next_pickup_date(sat, 1080, &[]), date!(2026 - 11 - 02));
+    }
+
+    #[test]
+    fn pickup_skips_sundays_and_holidays() {
+        // Sunday morning, before the cut-off: Monday.
+        let sun = datetime!(2026-11-01 08:00 +1);
+        assert_eq!(next_pickup_date(sun, 1080, &[]), date!(2026 - 11 - 02));
+        // A holiday today and tomorrow: the day after.
+        let mon = datetime!(2026-11-02 08:00 +1);
+        assert_eq!(
+            next_pickup_date(mon, 1080, &[date!(2026 - 11 - 02), date!(2026 - 11 - 03)]),
+            date!(2026 - 11 - 04)
+        );
+        // Lagos time: 23:30 UTC Monday is 00:30 Tuesday local.
+        let late = datetime!(2026-11-02 23:30 UTC);
+        assert_eq!(next_pickup_date(late, 1080, &[]), date!(2026 - 11 - 03));
     }
 
     #[test]
