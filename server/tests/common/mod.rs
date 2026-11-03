@@ -557,11 +557,18 @@ impl TestApp {
 
     /// The default checkout body (ruling P4): the buyer's address and, for every
     /// store in the cart, its self-delivery option (fee 0 on stores made by
-    /// `make_active_store_with_product`). When options cannot be quoted (an empty
-    /// cart, say) `deliveries` is empty, so checkout answers with its own error.
+    /// `make_active_store_with_product`). For an empty cart `deliveries` is empty,
+    /// so checkout answers with its own `cart_empty`; any other quote failure fails
+    /// the test here, where its cause is visible.
     pub async fn checkout_body(&self, token: &str, method: &str) -> Value {
         let address_id = self.buyer_address(token).await;
         let res = self.delivery_options(token, address_id).await;
+        assert!(
+            res.status == 200 || res.json["error"]["code"] == "cart_empty",
+            "delivery options: {} {}",
+            res.status,
+            res.json
+        );
         let mut deliveries = Vec::new();
         if res.status == 200 {
             for store in res.json["stores"].as_array().unwrap() {

@@ -23,15 +23,21 @@ CREATE TABLE delivery_options (
     courier_name     text NULL,
     delivery_eta     text NULL,
     charged_kobo     bigint NULL CHECK (charged_kobo >= 0),
+    -- The store (sender) address code the courier quote was made from.
+    courier_sender_code bigint NULL,
     promised_date    date NOT NULL,
     expires_at       timestamptz NOT NULL,
     created_at       timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT delivery_options_courier_fields CHECK (
         (method = 'courier') = (courier_id IS NOT NULL AND service_code IS NOT NULL
-                                AND request_token IS NOT NULL AND charged_kobo IS NOT NULL)
+                                AND request_token IS NOT NULL AND charged_kobo IS NOT NULL
+                                AND courier_sender_code IS NOT NULL)
     )
 );
 CREATE INDEX delivery_options_buyer_idx ON delivery_options (buyer_id, expires_at);
+-- Reusing a still-valid quote, and the "quote already used" check (one quote = one token).
+CREATE INDEX delivery_options_quote_idx
+    ON delivery_options (buyer_id, store_id, address_id, cart_fingerprint, created_at);
 
 -- NULL delivery_method: an order from before delivery existed (part 2).
 ALTER TABLE orders
@@ -46,6 +52,8 @@ ALTER TABLE orders
     ADD COLUMN courier_id            text NULL,
     ADD COLUMN service_code          text NULL,
     ADD COLUMN courier_quote_kobo    bigint NULL CHECK (courier_quote_kobo >= 0),
+    -- The quote's sender address code: booking refuses it if the store has moved since.
+    ADD COLUMN courier_sender_code   bigint NULL,
     ADD CONSTRAINT orders_delivery_details CHECK (
         delivery_method IS NULL
         OR (delivery_address_enc IS NOT NULL AND delivery_area IS NOT NULL
@@ -54,7 +62,8 @@ ALTER TABLE orders
     ADD CONSTRAINT orders_courier_details CHECK (
         (delivery_method IS DISTINCT FROM 'courier')
         OR (courier_request_token IS NOT NULL AND courier_id IS NOT NULL
-            AND service_code IS NOT NULL AND courier_quote_kobo IS NOT NULL)
+            AND service_code IS NOT NULL AND courier_quote_kobo IS NOT NULL
+            AND courier_sender_code IS NOT NULL)
     );
 CREATE INDEX orders_delivery_option_idx ON orders (delivery_option_id)
     WHERE delivery_option_id IS NOT NULL;

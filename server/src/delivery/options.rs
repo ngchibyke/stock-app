@@ -15,10 +15,16 @@
 //!   options are written afterwards. A provider failure leaves that store with
 //!   self-delivery only; a store left with no option says `no_delivery_option`.
 //!   Courier errors are logged by class only (their `Display` carries no detail).
+//! - Quote cost: an unexpired, unused courier quote for the same buyer, store,
+//!   address, cart and sender code is reused without a provider call. Fresh quotes
+//!   are capped at [`MAX_QUOTES_PER_HOUR`] per buyer (429 `too_many_attempts`).
 //!
 //! An option is valid at checkout only for the same buyer, store and address,
-//! before it expires (`courier_quote_ttl_minutes`), and while the store's cart
-//! lines are unchanged (`cart_fingerprint`); otherwise 422 `delivery_option_invalid`.
+//! before it expires (`courier_quote_ttl_minutes`), while the store's cart lines
+//! are unchanged (`cart_fingerprint`), and while unused: an option (for a courier,
+//! its whole quote) is single-use once an order that is not cancelled points at
+//! it. The store must also still offer the method (and, for a courier, still have
+//! the sender code the quote was made from). Otherwise 422 `delivery_option_invalid`.
 //!
 //! Data protection: option rows hold ids and prices only. The buyer's name, phone
 //! and address line go to the courier provider for address validation (needed for
@@ -48,6 +54,7 @@ use crate::{
     crypto::FieldCipher,
     error::AppError,
     extract::AppJson,
+    limits::MAX_CHECKOUT_TOTAL_KOBO,
     products::service::unit_price,
     settings,
     stores::service::{StoreDelivery, delivery_profile},
@@ -57,6 +64,11 @@ use crate::{
 pub const MAX_COURIER_OPTIONS: usize = 3;
 /// What a store with no deliverable option reports.
 pub const NO_DELIVERY_OPTION: &str = "no_delivery_option";
+/// Fresh courier quote requests one buyer may make per rolling hour; reused
+/// quotes do not count. Every request costs calls on the platform's courier key.
+pub const MAX_QUOTES_PER_HOUR: i64 = 20;
+/// A quote expiring sooner than this is not reused: the buyer needs time to pay.
+const REUSE_MARGIN_MINUTES: i32 = 2;
 
 /// How an order is delivered. Postgres `delivery_method`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -239,6 +251,8 @@ enum ReceiverCode {
 struct CourierQuote {
     request_token: String,
     rates: Vec<Rate>,
+    /// The store (sender) address code the quote was made from.
+    sender_code: i64,
     /// A store address code fetched now, to cache after the provider calls.
     new_store_code: Option<(i64, ContactAddress)>,
 }
@@ -312,6 +326,8 @@ async fn quote_courier(
     match provider.quote(sender, receiver_code, pickup, &parcel).await {
         Ok(quote) => {
             let mut rates = quote.rates;
+            // A charge no checkout could carry is dropped, never a failed request.
+            rates.retain(|r| (0..=MAX_CHECKOUT_TOTAL_KOBO).contains(&r.charged_kobo));
             rates.sort_by(|a, b| {
                 (a.charged_kobo, &a.courier_name, &a.service_code).cmp(&(
                     b.charged_kobo,
@@ -323,6 +339,7 @@ async fn quote_courier(
             Some(CourierQuote {
                 request_token: quote.request_token,
                 rates,
+                sender_code: sender,
                 new_store_code,
             })
         }
@@ -332,6 +349,7 @@ async fn quote_courier(
             new_store_code.map(|store_code| CourierQuote {
                 request_token: String::new(),
                 rates: Vec::new(),
+                sender_code: sender,
                 new_store_code: Some(store_code),
             })
         }
@@ -377,7 +395,82 @@ async fn cache_store_code(
 struct NewOption {
     method: DeliveryMethod,
     fee_kobo: i64,
-    rate: Option<(String, Rate)>,
+    /// Courier only: the quote's request token, the rate and the sender address code.
+    rate: Option<(String, Rate, i64)>,
+}
+
+/// SQL: whether option `d` is used. It is used when an order that is not
+/// cancelled points at it, or, for a courier option, at any courier option of
+/// the same quote (one quote, one request token: never booked twice).
+const USED: &str = "EXISTS (SELECT 1 FROM orders o \
+     JOIN delivery_options u ON u.id = o.delivery_option_id \
+     WHERE o.status <> 'cancelled' \
+       AND (u.id = d.id OR (d.method = 'courier' AND u.method = 'courier' \
+            AND u.buyer_id = d.buyer_id AND u.store_id = d.store_id \
+            AND u.created_at = d.created_at)))";
+
+/// The latest unexpired, unused courier quote for this buyer, store, address and
+/// cart, if it was quoted from the store's current sender address code: reused
+/// instead of calling the provider again.
+async fn reusable_courier(
+    db: &PgPool,
+    buyer: Uuid,
+    store_id: Uuid,
+    address_id: Uuid,
+    fingerprint: &str,
+    sender_code: i64,
+) -> Result<Vec<OptionView>, AppError> {
+    type Reused = (Uuid, i64, Option<String>, Option<String>, Date);
+    let rows: Vec<Reused> = sqlx::query_as(&format!(
+        "SELECT d.id, d.fee_kobo, d.courier_name, d.delivery_eta, d.promised_date \
+         FROM delivery_options d \
+         WHERE d.buyer_id = $1 AND d.store_id = $2 AND d.address_id = $3 \
+           AND d.cart_fingerprint = $4 AND d.method = 'courier' \
+           AND d.courier_sender_code = $5 \
+           AND d.expires_at > now() + make_interval(mins => {REUSE_MARGIN_MINUTES}) \
+           AND d.created_at = (SELECT max(x.created_at) FROM delivery_options x \
+                               WHERE x.buyer_id = $1 AND x.store_id = $2 \
+                                 AND x.address_id = $3 AND x.cart_fingerprint = $4 \
+                                 AND x.method = 'courier') \
+           AND NOT {USED} \
+         ORDER BY d.fee_kobo, d.courier_name, d.id"
+    ))
+    .bind(buyer)
+    .bind(store_id)
+    .bind(address_id)
+    .bind(fingerprint)
+    .bind(sender_code)
+    .fetch_all(db)
+    .await
+    .context("find reusable courier options")?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, fee_kobo, courier_name, delivery_eta, promised)| OptionView {
+                id,
+                method: DeliveryMethod::Courier,
+                fee_kobo,
+                courier_name,
+                delivery_eta,
+                promised_date: promised.to_string(),
+            },
+        )
+        .collect())
+}
+
+/// Fresh courier quotes this buyer asked for in the last hour (requests that
+/// reached the provider), counted from the audit trail.
+async fn recent_quotes(db: &PgPool, buyer: Uuid) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log \
+         WHERE action = 'delivery.options_quoted' AND actor_id = $1 \
+           AND at > now() - interval '1 hour' \
+           AND (detail->>'courier_quotes')::int > 0",
+    )
+    .bind(buyer)
+    .fetch_one(db)
+    .await
+    .context("count courier quotes")?)
 }
 
 async fn quote_options(
@@ -386,6 +479,18 @@ async fn quote_options(
     AppJson(body): AppJson<OptionsBody>,
 ) -> Result<Json<OptionsResponse>, AppError> {
     Ok(Json(options_for(&state, user.id, body.address_id).await?))
+}
+
+/// What one store will offer: fresh options to insert, reused courier options,
+/// and whether the courier provider must be asked.
+struct StorePlan {
+    store_id: Uuid,
+    cart: StoreCart,
+    fingerprint: String,
+    profile: StoreDelivery,
+    new: Vec<NewOption>,
+    reused: Vec<OptionView>,
+    needs_quote: bool,
 }
 
 /// Quotes and stores the delivery options for the buyer's cart (module docs).
@@ -402,59 +507,88 @@ pub async fn options_for(
     let promised = promised_date(now, settings.delivery_cutoff_minutes, &holidays);
     let pickup = next_pickup_date(now, settings.delivery_cutoff_minutes, &holidays);
 
-    // Provider calls first, with no transaction open.
-    let mut receiver = match address.courier_address_code {
-        Some(code) => ReceiverCode::Known(code),
-        None => ReceiverCode::Unknown,
-    };
-    let mut planned: Vec<(Uuid, StoreCart, Vec<NewOption>)> = Vec::with_capacity(carts.len());
-    let mut store_codes: Vec<(Uuid, i64, ContactAddress)> = Vec::new();
+    // What each store offers; a still-valid courier quote is reused, not re-asked.
+    let mut plans: Vec<StorePlan> = Vec::with_capacity(carts.len());
     for (store_id, cart) in carts {
-        let profile = delivery_profile(&state.db, &state.cipher, store_id).await?;
-        let mut options = Vec::new();
+        let profile = match delivery_profile(&state.db, &state.cipher, store_id).await {
+            Ok(p) => p,
+            // Deleted since the cart was read: nothing to offer, checkout refuses it.
+            Err(AppError::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
+        let fingerprint = cart_fingerprint(&cart.lines);
+        let mut new = Vec::new();
         if profile.self_delivery
             && let Some(fee) = profile.self_fee_kobo
         {
-            options.push(NewOption {
+            new.push(NewOption {
                 method: DeliveryMethod::SelfDelivery,
                 fee_kobo: fee,
                 rate: None,
             });
         }
-        if profile.courier
-            && let Some(provider) = &state.courier
-            && let Some(quote) = quote_courier(
+        let courier = state.courier.is_some() && courier_offered(&profile);
+        let mut reused = Vec::new();
+        if courier && let Some(sender) = profile.pickup_courier_address_code {
+            reused = reusable_courier(&state.db, buyer, store_id, address.id, &fingerprint, sender)
+                .await?;
+        }
+        plans.push(StorePlan {
+            needs_quote: courier && reused.is_empty(),
+            store_id,
+            cart,
+            fingerprint,
+            profile,
+            new,
+            reused,
+        });
+    }
+    let quotes = plans.iter().filter(|p| p.needs_quote).count();
+    if quotes > 0 && recent_quotes(&state.db, buyer).await? >= MAX_QUOTES_PER_HOUR {
+        return Err(AppError::TooManyRequests("too_many_attempts"));
+    }
+
+    // Provider calls, with no transaction open.
+    let mut receiver = match address.courier_address_code {
+        Some(code) => ReceiverCode::Known(code),
+        None => ReceiverCode::Unknown,
+    };
+    let mut store_codes: Vec<(Uuid, i64, ContactAddress)> = Vec::new();
+    if let Some(provider) = &state.courier {
+        for plan in plans.iter_mut().filter(|p| p.needs_quote) {
+            let Some(quote) = quote_courier(
                 provider.as_ref(),
-                &cart.name,
-                &profile,
+                &plan.cart.name,
+                &plan.profile,
                 &address,
                 &mut receiver,
-                &cart.items,
+                &plan.cart.items,
                 settings.courier_category_id,
                 pickup,
             )
             .await
-        {
+            else {
+                continue;
+            };
             if let Some((code, sent)) = quote.new_store_code {
-                store_codes.push((store_id, code, sent));
+                store_codes.push((plan.store_id, code, sent));
             }
             for rate in quote.rates {
-                options.push(NewOption {
+                plan.new.push(NewOption {
                     method: DeliveryMethod::Courier,
                     // Ruling T6f: the buyer pays what the courier will charge.
                     fee_kobo: rate.charged_kobo,
-                    rate: Some((quote.request_token.clone(), rate)),
+                    rate: Some((quote.request_token.clone(), rate, quote.sender_code)),
                 });
             }
         }
-        planned.push((store_id, cart, options));
     }
 
-    // The caches, after every provider call.
+    // The caches, after every provider call. Best effort: a failure here only
+    // costs a provider call next time.
     if address.courier_address_code.is_none()
         && let ReceiverCode::Known(code) = receiver
-    {
-        sqlx::query(
+        && let Err(e) = sqlx::query(
             "UPDATE buyer_addresses SET courier_address_code = $3 \
              WHERE id = $1 AND user_id = $2 AND courier_address_code IS NULL",
         )
@@ -463,10 +597,13 @@ pub async fn options_for(
         .bind(code)
         .execute(&state.db)
         .await
-        .context("cache buyer courier code")?;
+    {
+        tracing::warn!(error = %e, "could not cache the buyer's courier address code");
     }
     for (store_id, code, sent) in &store_codes {
-        cache_store_code(state, *store_id, *code, sent).await?;
+        if let Err(e) = cache_store_code(state, *store_id, *code, sent).await {
+            tracing::warn!(error = %e, "could not cache the store's courier address code");
+        }
     }
 
     let mut tx = state.db.begin().await.context("begin")?;
@@ -480,37 +617,37 @@ pub async fn options_for(
     .execute(&mut *tx)
     .await
     .context("prune delivery options")?;
-    let mut stores = Vec::with_capacity(planned.len());
+    let mut stores = Vec::with_capacity(plans.len());
     let mut offered = 0usize;
-    for (store_id, cart, options) in planned {
-        let fingerprint = cart_fingerprint(&cart.lines);
-        let mut views = Vec::with_capacity(options.len());
-        for o in options {
-            let (token, rate) = match &o.rate {
-                Some((token, rate)) => (Some(token.as_str()), Some(rate)),
-                None => (None, None),
+    for plan in plans {
+        let mut views = Vec::with_capacity(plan.new.len() + plan.reused.len());
+        for o in plan.new {
+            let (token, rate, sender) = match &o.rate {
+                Some((token, rate, sender)) => (Some(token.as_str()), Some(rate), Some(*sender)),
+                None => (None, None, None),
             };
             let id: Uuid = sqlx::query_scalar(
                 "INSERT INTO delivery_options \
                  (buyer_id, store_id, address_id, method, fee_kobo, cart_fingerprint, \
                   courier_id, service_code, request_token, courier_name, delivery_eta, \
-                  charged_kobo, promised_date, expires_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-                         now() + make_interval(mins => $14)) \
+                  charged_kobo, courier_sender_code, promised_date, expires_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+                         now() + make_interval(mins => $15)) \
                  RETURNING id",
             )
             .bind(buyer)
-            .bind(store_id)
+            .bind(plan.store_id)
             .bind(address.id)
             .bind(o.method)
             .bind(o.fee_kobo)
-            .bind(&fingerprint)
+            .bind(&plan.fingerprint)
             .bind(rate.map(|r| r.courier_id.as_str()))
             .bind(rate.map(|r| r.service_code.as_str()))
             .bind(token)
             .bind(rate.map(|r| r.courier_name.as_str()))
             .bind(rate.and_then(|r| r.delivery_eta.as_deref()))
             .bind(rate.map(|r| r.charged_kobo))
+            .bind(sender)
             .bind(promised)
             .bind(settings.courier_quote_ttl_minutes)
             .fetch_one(&mut *tx)
@@ -525,10 +662,11 @@ pub async fn options_for(
                 promised_date: promised.to_string(),
             });
         }
+        views.extend(plan.reused);
         offered += views.len();
         stores.push(StoreOptions {
-            store_id,
-            store_name: cart.name,
+            store_id: plan.store_id,
+            store_name: plan.cart.name,
             unavailable: views.is_empty().then_some(NO_DELIVERY_OPTION),
             options: views,
         });
@@ -540,11 +678,22 @@ pub async fn options_for(
         "delivery.options_quoted",
         "buyer_address",
         Some(address.id),
-        json!({ "stores": stores.len(), "options": offered, "stores_unavailable": unavailable }),
+        json!({
+            "stores": stores.len(),
+            "options": offered,
+            "stores_unavailable": unavailable,
+            "courier_quotes": quotes
+        }),
     )
     .await?;
     tx.commit().await.context("commit delivery options")?;
     Ok(OptionsResponse { stores })
+}
+
+/// Whether a store offers courier delivery: switched on, with the business phone
+/// (sender contact) and pickup area the courier needs (ruling T6d).
+fn courier_offered(profile: &StoreDelivery) -> bool {
+    profile.courier && profile.business_phone.is_some() && profile.pickup_area.is_some()
 }
 
 /// One `{store_id, option_id}` of the checkout body.
@@ -565,6 +714,8 @@ pub struct ChosenOption {
     pub service_code: Option<String>,
     pub request_token: Option<String>,
     pub charged_kobo: Option<i64>,
+    /// Courier only: the store address code the quote was made from.
+    pub sender_code: Option<i64>,
     pub promised_date: Date,
 }
 
@@ -581,8 +732,10 @@ struct OptionRow {
     service_code: Option<String>,
     request_token: Option<String>,
     charged_kobo: Option<i64>,
+    courier_sender_code: Option<i64>,
     promised_date: Date,
     live: bool,
+    used: bool,
 }
 
 fn option_invalid() -> AppError {
@@ -594,9 +747,11 @@ fn option_invalid() -> AppError {
 
 /// Validates the checkout's choices against the cart (`store -> its lines`):
 /// exactly one live option per store, the buyer's own, quoted for this address
-/// and for these exact lines. Unknown, foreign, expired, mismatched, duplicate or
-/// extra choices are 422 `delivery_option_invalid`; a store without a choice is
-/// 422 `delivery_option_required`.
+/// and for these exact lines, and not used yet: an option is single-use (see
+/// [`USED`]). Unknown, foreign, expired, used, mismatched, duplicate or extra
+/// choices are 422 `delivery_option_invalid`; a store without a choice is 422
+/// `delivery_option_required`. Callers hold the buyer's users-row lock, which
+/// serialises this check against the buyer's other checkouts.
 pub async fn chosen_options(
     conn: &mut PgConnection,
     buyer: Uuid,
@@ -611,12 +766,13 @@ pub async fn chosen_options(
         }
     }
     let ids: Vec<Uuid> = choices.iter().map(|c| c.option_id).collect();
-    let mut rows: HashMap<Uuid, OptionRow> = sqlx::query_as::<_, OptionRow>(
-        "SELECT id, buyer_id, store_id, address_id, method, fee_kobo, cart_fingerprint, \
-                courier_id, service_code, request_token, charged_kobo, promised_date, \
-                expires_at > now() AS live \
-         FROM delivery_options WHERE id = ANY($1)",
-    )
+    let mut rows: HashMap<Uuid, OptionRow> = sqlx::query_as::<_, OptionRow>(&format!(
+        "SELECT d.id, d.buyer_id, d.store_id, d.address_id, d.method, d.fee_kobo, \
+                d.cart_fingerprint, d.courier_id, d.service_code, d.request_token, \
+                d.charged_kobo, d.courier_sender_code, d.promised_date, \
+                d.expires_at > now() AS live, {USED} AS used \
+         FROM delivery_options d WHERE d.id = ANY($1)"
+    ))
     .bind(&ids)
     .fetch_all(&mut *conn)
     .await
@@ -632,6 +788,7 @@ pub async fn chosen_options(
             && row.store_id == c.store_id
             && row.address_id == address_id
             && row.live
+            && !row.used
             && row.cart_fingerprint == cart_fingerprint(lines);
         if !valid {
             return Err(option_invalid());
@@ -646,6 +803,7 @@ pub async fn chosen_options(
                 service_code: row.service_code,
                 request_token: row.request_token,
                 charged_kobo: row.charged_kobo,
+                sender_code: row.courier_sender_code,
                 promised_date: row.promised_date,
             },
         );
@@ -657,6 +815,38 @@ pub async fn chosen_options(
         ));
     }
     Ok(chosen)
+}
+
+/// Re-checks, at checkout, that every chosen store still offers the chosen
+/// method (a seller may have switched it off since the quote), and that a
+/// courier quote was made from the store's current pickup address code (a moved
+/// pickup resets it). Otherwise 422 `delivery_option_invalid`. No network call.
+pub async fn still_offered(
+    state: &AppState,
+    chosen: &HashMap<Uuid, ChosenOption>,
+) -> Result<(), AppError> {
+    for (store_id, option) in chosen {
+        let profile = match delivery_profile(&state.db, &state.cipher, *store_id).await {
+            Ok(p) => p,
+            Err(AppError::NotFound) => return Err(option_invalid()),
+            Err(e) => return Err(e),
+        };
+        let offered = match option.method {
+            DeliveryMethod::SelfDelivery => {
+                profile.self_delivery && profile.self_fee_kobo.is_some()
+            }
+            DeliveryMethod::Courier => {
+                state.courier.is_some()
+                    && courier_offered(&profile)
+                    && option.sender_code.is_some()
+                    && profile.pickup_courier_address_code == option.sender_code
+            }
+        };
+        if !offered {
+            return Err(option_invalid());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

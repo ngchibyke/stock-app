@@ -37,6 +37,7 @@ use crate::{
     cart::service::{BUYABLE, own_store_item},
     delivery::options::{
         ChosenOption, DeliveryChoice, DeliveryMethod, checkout_address, chosen_options,
+        still_offered,
     },
     error::AppError,
     limits::MAX_CHECKOUT_TOTAL_KOBO,
@@ -306,6 +307,8 @@ pub async fn create(
         &carts,
     )
     .await?;
+    // A store may have switched the method off (or moved its pickup) since the quote.
+    still_offered(state, &chosen).await?;
 
     let mut orders: Vec<(Uuid, OrderDraft)> = Vec::with_capacity(by_store.len());
     for (store_id, lines) in by_store {
@@ -405,8 +408,10 @@ pub async fn create(
                                  platform_cut_bps, platform_cut_kobo, delivery_fee_kobo, \
                                  delivery_method, delivery_option_id, delivery_address_enc, \
                                  delivery_area, promised_date, courier_request_token, \
-                                 courier_id, service_code, courier_quote_kobo) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+                                 courier_id, service_code, courier_quote_kobo, \
+                                 courier_sender_code) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
+                     $17) \
              RETURNING id",
         )
         .bind(checkout_id)
@@ -425,6 +430,7 @@ pub async fn create(
         .bind(courier_quote.and(d.courier_id.as_deref()))
         .bind(courier_quote.and(d.service_code.as_deref()))
         .bind(courier_quote)
+        .bind(courier_quote.and(d.sender_code))
         .fetch_one(&mut *tx)
         .await
         .context("insert order")?;

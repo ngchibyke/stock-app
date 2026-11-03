@@ -148,7 +148,110 @@ async fn options_offer_self_and_courier_with_promised_date(pool: PgPool) {
     let res = app.delivery_options(&buyer, address).await;
     assert_eq!(res.status, 200, "{}", res.json);
     assert_eq!(codes().await, first, "cached codes are reused");
+    // The unused, unexpired quote is reused: no second provider call.
+    assert_eq!(app.courier.quote_calls(), 1);
+    let sender: i64 = sqlx::query_scalar(
+        "SELECT DISTINCT courier_sender_code FROM delivery_options WHERE method = 'courier'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(Some(sender), first.1, "the quote records its sender code");
+}
+
+#[sqlx::test]
+async fn options_reuse_a_valid_courier_quote(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = app
+        .make_active_store_with_product(SELLER, "Mama Put", 100_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let ids = |res: &common::TestResponse, method: &str| -> Vec<String> {
+        res.json["stores"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["method"] == method)
+            .map(|o| o["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let first = app.delivery_options(&buyer, address).await;
+    assert_eq!(first.status, 200, "{}", first.json);
+    let again = app.delivery_options(&buyer, address).await;
+    assert_eq!(again.status, 200, "{}", again.json);
+    assert_eq!(app.courier.quote_calls(), 1);
+    assert_eq!(ids(&again, "courier"), ids(&first, "courier"));
+    assert_eq!(ids(&again, "self").len(), 1);
+
+    // A changed cart is a new quote.
+    app.set_cart(&buyer, l.variant_id, 2).await;
+    let changed = app.delivery_options(&buyer, address).await;
+    assert_eq!(changed.status, 200, "{}", changed.json);
     assert_eq!(app.courier.quote_calls(), 2);
+    assert_ne!(ids(&changed, "courier"), ids(&first, "courier"));
+
+    // A quote used by a checkout is never offered again.
+    let courier: Uuid = ids(&changed, "courier")[0].parse().unwrap();
+    let res = app
+        .checkout_with(&buyer, "mono_directpay", address, &[(l.store_id, courier)])
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let after = app.delivery_options(&buyer, address).await;
+    assert_eq!(after.status, 200, "{}", after.json);
+    assert_eq!(app.courier.quote_calls(), 3);
+    assert!(!ids(&after, "courier").contains(&courier.to_string()));
+}
+
+#[sqlx::test]
+async fn fresh_quotes_are_capped_per_hour(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = app
+        .make_active_store_with_product(SELLER, "Mama Put", 100_000, 5)
+        .await;
+    let (buyer_id, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    assert_eq!(app.delivery_options(&buyer, address).await.status, 200);
+    // 19 more fresh quotes in the last hour (20 in all); older ones do not count.
+    sqlx::query(
+        "INSERT INTO audit_log (actor_id, action, subject_type, subject_id, detail, at) \
+         SELECT $1, 'delivery.options_quoted', 'buyer_address', $2, \
+                '{\"courier_quotes\": 1}'::jsonb, now() - make_interval(mins => g) \
+         FROM generate_series(1, 19) g \
+         UNION ALL \
+         SELECT $1, 'delivery.options_quoted', 'buyer_address', $2, \
+                '{\"courier_quotes\": 1}'::jsonb, now() - interval '2 hours' \
+         FROM generate_series(1, 5)",
+    )
+    .bind(buyer_id)
+    .bind(address)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    // Reusing the valid quote costs nothing and is not capped.
+    assert_eq!(app.delivery_options(&buyer, address).await.status, 200);
+    // A fresh quote is refused before any provider call.
+    app.set_cart(&buyer, l.variant_id, 2).await;
+    let res = app.delivery_options(&buyer, address).await;
+    assert_eq!(res.status, 429, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "too_many_attempts");
+    assert_eq!(app.courier.quote_calls(), 1);
+    // A self-delivery-only store needs no provider call and is not capped.
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{}", l.store_id),
+            Some(json!({ "delivery_courier": false })),
+            Some(&l.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(app.delivery_options(&buyer, address).await.status, 200);
+    assert_eq!(app.courier.quote_calls(), 1);
 }
 
 #[sqlx::test]

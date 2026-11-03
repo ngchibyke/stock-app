@@ -538,8 +538,21 @@ async fn idempotent_checkout_returns_same(pool: PgPool) {
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(res.json["error"]["code"], "idempotency_key_mismatch");
 
-    // A different key is a new checkout.
-    assert_eq!(send("order-2", METHOD).await.status, 201);
+    // A different key is a new checkout (with a fresh delivery option: options are single-use).
+    let res = send("order-2", METHOD).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "delivery_option_invalid");
+    let fresh = app.checkout_body(&buyer, METHOD).await;
+    let res = app
+        .request_with_headers(
+            Method::POST,
+            "/checkout",
+            Some(fresh),
+            Some(&buyer),
+            &[("idempotency-key", "order-2")],
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
 
     // Bad keys are refused.
     let res = send("has space", METHOD).await;
@@ -989,6 +1002,24 @@ async fn checkout_charges_items_plus_delivery(pool: PgPool) {
     );
     let sum: i64 = rows.iter().map(|r| r.1 + r.2).sum();
     assert_eq!(sum, 470_000);
+    // The courier order keeps the sender address code its quote was made from.
+    let (order_sender, store_code): (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT o.courier_sender_code, s.pickup_courier_address_code \
+         FROM orders o JOIN stores s ON s.id = o.store_id WHERE o.store_id = $1",
+    )
+    .bind(a.store_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(order_sender.is_some());
+    assert_eq!(order_sender, store_code);
+    let self_sender: Option<i64> =
+        sqlx::query_scalar("SELECT courier_sender_code FROM orders WHERE store_id = $1")
+            .bind(b.store_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(self_sender, None);
     let checkout_id = res.json["checkout_id"].as_str().unwrap();
     let view = app
         .request(
@@ -1300,4 +1331,150 @@ async fn order_address_snapshot_encrypted(pool: PgPool) {
         "{}",
         view.json
     );
+}
+
+// ---- Fix round 1: single-use options, method re-check ----
+
+/// Pays a checkout through the fake provider (amount `total`, no fee).
+async fn pay(app: &TestApp, reference: &str, total: i64) {
+    use server::{
+        checkout::{SettleOutcome, settle_payment},
+        payments::PaymentStatus,
+    };
+    app.fake.set_payment(
+        reference,
+        PaymentStatus::Successful {
+            amount_kobo: total,
+            fee_kobo: 0,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.to_string(),
+        },
+    );
+    assert_eq!(
+        settle_payment(&app.state, reference).await.unwrap(),
+        SettleOutcome::Paid
+    );
+}
+
+#[sqlx::test]
+async fn option_is_single_use_across_checkouts(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = listing(&app, 100_000, 5).await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let option = option_id(&quoted(&app, &buyer, address).await, l.store_id, "self");
+    let chosen = [(l.store_id, option)];
+    let choose = || app.checkout_with(&buyer, METHOD, address, &chosen);
+
+    let first = choose().await;
+    assert_eq!(first.status, 201, "{}", first.json);
+    // A second pending checkout cannot reuse it.
+    let res = choose().await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "delivery_option_invalid");
+
+    // Once that checkout has expired (orders cancelled) the option is free again.
+    let first_id: Uuid = first.json["checkout_id"].as_str().unwrap().parse().unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    assert!(
+        server::checkout::expire_and_restore(&mut tx, first_id)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let second = choose().await;
+    assert_eq!(second.status, 201, "{}", second.json);
+
+    // Paid, the cart cleared, the same lines added again: still refused.
+    pay(&app, second.json["reference"].as_str().unwrap(), 100_000).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let res = choose().await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "delivery_option_invalid");
+}
+
+#[sqlx::test]
+async fn courier_quote_is_used_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = listing(&app, 100_000, 5).await;
+    let rate = |id: &str, kobo: i64| server::couriers::Rate {
+        courier_id: id.into(),
+        service_code: format!("{id}-std"),
+        courier_name: id.into(),
+        amount_kobo: kobo,
+        charged_kobo: kobo,
+        delivery_eta: None,
+    };
+    app.courier
+        .set_rates(vec![rate("kwik", 150_000), rate("gig", 160_000)]);
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let quotes = quoted(&app, &buyer, address).await;
+    let couriers: Vec<Uuid> = quotes[0]
+        .1
+        .iter()
+        .filter(|o| o["method"] == "courier")
+        .map(|o| o["id"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(couriers.len(), 2);
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(l.store_id, couriers[0])])
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    // The other rate of the same quote shares its request token: refused.
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(l.store_id, couriers[1])])
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "delivery_option_invalid");
+}
+
+#[sqlx::test]
+async fn checkout_refuses_a_method_the_store_no_longer_offers(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = listing(&app, 100_000, 5).await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let quotes = quoted(&app, &buyer, address).await;
+    let own = option_id(&quotes, l.store_id, "self");
+    let courier = option_id(&quotes, l.store_id, "courier");
+    let store_path = format!("/stores/{}", l.store_id);
+    let patch = |body: serde_json::Value| {
+        app.request(
+            Method::PATCH,
+            &store_path,
+            Some(body),
+            Some(&l.seller_token),
+        )
+    };
+
+    assert_eq!(patch(json!({ "delivery_self": false })).await.status, 200);
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(l.store_id, own)])
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "delivery_option_invalid");
+
+    // The pickup moved: the courier quote's sender address is stale.
+    assert_eq!(
+        patch(json!({ "pickup_area_council": "kuje" })).await.status,
+        200
+    );
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(l.store_id, courier)])
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "delivery_option_invalid");
+    assert_eq!(count(&app, "SELECT count(*) FROM checkouts").await, 0);
+
+    // A fresh quote from the new pickup works.
+    let fresh = option_id(&quoted(&app, &buyer, address).await, l.store_id, "courier");
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(l.store_id, fresh)])
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
 }
