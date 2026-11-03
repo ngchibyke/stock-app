@@ -7,6 +7,7 @@
 //! [`CourierError`] never prints its inner detail, so none of it reaches logs.
 
 pub mod fake;
+pub mod shipbubble;
 
 use std::fmt;
 

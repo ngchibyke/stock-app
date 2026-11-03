@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use crate::couriers::shipbubble::{self, ShipbubbleConfig};
 use crate::payments::mono::{self, AmountUnit, MonoConfig, Secret};
 
 #[derive(Clone)]
@@ -17,6 +18,9 @@ pub struct Config {
     /// Mono settings; `None` when `MONO_SECRET_KEY` is unset (Mono is then not
     /// registered and nothing else about Mono is required).
     pub mono: Option<MonoConfig>,
+    /// Shipbubble settings; `None` when `SHIPBUBBLE_API_KEY` is unset (courier
+    /// delivery is then unavailable; the server still starts).
+    pub shipbubble: Option<ShipbubbleConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -25,6 +29,7 @@ impl std::fmt::Debug for Config {
             .field("bind_addr", &self.bind_addr)
             .field("app_env", &self.app_env)
             .field("mono", &self.mono)
+            .field("shipbubble", &self.shipbubble)
             .finish_non_exhaustive()
     }
 }
@@ -144,6 +149,56 @@ fn mono_config(var: &impl Fn(&str) -> Option<String>, live: bool) -> Result<Opti
     }))
 }
 
+/// Shipbubble's settings, read only when `SHIPBUBBLE_API_KEY` is set. Live mode
+/// is `APP_ENV=production`. Startup refuses to run when:
+/// - `SHIPBUBBLE_BASE_URL` is not https;
+/// - `SHIPBUBBLE_AMOUNT_UNIT` is set to anything but `naira` / `kobo`;
+/// - in live mode: the key does not start with `sb_prod`, or
+///   `SHIPBUBBLE_AMOUNT_UNIT` is missing (it defaults to `naira` elsewhere);
+/// - outside live mode: the key starts with `sb_prod`.
+///
+/// Errors name the variable, never its value.
+fn shipbubble_config(
+    var: &impl Fn(&str) -> Option<String>,
+    live: bool,
+) -> Result<Option<ShipbubbleConfig>> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(api_key) = get("SHIPBUBBLE_API_KEY") else {
+        return Ok(None);
+    };
+    if live && !api_key.starts_with("sb_prod") {
+        bail!("SHIPBUBBLE_API_KEY must be a live key (sb_prod) when APP_ENV is production");
+    }
+    if !live && api_key.starts_with("sb_prod") {
+        bail!("SHIPBUBBLE_API_KEY is a live key but APP_ENV is not production");
+    }
+    let base_url =
+        get("SHIPBUBBLE_BASE_URL").unwrap_or_else(|| shipbubble::DEFAULT_BASE_URL.into());
+    if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
+        bail!("SHIPBUBBLE_BASE_URL must be an https URL");
+    }
+    let amount_unit = match get("SHIPBUBBLE_AMOUNT_UNIT") {
+        Some(raw) => {
+            AmountUnit::parse(&raw).context("SHIPBUBBLE_AMOUNT_UNIT must be naira or kobo")?
+        }
+        None if live => bail!("SHIPBUBBLE_AMOUNT_UNIT is required in production (naira or kobo)"),
+        None => AmountUnit::Naira,
+    };
+    Ok(Some(ShipbubbleConfig {
+        api_key: Secret::new(&api_key),
+        base_url,
+        live,
+        amount_unit,
+        connect_timeout: shipbubble::CONNECT_TIMEOUT,
+        timeout: shipbubble::REQUEST_TIMEOUT,
+        insecure_http_for_tests: false,
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -175,9 +230,11 @@ impl Config {
             DEV_ECHO_ENVS.contains(&app_env.as_str()),
         )?;
         let mono = mono_config(&var, app_env == "production")?;
+        let shipbubble = shipbubble_config(&var, app_env == "production")?;
         Ok(Self {
             public_redirect_url,
             mono,
+            shipbubble,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,
@@ -375,6 +432,74 @@ mod tests {
         let out = format!("{cfg:?} {cfg:#?}");
         assert!(!out.contains("live_sk_abcdef123456"), "{out}");
         assert!(!out.contains("whsec_abcdef"), "{out}");
+    }
+
+    const SB_LIVE: &[(&str, &str)] = &[
+        ("APP_ENV", "production"),
+        ("SHIPBUBBLE_API_KEY", "sb_prod_abcdef123456"),
+        ("SHIPBUBBLE_AMOUNT_UNIT", "naira"),
+    ];
+
+    #[test]
+    fn shipbubble_is_optional_without_a_key() {
+        assert!(load(&[]).unwrap().shipbubble.is_none());
+        let cfg = load(&[
+            ("APP_ENV", "production"),
+            ("SHIPBUBBLE_AMOUNT_UNIT", "bogus"),
+        ])
+        .unwrap();
+        assert!(cfg.shipbubble.is_none());
+    }
+
+    #[test]
+    fn shipbubble_live_config_loads() {
+        let sb = load(SB_LIVE).unwrap().shipbubble.unwrap();
+        assert!(sb.live);
+        assert_eq!(sb.base_url, "https://api.shipbubble.com/v1/shipping");
+        assert_eq!(sb.amount_unit, AmountUnit::Naira);
+        assert!(!sb.insecure_http_for_tests);
+    }
+
+    #[test]
+    fn shipbubble_production_requires_unit_and_sb_prod_key() {
+        let err = load(&without(SB_LIVE, "SHIPBUBBLE_AMOUNT_UNIT")).unwrap_err();
+        assert!(err.to_string().contains("SHIPBUBBLE_AMOUNT_UNIT"), "{err}");
+        for key in ["sb_sandbox_abc", "SB_PROD_abc", "abc_sb_prod"] {
+            let mut env = without(SB_LIVE, "SHIPBUBBLE_API_KEY");
+            env.push(("SHIPBUBBLE_API_KEY", key));
+            let err = load(&env).unwrap_err().to_string();
+            assert!(err.contains("sb_prod"), "{key}: {err}");
+            assert!(!err.contains(key), "{key}: value echoed");
+        }
+        let err = load(&[("SHIPBUBBLE_API_KEY", "sb_prod_abcdef")]).unwrap_err();
+        assert!(err.to_string().contains("live key"), "{err}");
+    }
+
+    #[test]
+    fn shipbubble_sandbox_defaults_to_naira() {
+        let sb = load(&[("SHIPBUBBLE_API_KEY", "sb_sandbox_abcdef")])
+            .unwrap()
+            .shipbubble
+            .unwrap();
+        assert!(!sb.live);
+        assert_eq!(sb.amount_unit, AmountUnit::Naira);
+    }
+
+    #[test]
+    fn shipbubble_invalid_values_refused_and_debug_hides_key() {
+        for (name, value) in [
+            ("SHIPBUBBLE_AMOUNT_UNIT", "cents"),
+            ("SHIPBUBBLE_BASE_URL", "http://api.shipbubble.com"),
+        ] {
+            let mut env = without(SB_LIVE, name);
+            env.push((name, value));
+            let err = load(&env).unwrap_err().to_string();
+            assert!(err.contains(name), "{name}: {err}");
+            assert!(!err.contains(value), "{name}: value echoed");
+        }
+        let cfg = load(SB_LIVE).unwrap();
+        let out = format!("{cfg:?} {cfg:#?}");
+        assert!(!out.contains("sb_prod_abcdef123456"), "{out}");
     }
 
     #[test]
