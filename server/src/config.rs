@@ -151,6 +151,7 @@ fn mono_config(var: &impl Fn(&str) -> Option<String>, live: bool) -> Result<Opti
 
 /// Shipbubble's settings, read only when `SHIPBUBBLE_API_KEY` is set. Live mode
 /// is `APP_ENV=production`. Startup refuses to run when:
+/// - `SHIPBUBBLE_CONTACT_EMAIL` is missing or has no `@`;
 /// - `SHIPBUBBLE_BASE_URL` is not https;
 /// - `SHIPBUBBLE_AMOUNT_UNIT` is set to anything but `naira` / `kobo`;
 /// - in live mode: the key does not start with `sb_prod`, or
@@ -176,6 +177,11 @@ fn shipbubble_config(
     if !live && api_key.starts_with("sb_prod") {
         bail!("SHIPBUBBLE_API_KEY is a live key but APP_ENV is not production");
     }
+    let contact_email = get("SHIPBUBBLE_CONTACT_EMAIL")
+        .context("SHIPBUBBLE_CONTACT_EMAIL is required when SHIPBUBBLE_API_KEY is set")?;
+    if !contact_email.contains('@') || contact_email.contains(char::is_whitespace) {
+        bail!("SHIPBUBBLE_CONTACT_EMAIL must be an email address");
+    }
     let base_url =
         get("SHIPBUBBLE_BASE_URL").unwrap_or_else(|| shipbubble::DEFAULT_BASE_URL.into());
     if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
@@ -193,6 +199,7 @@ fn shipbubble_config(
         base_url,
         live,
         amount_unit,
+        contact_email,
         connect_timeout: shipbubble::CONNECT_TIMEOUT,
         timeout: shipbubble::REQUEST_TIMEOUT,
         insecure_http_for_tests: false,
@@ -438,6 +445,7 @@ mod tests {
         ("APP_ENV", "production"),
         ("SHIPBUBBLE_API_KEY", "sb_prod_abcdef123456"),
         ("SHIPBUBBLE_AMOUNT_UNIT", "naira"),
+        ("SHIPBUBBLE_CONTACT_EMAIL", "ops@platform.example"),
     ];
 
     #[test]
@@ -476,11 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn shipbubble_requires_a_contact_email() {
+        let err = load(&without(SB_LIVE, "SHIPBUBBLE_CONTACT_EMAIL")).unwrap_err();
+        assert!(
+            err.to_string().contains("SHIPBUBBLE_CONTACT_EMAIL"),
+            "{err}"
+        );
+        let mut env = without(SB_LIVE, "SHIPBUBBLE_CONTACT_EMAIL");
+        env.push(("SHIPBUBBLE_CONTACT_EMAIL", "not-an-email"));
+        let err = load(&env).unwrap_err().to_string();
+        assert!(err.contains("SHIPBUBBLE_CONTACT_EMAIL"), "{err}");
+        assert!(!err.contains("not-an-email"), "value echoed");
+        let sb = load(SB_LIVE).unwrap().shipbubble.unwrap();
+        assert_eq!(sb.contact_email, "ops@platform.example");
+    }
+
+    #[test]
     fn shipbubble_sandbox_defaults_to_naira() {
-        let sb = load(&[("SHIPBUBBLE_API_KEY", "sb_sandbox_abcdef")])
-            .unwrap()
-            .shipbubble
-            .unwrap();
+        let sb = load(&[
+            ("SHIPBUBBLE_API_KEY", "sb_sandbox_abcdef"),
+            ("SHIPBUBBLE_CONTACT_EMAIL", "ops@platform.example"),
+        ])
+        .unwrap()
+        .shipbubble
+        .unwrap();
         assert!(!sb.live);
         assert_eq!(sb.amount_unit, AmountUnit::Naira);
     }

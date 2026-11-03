@@ -36,6 +36,7 @@ fn config(base_url: &str) -> ShipbubbleConfig {
         base_url: format!("{base_url}/v1/shipping"),
         live: false,
         amount_unit: AmountUnit::Naira,
+        contact_email: "ops@platform.test".into(),
         connect_timeout: Duration::from_secs(5),
         timeout: Duration::from_secs(15),
         insecure_http_for_tests: true,
@@ -200,21 +201,46 @@ async fn validate_address_returns_code() {
 }
 
 #[tokio::test]
-async fn validate_address_outside_fct_is_rejected() {
+#[tracing_test::traced_test]
+async fn validate_address_returns_code_whatever_state_is_echoed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/shipping/address/validate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(validate_response("Niger", "NI")))
         .mount(&server)
         .await;
-    let err = courier(&server)
-        .validate_address(&address())
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, CourierError::Rejected { code, .. } if code == "outside_service_area"),
-        "{err:?}"
-    );
+    let code = courier(&server).validate_address(&address()).await.unwrap();
+    assert_eq!(code, 98_794_022);
+    assert!(logs_contain("state_mismatch"));
+    for secret in ["Zambezi", "Ada Obi", "08031234567", "ada@example.test"] {
+        assert!(!logs_contain(secret), "{secret} was logged");
+    }
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn validate_address_sends_contact_email_when_buyer_has_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/shipping/address/validate"))
+        .and(body_json(json!({
+            "name": "Ada Obi",
+            "email": "ops@platform.test",
+            "phone": "08031234567",
+            "address": "12 Zambezi Crescent, AMAC, Federal Capital Territory, Nigeria"
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(validate_response("Federal Capital Territory", "FC")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut addr = address();
+    addr.email = None;
+    let code = courier(&server).validate_address(&addr).await.unwrap();
+    assert_eq!(code, 98_794_022);
+    assert!(!logs_contain("ops@platform.test"));
 }
 
 #[tokio::test]
@@ -259,10 +285,34 @@ async fn quote_maps_couriers_and_amounts() {
 }
 
 #[tokio::test]
-async fn quote_with_unreadable_amount_is_an_error() {
+#[tracing_test::traced_test]
+async fn quote_drops_unreadable_entries_and_keeps_the_rest() {
+    let server = MockServer::start().await;
+    let mut body = rates_response();
+    // One good entry (dellyman) stays; the other has a 3-decimal amount.
+    body["data"]["couriers"][1]["rate_card_amount"] = json!(2785.555);
+    Mock::given(method("POST"))
+        .and(path("/v1/shipping/fetch_rates"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let pickup = Date::from_calendar_date(2026, Month::November, 4).unwrap();
+    let quote = courier(&server)
+        .quote(1, 2, pickup, &parcel())
+        .await
+        .unwrap();
+    assert_eq!(quote.rates.len(), 1);
+    assert_eq!(quote.rates[0].courier_id, "dellyman");
+    assert!(logs_contain("bad_amount"));
+    assert!(!logs_contain("Routely"));
+}
+
+#[tokio::test]
+async fn quote_with_no_valid_entry_is_inconclusive() {
     let server = MockServer::start().await;
     let mut body = rates_response();
     body["data"]["couriers"][0]["rate_card_amount"] = json!(2785.555);
+    body["data"]["couriers"][1]["currency"] = json!("USD");
     Mock::given(method("POST"))
         .and(path("/v1/shipping/fetch_rates"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
@@ -634,6 +684,7 @@ fn config_requires_sb_prod_and_unit_in_production() {
                 "PUBLIC_REDIRECT_URL",
                 "https://shop.example/checkout/return",
             ),
+            ("SHIPBUBBLE_CONTACT_EMAIL", "ops@platform.test"),
         ]
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -691,6 +742,18 @@ fn config_requires_sb_prod_and_unit_in_production() {
         .shipbubble
         .unwrap();
     assert!(!sandbox.live && sandbox.amount_unit == AmountUnit::Naira);
+    // The contact email is required whenever a key is set, and must hold an '@'.
+    for bad in ["", "not-an-email"] {
+        let err = load(&[
+            ("SHIPBUBBLE_API_KEY", "sb_sandbox_abc"),
+            ("SHIPBUBBLE_CONTACT_EMAIL", bad),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SHIPBUBBLE_CONTACT_EMAIL"), "{err}");
+        assert!(bad.is_empty() || !err.contains(bad), "value echoed");
+    }
+    assert_eq!(sandbox.contact_email, "ops@platform.test");
     // Non-https base URL is refused.
     assert!(
         load(&[

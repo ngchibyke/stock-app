@@ -56,6 +56,8 @@ pub struct ShipbubbleConfig {
     /// Live mode (`APP_ENV=production`; the key then starts `sb_prod`).
     pub live: bool,
     pub amount_unit: AmountUnit,
+    /// `SHIPBUBBLE_CONTACT_EMAIL`: sent as `email` when an address has none.
+    pub contact_email: String,
     pub connect_timeout: Duration,
     pub timeout: Duration,
     /// **Tests only** (a local mock server speaks plain http). `config.rs`
@@ -392,9 +394,9 @@ fn area_label(area: AreaCouncil) -> &'static str {
     }
 }
 
-/// Whether a validated address is in the FCT, from Shipbubble's own `state`
-/// fields (never from free text). **Assumed** values: `state_code` "FC" or a
-/// `state` naming the Federal Capital Territory.
+/// Whether Shipbubble's echoed `state` fields look like the FCT (log-only
+/// check). **Assumed** values: `state_code` "FC" or a `state` naming the
+/// Federal Capital Territory.
 fn state_is_fct(data: &Value) -> bool {
     if str_at(data, "state_code").is_some_and(|c| c.trim().eq_ignore_ascii_case("FC")) {
         return true;
@@ -402,6 +404,26 @@ fn state_is_fct(data: &Value) -> bool {
     str_at(data, "state").is_some_and(|s| {
         let s = s.trim().to_ascii_lowercase();
         s == "fct" || s.contains("federal capital")
+    })
+}
+
+/// One `couriers[]` entry; the error is a fixed cause string.
+fn parse_rate(c: &Value, unit: AmountUnit) -> Result<Rate, &'static str> {
+    if str_at(c, "currency").is_some_and(|cur| !cur.eq_ignore_ascii_case("NGN")) {
+        return Err("non_ngn_currency");
+    }
+    let amount = |key: &str| {
+        c.get(key)
+            .ok_or("missing_amount")
+            .and_then(|v| from_sb_amount(v, unit).map_err(|_| "bad_amount"))
+    };
+    Ok(Rate {
+        courier_id: text_at(c, "courier_id").ok_or("missing_courier_id")?,
+        service_code: text_at(c, "service_code").ok_or("missing_service_code")?,
+        courier_name: str_at(c, "courier_name").unwrap_or_default().to_string(),
+        amount_kobo: amount("rate_card_amount")?,
+        charged_kobo: amount("total")?,
+        delivery_eta: str_at(c, "delivery_eta").map(str::to_string),
     })
 }
 
@@ -447,8 +469,15 @@ impl CourierProvider for ShipbubbleCourier {
 
     async fn validate_address(&self, addr: &ContactAddress) -> Result<i64, CourierError> {
         const OP: &str = "validate_address";
-        let mut body = json!({
+        // Shipbubble requires an email; we do not collect buyers' emails, so the
+        // platform contact address is sent when there is none. Never logged.
+        let email = addr
+            .email
+            .as_deref()
+            .unwrap_or(self.cfg.contact_email.as_str());
+        let body = json!({
             "name": addr.name,
+            "email": email,
             "phone": addr.phone,
             "address": format!(
                 "{}, {}, Federal Capital Territory, Nigeria",
@@ -456,24 +485,20 @@ impl CourierProvider for ShipbubbleCourier {
                 area_label(addr.area)
             ),
         });
-        // Shipbubble documents email as required; the caller decides what to send.
-        if let Some(email) = &addr.email {
-            body["email"] = json!(email);
-        }
         let url = self.url(&["address", "validate"]);
         let answer = self
             .call(OP, Call::Read, Method::POST, url, Some(&body))
             .await?;
         let data = Self::data(OP, Call::Read, &answer)?;
-        // Fail closed: the FCT is decided by Shipbubble's state fields.
+        // The FCT is gated by `AreaCouncil` before any courier call; the echoed
+        // state is only logged (no address content) when it looks non-FCT.
         if !state_is_fct(data) {
             tracing::warn!(
                 provider = SHIPBUBBLE_NAME,
                 op = OP,
-                cause = "outside_fct",
-                "shipbubble call failed"
+                cause = "state_mismatch",
+                "shipbubble echoed a non-FCT state"
             );
-            return Err(rejected_locally("outside_service_area"));
         }
         text_at(data, "address_code")
             .and_then(|c| c.parse::<i64>().ok())
@@ -533,24 +558,19 @@ impl CourierProvider for ShipbubbleCourier {
             .ok_or_else(|| unparseable(OP, Call::Read))?;
         let mut rates = Vec::with_capacity(couriers.len());
         for c in couriers {
-            // One unreadable entry fails the quote: no silent partial prices.
-            let bad = || unparseable(OP, Call::Read);
-            if str_at(c, "currency").is_some_and(|cur| !cur.eq_ignore_ascii_case("NGN")) {
-                return Err(bad());
+            // An unreadable entry is dropped (cause logged, never the body).
+            match parse_rate(c, unit) {
+                Ok(rate) => rates.push(rate),
+                Err(cause) => tracing::warn!(
+                    provider = SHIPBUBBLE_NAME,
+                    op = OP,
+                    cause,
+                    "shipbubble rate entry dropped"
+                ),
             }
-            let amount = |key: &str| {
-                c.get(key)
-                    .ok_or_else(bad)
-                    .and_then(|v| from_sb_amount(v, unit))
-            };
-            rates.push(Rate {
-                courier_id: text_at(c, "courier_id").ok_or_else(bad)?,
-                service_code: text_at(c, "service_code").ok_or_else(bad)?,
-                courier_name: str_at(c, "courier_name").unwrap_or_default().to_string(),
-                amount_kobo: amount("rate_card_amount")?,
-                charged_kobo: amount("total")?,
-                delivery_eta: str_at(c, "delivery_eta").map(str::to_string),
-            });
+        }
+        if rates.is_empty() && !couriers.is_empty() {
+            return Err(unparseable(OP, Call::Read));
         }
         Ok(RateQuote {
             request_token,
