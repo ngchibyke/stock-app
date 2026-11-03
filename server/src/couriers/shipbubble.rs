@@ -45,6 +45,8 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest response body read; anything longer is treated like a failed read.
 pub const MAX_RESPONSE_BODY: usize = 512 * 1024;
+/// The only message a `Rejected` carries: ours, never the provider's text.
+const REJECTED_MESSAGE: &str = "courier rejected the request";
 pub const SIGNATURE_HEADER: &str = "x-ship-signature";
 
 /// Shipbubble settings, from the environment (see `config.rs`).
@@ -276,7 +278,7 @@ impl ShipbubbleCourier {
 fn rejected_locally(code: &str) -> CourierError {
     CourierError::Rejected {
         code: code.to_string(),
-        message: String::new(),
+        message: REJECTED_MESSAGE.into(),
     }
 }
 
@@ -345,28 +347,10 @@ fn status_error(op: &'static str, call: Call, answer: &Answer) -> CourierError {
     } else if answer.status.is_client_error() {
         CourierError::Rejected {
             code: format!("http_{status}"),
-            message: safe_message(answer.body.as_ref()),
+            message: REJECTED_MESSAGE.into(),
         }
     } else {
         unsettled()
-    }
-}
-
-/// The top-level `message`, kept for support only when it is short and holds
-/// no run of 6+ digits (phones, account numbers).
-fn safe_message(body: Option<&Value>) -> String {
-    let Some(msg) = body.and_then(|b| str_at(b, "message")) else {
-        return String::new();
-    };
-    let mut run = 0;
-    let has_long_number = msg.chars().any(|c| {
-        run = if c.is_ascii_digit() { run + 1 } else { 0 };
-        run >= 6
-    });
-    if has_long_number || msg.chars().count() > 160 {
-        "[message withheld]".into()
-    } else {
-        msg.to_string()
     }
 }
 
@@ -604,6 +588,14 @@ impl CourierProvider for ShipbubbleCourier {
             .get("payment")
             .and_then(|p: &Value| p.get("shipping_fee"))
             .and_then(|v| from_sb_amount(v, self.cfg.amount_unit).ok());
+        if charged_kobo.is_none() {
+            tracing::warn!(
+                provider = SHIPBUBBLE_NAME,
+                op = OP,
+                cause = "bad_shipping_fee",
+                "shipbubble booking fee unreadable"
+            );
+        }
         Ok(Booking {
             provider_order_id,
             tracking_url: text_at(data, "tracking_url"),
@@ -631,16 +623,23 @@ impl CourierProvider for ShipbubbleCourier {
         const OP: &str = "status";
         let url = self.url(&["labels", "list", provider_order_id]);
         let answer = self.call(OP, Call::Read, Method::GET, url, None).await?;
+        if answer.status == StatusCode::NOT_FOUND {
+            tracing::warn!(
+                provider = SHIPBUBBLE_NAME,
+                op = OP,
+                status = 404,
+                cause = "http_status",
+                "shipbubble call failed"
+            );
+            return Err(rejected_locally("not_found"));
+        }
         let data = Self::data(OP, Call::Read, &answer)?;
         let results = data
             .get("results")
             .and_then(Value::as_array)
             .ok_or_else(|| unparseable(OP, Call::Read))?;
         let Some(first) = results.first() else {
-            return Err(CourierError::Rejected {
-                code: "not_found".into(),
-                message: String::new(),
-            });
+            return Err(rejected_locally("not_found"));
         };
         let state = str_at(first, "status")
             .and_then(state_of)

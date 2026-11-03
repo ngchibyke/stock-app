@@ -490,6 +490,54 @@ async fn cancel_maps_success_and_already_processed() {
 }
 
 #[tokio::test]
+async fn status_404_is_not_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/shipping/labels/list/SB-404"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let err = courier(&server).status("SB-404").await.unwrap_err();
+    assert!(
+        matches!(&err, CourierError::Rejected { code, .. } if code == "not_found"),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn rejected_carries_our_message_not_the_providers() {
+    let server = MockServer::start().await;
+    mount_book(
+        &server,
+        ResponseTemplate::new(400).set_body_json(
+            json!({"status": "failed", "message": "Wallet low for Ada Obi 08031234567"}),
+        ),
+        1,
+    )
+    .await;
+    let err = courier(&server).book("t", "a", "b").await.unwrap_err();
+    let CourierError::Rejected { code, message } = err else {
+        panic!("expected Rejected");
+    };
+    assert_eq!(code, "http_400");
+    assert_eq!(message, "courier rejected the request");
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn book_with_unreadable_fee_logs_cause() {
+    let server = MockServer::start().await;
+    let mut body = label_response();
+    body["data"]["payment"]["shipping_fee"] = json!("lots");
+    mount_book(&server, ResponseTemplate::new(200).set_body_json(body), 1).await;
+    let b = courier(&server).book("t", "a", "b").await.unwrap();
+    assert_eq!(b.charged_kobo, None);
+    assert!(logs_contain("bad_shipping_fee"));
+    assert!(!logs_contain("lots"));
+}
+
+#[tokio::test]
 async fn status_reads_the_first_list_result() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -605,6 +653,28 @@ fn webhook_status_changed_maps_state() {
         (u.provider_order_id.as_str(), u.courier_phone),
         ("77", None)
     );
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn webhook_logs_wallet_alert_and_unknown_status_cause_without_values() {
+    let c = ShipbubbleCourier::new(config("http://127.0.0.1:1")).unwrap();
+    let wallet = json!({
+        "event": "wallet.auto_topup.succeeded",
+        "amount": 987654,
+        "currency": "NGN",
+        "ref_code": "REF-SECRET-42"
+    });
+    let (h, body) = signed(&wallet);
+    assert_eq!(c.parse_webhook(&h, &body).unwrap(), None);
+    assert!(logs_contain("wallet_alert"));
+    assert!(logs_contain("wallet.auto_topup.succeeded"));
+    assert!(!logs_contain("987654"));
+    assert!(!logs_contain("REF-SECRET-42"));
+    let (h, body) = signed(&status_event("shipment.status.changed", "teleported"));
+    assert_eq!(c.parse_webhook(&h, &body).unwrap(), None);
+    assert!(logs_contain("unknown_status"));
+    assert!(!logs_contain("teleported"));
 }
 
 #[test]
