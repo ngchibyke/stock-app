@@ -3,6 +3,7 @@
 
 pub mod addresses;
 pub mod area;
+pub mod handover;
 pub mod options;
 pub mod postcode;
 pub mod promise;

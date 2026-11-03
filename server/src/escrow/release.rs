@@ -3,8 +3,9 @@
 //! Three steps, and no provider call ever runs inside a DB transaction:
 //!
 //! 1. [`release_order`] (one transaction, under the order lock): an order
-//!    `picked_up`/`delivered` with no payout row is booked out of escrow,
-//!    marked `completed`, and gets a payout row `scheduled` (or `manual` with
+//!    `picked_up`/`out_for_delivery`/`delivered` with no payout row is booked
+//!    out of escrow, marked `completed` (a handover code still on it is
+//!    cleared: nothing can use it any more), and gets a payout row `scheduled` (or `manual` with
 //!    amount 0 when the payout would be ≤ 0). It enforces the release rules
 //!    itself (defence in depth): a held order is 409 `order_held` unless the
 //!    owner decides; `AutoAfterDelivery` needs `delivered_at` and a passed
@@ -260,7 +261,8 @@ enum Released {
 }
 
 /// Step 1 (see the module docs). Idempotent: an order that is not
-/// `picked_up`/`delivered`, or already has a payout, is left as it is (Ok).
+/// `picked_up`/`out_for_delivery`/`delivered`, or already has a payout, is
+/// left as it is (Ok).
 /// Unknown order -> 404. A held order -> 409 `order_held` unless the reason is
 /// `OwnerDecision` (the owner resolves complaints). `AutoAfterDelivery` on an
 /// order not delivered, or before its stored `release_at`, is a no-op (Ok), so
@@ -276,8 +278,8 @@ pub async fn release_order(
 
 /// The owner's release (`OwnerDecision`) from the admin route: also clears
 /// the order's hold in the same transaction and audits the owner and `note`.
-/// Not a no-op on retry: an order that is not `picked_up`/`delivered` (e.g.
-/// already released) is 409 `invalid_order_state` naming its status.
+/// Not a no-op on retry: an order that is not `picked_up`/`out_for_delivery`/
+/// `delivered` (e.g. already released) is 409 `invalid_order_state` naming its status.
 pub async fn release_by_owner(
     state: &AppState,
     order_id: Uuid,
@@ -324,7 +326,11 @@ async fn release(
     .await
     .map_err(db_err("lock order"))?
     .ok_or(AppError::NotFound)?;
-    if !matches!(row.status.as_str(), "picked_up" | "delivered") || row.has_payout {
+    if !matches!(
+        row.status.as_str(),
+        "picked_up" | "out_for_delivery" | "delivered"
+    ) || row.has_payout
+    {
         return Ok(Released::Unchanged(row.status));
     }
     // The release rules, enforced here as well as by the callers.
@@ -421,11 +427,15 @@ async fn release(
     .fetch_one(&mut *tx)
     .await
     .context("insert payout")?;
-    sqlx::query("UPDATE orders SET status = 'completed', completed_at = now() WHERE id = $1")
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await
-        .context("complete order")?;
+    sqlx::query(
+        "UPDATE orders SET status = 'completed', completed_at = now(), \
+                handover_code_enc = NULL \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await
+    .context("complete order")?;
     audit::record(
         &mut tx,
         None,
