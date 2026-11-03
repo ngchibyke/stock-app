@@ -33,6 +33,7 @@ struct Fixture {
     checkout_id: Uuid,
     store_id: Uuid,
     variant_id: Uuid,
+    seller_token: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -67,6 +68,20 @@ async fn picked_up_order_with_delivery(
     delivery: i64,
     old_payment: bool,
 ) -> Fixture {
+    // No delivery method: a part-2 order, whose fee stays platform revenue.
+    picked_up_order_with_method(app, price, fee, delivery, None, old_payment).await
+}
+
+/// [`picked_up_order_with_delivery`] with the order's `delivery_method`
+/// (`courier`, `self` or none) set when there is a fee.
+async fn picked_up_order_with_method(
+    app: &TestApp,
+    price: i64,
+    fee: i64,
+    delivery: i64,
+    method: Option<&str>,
+    old_payment: bool,
+) -> Fixture {
     let listing = app
         .make_active_store_with_product(SELLER, "Mama Put", price, 5)
         .await;
@@ -81,10 +96,19 @@ async fn picked_up_order_with_delivery(
     let checkout_id: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
     let total = res.json["total_kobo"].as_i64().unwrap() + delivery;
     if delivery > 0 {
+        let method = method.map_or("NULL".to_string(), |m| format!("'{m}'::delivery_method"));
+        // The schema requires the courier booking details on a courier order.
+        let courier = if method.contains("courier") {
+            format!(
+                ", courier_request_token = 'tok', courier_id = 'c1', service_code = 's1', courier_quote_kobo = {delivery}, courier_sender_code = 1"
+            )
+        } else {
+            String::new()
+        };
         exec(
             app,
             &format!(
-                "UPDATE orders SET delivery_fee_kobo = {delivery} WHERE checkout_id = '{checkout_id}'"
+                "UPDATE orders SET delivery_fee_kobo = {delivery}, delivery_method = {method}{courier} WHERE checkout_id = '{checkout_id}'"
             ),
         )
         .await;
@@ -128,6 +152,7 @@ async fn picked_up_order_with_delivery(
         checkout_id,
         store_id: listing.store_id,
         variant_id: listing.variant_id,
+        seller_token: listing.seller_token.clone(),
     }
 }
 
@@ -1422,6 +1447,85 @@ async fn release_ledger_routes_delivery_to_platform_revenue(pool: PgPool) {
     );
     assert_eq!(balance(&app, "escrow").await, 0);
     assert_orders_balance(&app).await;
+}
+
+async fn seller_expected_payout(app: &TestApp, f: &Fixture) -> serde_json::Value {
+    let path = format!("/orders/{}", f.order_id);
+    let res = app
+        .request(Method::GET, &path, None, Some(&f.seller_token))
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    res.json["expected_payout_kobo"].clone()
+}
+
+async fn release_entries(app: &TestApp) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT account::text, amount_kobo FROM ledger_entries WHERE kind = 'release' ORDER BY id",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .unwrap()
+}
+
+// Items N10,000 (1,000,000 kobo), delivery N1,500 (150,000), provider fee 1,500.
+// Pre-fee payout: 1,000,000 - 50,000 cut - 1,500 share + 150,000 = 1,098,500,
+// which is above the N10,000 stamp-duty threshold: fee 3,500 + 5,000 = 8,500.
+#[sqlx::test]
+async fn self_delivery_fee_goes_to_seller(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = picked_up_order_with_method(&app, 1_000_000, 1_500, 150_000, Some("self"), true).await;
+    release(&app, &f).await;
+    let p = payout(&app).await;
+    assert_eq!(p.amount_kobo, 1_090_000);
+    assert_eq!(p.fee_kobo, 8_500);
+    assert_eq!(
+        release_entries(&app).await,
+        [
+            ("escrow".to_string(), -1_150_000),
+            // The cut is on items only; no delivery money stays with the platform.
+            ("platform_revenue".to_string(), 50_000),
+            ("provider_fees".to_string(), 1_500),
+            ("platform_revenue".to_string(), 8_500),
+            ("seller_payable".to_string(), 1_090_000),
+        ]
+    );
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_orders_balance(&app).await;
+}
+
+#[sqlx::test]
+async fn courier_fee_stays_platform_revenue(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f =
+        picked_up_order_with_method(&app, 1_000_000, 1_500, 150_000, Some("courier"), true).await;
+    release(&app, &f).await;
+    // Same payout as an order without delivery: 1,000,000 - 50,000 - 1,500 - 3,500.
+    let p = payout(&app).await;
+    assert_eq!(p.amount_kobo, 945_000);
+    assert_eq!(p.fee_kobo, 3_500);
+    assert_eq!(
+        release_entries(&app).await,
+        [
+            ("escrow".to_string(), -1_150_000),
+            ("platform_revenue".to_string(), 50_000 + 150_000),
+            ("provider_fees".to_string(), 1_500),
+            ("platform_revenue".to_string(), 3_500),
+            ("seller_payable".to_string(), 945_000),
+        ]
+    );
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_orders_balance(&app).await;
+}
+
+#[sqlx::test]
+async fn seller_view_expected_payout_includes_self_fee(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = picked_up_order_with_method(&app, 1_000_000, 1_500, 150_000, Some("self"), true).await;
+    assert_eq!(seller_expected_payout(&app, &f).await, 1_090_000);
+    // After release, the view shows the payout's own amount: the same sum.
+    release(&app, &f).await;
+    assert_eq!(seller_expected_payout(&app, &f).await, 1_090_000);
+    assert_eq!(payout(&app).await.amount_kobo, 1_090_000);
 }
 
 #[sqlx::test]
