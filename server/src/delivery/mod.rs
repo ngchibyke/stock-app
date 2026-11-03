@@ -7,3 +7,4 @@ pub mod handover;
 pub mod options;
 pub mod postcode;
 pub mod promise;
+pub mod shipments;

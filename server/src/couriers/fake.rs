@@ -61,6 +61,8 @@ pub struct FakeCourier {
     quote_failure: Mutex<Option<CourierError>>,
     book_failure: Mutex<Option<CourierError>>,
     book_delay: Mutex<Option<Duration>>,
+    booking_phone: Mutex<Option<String>>,
+    cancel_failure: Mutex<Option<CourierError>>,
     updates: Mutex<VecDeque<CourierUpdate>>,
     book_calls: AtomicUsize,
     quote_calls: AtomicUsize,
@@ -77,6 +79,8 @@ impl Default for FakeCourier {
             quote_failure: Mutex::default(),
             book_failure: Mutex::default(),
             book_delay: Mutex::default(),
+            booking_phone: Mutex::default(),
+            cancel_failure: Mutex::default(),
             updates: Mutex::default(),
             book_calls: AtomicUsize::new(0),
             quote_calls: AtomicUsize::new(0),
@@ -114,6 +118,16 @@ impl FakeCourier {
     /// The next `book` call sleeps this long before answering (once).
     pub fn delay_next_book(&self, d: Duration) {
         *self.book_delay.lock().unwrap() = Some(d);
+    }
+
+    /// The courier phone every later `book` reports.
+    pub fn set_booking_phone(&self, phone: Option<String>) {
+        *self.booking_phone.lock().unwrap() = phone;
+    }
+
+    /// Every later `cancel` fails with this error.
+    pub fn fail_cancel_with(&self, err: CourierError) {
+        *self.cancel_failure.lock().unwrap() = Some(err);
     }
 
     /// Queues what `status()` returns next (FIFO; the last queued update keeps
@@ -204,14 +218,17 @@ impl CourierProvider for FakeCourier {
             courier_name: rate
                 .as_ref()
                 .map_or_else(|| "Fake Courier".into(), |r| r.courier_name.clone()),
-            courier_phone: None,
+            courier_phone: self.booking_phone.lock().unwrap().clone(),
             charged_kobo: rate.map(|r| r.charged_kobo),
         })
     }
 
     async fn cancel(&self, _provider_order_id: &str) -> Result<(), CourierError> {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        match &*self.cancel_failure.lock().unwrap() {
+            Some(e) => Err(copy_err(e)),
+            None => Ok(()),
+        }
     }
 
     async fn status(&self, provider_order_id: &str) -> Result<CourierUpdate, CourierError> {

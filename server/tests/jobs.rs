@@ -1325,6 +1325,8 @@ async fn job_runs_record_last_success(pool: PgPool) {
         [
             "auto_release",
             "backstop",
+            "book_shipments",
+            "cancel_shipments",
             "expire_checkouts",
             "payouts",
             "refunds",

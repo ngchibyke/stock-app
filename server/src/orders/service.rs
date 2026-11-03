@@ -11,7 +11,8 @@
 //!   status, so nothing can skip the handover code.
 //! - [`deliver_with_code`]: `out_for_delivery -> delivered` on a self-delivery
 //!   order, only with the buyer's handover code.
-//! - [`mark_ready`]: a `paid` courier order is ready for collection (`ready_at`).
+//! - [`mark_ready`]: a `paid` courier order is ready for collection (`ready_at`),
+//!   and gets its `booking_pending` shipment in the same transaction.
 //!
 //! Each takes the order lock. Repeating a transition on an order already in
 //! its target state is a no-op; any other status is 409 `invalid_order_state`.
@@ -23,7 +24,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    audit, checkout::service::busy_err, crypto::FieldCipher, delivery::handover, error::AppError,
+    audit,
+    checkout::service::busy_err,
+    crypto::FieldCipher,
+    delivery::{handover, shipments},
+    error::AppError,
 };
 
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
@@ -207,8 +212,10 @@ pub async fn deliver_with_code(
 }
 
 /// A `paid` courier order is ready for the courier to collect: sets `ready_at`
-/// at `at`. Idempotent while the order is still `paid`: `ready_at` keeps its
-/// first value. Any later status is 409. Task 9 books the shipment from here.
+/// at `at` and inserts its `booking_pending` shipment under the order lock, for
+/// the job loop to book. Idempotent while the order is still `paid`: `ready_at`
+/// keeps its first value and the order keeps its one shipment. Any later status
+/// is 409.
 pub async fn mark_ready(
     db: &PgPool,
     actor: Uuid,
@@ -220,24 +227,24 @@ pub async fn mark_ready(
     if !order.courier || order.status != "paid" {
         return Err(AppError::Conflict("invalid_order_state"));
     }
-    if order.ready {
-        return Ok(());
+    if !order.ready {
+        sqlx::query("UPDATE orders SET ready_at = $2 WHERE id = $1")
+            .bind(order_id)
+            .bind(at)
+            .execute(&mut *tx)
+            .await
+            .context("mark ready")?;
+        audit::record(
+            &mut tx,
+            Some(actor),
+            "order.ready",
+            "order",
+            Some(order_id),
+            json!({}),
+        )
+        .await?;
     }
-    sqlx::query("UPDATE orders SET ready_at = $2 WHERE id = $1")
-        .bind(order_id)
-        .bind(at)
-        .execute(&mut *tx)
-        .await
-        .context("mark ready")?;
-    audit::record(
-        &mut tx,
-        Some(actor),
-        "order.ready",
-        "order",
-        Some(order_id),
-        json!({}),
-    )
-    .await?;
+    shipments::ensure_pending(&mut tx, order_id).await?;
     tx.commit().await.context("commit")?;
     Ok(())
 }

@@ -7,7 +7,9 @@
 //!    with a fresh `RF` reference (status `requested`), ledger `escrow -T`,
 //!    `refunds +T` (key `("refund", id)`), and the absorbed collection fee
 //!    `provider_fees +share`, `platform_revenue -share` (key
-//!    `("refund_fee", id)`, none when the share is 0).
+//!    `("refund_fee", id)`, none when the share is 0). A courier shipment is
+//!    moved in the same transaction ([`shipments::on_refund`]): a booked one goes
+//!    to the cancel outbox, so the refund never depends on the courier.
 //! 2. [`send_refund`] (after commit): claims the row, calls `provider.refund`
 //!    with the same reference every time, and records the answer:
 //!    - Ok: refund `processing` (the buyer gets the money within about 10
@@ -33,6 +35,7 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     checkout::service::busy_err,
+    delivery::shipments,
     error::AppError,
     ledger::{self, Account, Entry},
     limits::MAX_STOCK,
@@ -248,6 +251,7 @@ async fn begin(
     .execute(&mut *conn)
     .await
     .context("mark refund pending")?;
+    shipments::on_refund(conn, order_id).await?;
     // Units back on hand, clamped at the stock cap (the seller may have
     // restocked meanwhile); the clamped units are recorded in the audit row.
     let mut clamped_units: i64 = 0;

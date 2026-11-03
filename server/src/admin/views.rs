@@ -12,7 +12,11 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{audit, error::AppError};
+use crate::{
+    audit,
+    delivery::shipments::{PRICE_ABOVE_QUOTE, WALLET_ALERT},
+    error::AppError,
+};
 
 /// Rows per list (each reconciliation section too).
 pub const MAX_LIMIT: i64 = 100;
@@ -275,6 +279,14 @@ pub struct Reconciliation {
     /// on the payment, or a payout account that is missing or not verified
     /// (M9). Oldest first.
     pub blocked_payouts: Vec<PayoutView>,
+    /// Shipments waiting on a person, oldest change first: `booking_unknown`,
+    /// `booking_failed` (while the order still needs delivering), `cancel_failed`,
+    /// a booking still in flight on a refunded order, and bookings charged above
+    /// the quote in the last [`ALERT_WINDOW_DAYS`] days.
+    pub shipments_attention: Vec<ShipmentAttention>,
+    /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
+    /// first.
+    pub wallet_alerts: Vec<WalletAlert>,
     /// Rows per section; a full section has more behind it.
     pub limit: i64,
 }
@@ -305,6 +317,37 @@ pub struct PayoutAmountMismatch {
     pub payout_id: Option<Uuid>,
     pub expected_kobo: Option<i64>,
     pub reported_kobo: Option<i64>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// A shipment on the attention list. No courier name or phone, for anyone.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ShipmentAttention {
+    pub id: Uuid,
+    pub order_id: Uuid,
+    pub store_id: Uuid,
+    pub status: String,
+    /// A live shipment on a refunded order shows here.
+    pub order_status: String,
+    pub provider_order_id: Option<String>,
+    pub quoted_kobo: i64,
+    pub charged_kobo: Option<i64>,
+    pub attempts: i32,
+    /// Our own short code, never provider text.
+    pub last_error: Option<String>,
+    pub price_above_quote: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// A `courier.wallet_alert` audit row.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct WalletAlert {
+    pub shipment_id: Option<Uuid>,
+    /// `possible_low_balance`: a booking refused with a 400, which is what an
+    /// empty wallet returns, though other refusals look the same.
+    pub event: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
 }
@@ -371,6 +414,41 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .fetch_all(db)
     .await
     .context("list payout amount mismatches")?;
+    let shipments_attention = sqlx::query_as::<_, ShipmentAttention>(
+        "WITH above AS ( \
+             SELECT DISTINCT subject_id FROM audit_log \
+             WHERE action = $3 AND at > now() - make_interval(days => $2)) \
+         SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
+                o.status::text AS order_status, s.provider_order_id, s.quoted_kobo, \
+                s.charged_kobo, s.attempts, s.last_error, \
+                above.subject_id IS NOT NULL AS price_above_quote, s.updated_at \
+         FROM shipments s JOIN orders o ON o.id = s.order_id \
+              LEFT JOIN above ON above.subject_id = s.id \
+         WHERE s.status IN ('booking_unknown', 'cancel_failed') \
+            OR (s.status = 'booking_failed' \
+                AND o.status NOT IN ('refund_pending', 'refunded', 'cancelled')) \
+            OR (s.status = 'booking' AND o.status IN ('refund_pending', 'refunded')) \
+            OR above.subject_id IS NOT NULL \
+         ORDER BY s.updated_at, s.id LIMIT $1",
+    )
+    .bind(MAX_LIMIT)
+    .bind(ALERT_WINDOW_DAYS)
+    .bind(PRICE_ABOVE_QUOTE)
+    .fetch_all(db)
+    .await
+    .context("list attention shipments")?;
+    let wallet_alerts = sqlx::query_as::<_, WalletAlert>(
+        "SELECT subject_id AS shipment_id, detail->>'event' AS event, at \
+         FROM audit_log \
+         WHERE action = $3 AND at > now() - make_interval(days => $2) \
+         ORDER BY at DESC, id DESC LIMIT $1",
+    )
+    .bind(MAX_LIMIT)
+    .bind(ALERT_WINDOW_DAYS)
+    .bind(WALLET_ALERT)
+    .fetch_all(db)
+    .await
+    .context("list wallet alerts")?;
     Ok(Reconciliation {
         payouts,
         refunds,
@@ -379,6 +457,8 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
         late_provider_outcomes,
         payout_amount_mismatches,
         blocked_payouts,
+        shipments_attention,
+        wallet_alerts,
         limit: MAX_LIMIT,
     })
 }
