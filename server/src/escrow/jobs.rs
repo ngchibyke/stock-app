@@ -37,7 +37,8 @@
 //!    [`delivery::shipments`](crate::delivery::shipments): a wrong retry books
 //!    and pays twice. Each row takes its own lease just before its call, so one
 //!    slow call cannot run out the lease of a row behind it.
-//! 9. `cancel_shipments`: the refunds' `cancel_pending` outbox -> [`cancel_one`].
+//! 9. `cancel_shipments`: the refunds' `cancel_pending` outbox, due by
+//!    `next_attempt_at` -> [`cancel_one`].
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -855,7 +856,7 @@ async fn cancel_shipments(state: &AppState, cancel: &CancellationToken) -> Resul
     };
     let sql = format!(
         "SELECT s.id FROM shipments s \
-         WHERE s.status = 'cancel_pending' \
+         WHERE s.status = 'cancel_pending' AND s.next_attempt_at <= now() \
            AND (s.sending_until IS NULL OR s.sending_until < now()) AND {} \
          ORDER BY s.updated_at, s.id LIMIT $1 FOR UPDATE OF s SKIP LOCKED",
         not_pushed_back(CANCEL_SHIPMENTS, "s.id")

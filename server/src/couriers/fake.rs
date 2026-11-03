@@ -63,6 +63,7 @@ pub struct FakeCourier {
     book_delay: Mutex<Option<Duration>>,
     booking_phone: Mutex<Option<String>>,
     cancel_failure: Mutex<Option<CourierError>>,
+    cancel_delay: Mutex<Option<Duration>>,
     updates: Mutex<VecDeque<CourierUpdate>>,
     book_calls: AtomicUsize,
     quote_calls: AtomicUsize,
@@ -81,6 +82,7 @@ impl Default for FakeCourier {
             book_delay: Mutex::default(),
             booking_phone: Mutex::default(),
             cancel_failure: Mutex::default(),
+            cancel_delay: Mutex::default(),
             updates: Mutex::default(),
             book_calls: AtomicUsize::new(0),
             quote_calls: AtomicUsize::new(0),
@@ -128,6 +130,15 @@ impl FakeCourier {
     /// Every later `cancel` fails with this error.
     pub fn fail_cancel_with(&self, err: CourierError) {
         *self.cancel_failure.lock().unwrap() = Some(err);
+    }
+
+    pub fn clear_cancel_failure(&self) {
+        *self.cancel_failure.lock().unwrap() = None;
+    }
+
+    /// The next `cancel` call sleeps this long before answering (once).
+    pub fn delay_next_cancel(&self, d: Duration) {
+        *self.cancel_delay.lock().unwrap() = Some(d);
     }
 
     /// Queues what `status()` returns next (FIFO; the last queued update keeps
@@ -225,6 +236,10 @@ impl CourierProvider for FakeCourier {
 
     async fn cancel(&self, _provider_order_id: &str) -> Result<(), CourierError> {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        let delay = self.cancel_delay.lock().unwrap().take();
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
         match &*self.cancel_failure.lock().unwrap() {
             Some(e) => Err(copy_err(e)),
             None => Ok(()),

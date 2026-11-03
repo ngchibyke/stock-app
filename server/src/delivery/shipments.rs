@@ -6,9 +6,12 @@
 //! wallet and the provider has no idempotency key, so the row is the only guard:
 //!
 //! 1. A short transaction, under the order and shipment locks, re-checks the row
-//!    and takes a [`LEASE`] lease in `booking`. A pickup that moved since the
-//!    quote, or a quote [`QUOTE_VALID_DAYS`] old, ends in `booking_failed` here,
-//!    and `book` is never called.
+//!    and takes a [`LEASE`] lease in `booking`. A pickup that really moved since
+//!    the quote (`stores.pickup_moved_at`), or a quote [`QUOTE_VALID_DAYS`] old,
+//!    ends in `booking_failed` here, and `book` is never called. A changed sender
+//!    contact alone still books, with `sender_stale` in the audit row: the store's
+//!    address code is also cleared by a phone change and by resaving the same
+//!    address, so it cannot say whether the courier would go to the wrong place.
 //! 2. `book` runs outside any transaction, cut off after [`BOOK_CALL_TIMEOUT`]
 //!    (well under the lease, so a live worker always answers within it).
 //! 3. The outcome is written under the order lock, fenced on the lease
@@ -21,7 +24,9 @@
 //!    - anything else: `booking_unknown`, never retried automatically.
 //!
 //! If the fence fails the row is not touched: the answer is logged without
-//! provider text, and audited so the owner can find a label it created.
+//! provider text, and audited ([`LATE_OUTCOME`]) so the attention list can show
+//! a label it created. If the write itself fails after a successful POST, the
+//! label's id is logged, since nothing else keeps it.
 //!
 //! **A row left in `booking` past its lease** goes to `booking_unknown`
 //! ([`reap_stale_leases`]), never back to `booking_pending`: the worker died
@@ -31,7 +36,8 @@
 //! lock) never depend on the courier:
 //! - `booked`/`confirmed` -> `cancel_pending`, an outbox the job loop drains
 //!   ([`cancel_one`]) after commit: `cancelled`, or `cancel_failed` with an audit
-//!   row. A crash after the commit cannot lose the cancel.
+//!   row (a cancel that never left retries first). A crash after the commit
+//!   cannot lose the cancel.
 //! - `booking_pending` -> `cancelled`, with no provider call.
 //! - `booking`/`booking_unknown`: left alone, with an audit row, and listed for
 //!   the owner: a shipment may be live on a refunded order. If a booking in flight
@@ -59,6 +65,8 @@ use crate::{
 
 /// Calls to `book` before an always-unavailable provider gives up.
 pub const MAX_BOOK_ATTEMPTS: i32 = 8;
+/// Calls to `cancel` before an always-unavailable provider gives up.
+pub const MAX_CANCEL_ATTEMPTS: i32 = 8;
 /// A request token is valid this long from the quote.
 pub const QUOTE_VALID_DAYS: i32 = 7;
 /// How long a booking or cancel call holds its row.
@@ -69,6 +77,8 @@ pub const BOOK_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CANCEL_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Audit action: the provider charged more than the quote plus the tolerance.
 pub const PRICE_ABOVE_QUOTE: &str = "shipment.price_above_quote";
+/// Audit action: a booking answer arrived after its lease was lost.
+pub const LATE_OUTCOME: &str = "shipment.late_outcome";
 /// Audit action behind the reconciliation's `wallet_alerts`.
 pub const WALLET_ALERT: &str = "courier.wallet_alert";
 /// A booking 400 may be an empty wallet; the two cannot be told apart.
@@ -191,7 +201,10 @@ pub async fn on_refund(conn: &mut PgConnection, order_id: Uuid) -> Result<(), Ap
     if let Some(target) = target {
         sqlx::query(
             "UPDATE shipments SET status = $2::shipment_status, sending_until = NULL, \
-                    updated_at = now() WHERE id = $1",
+                    next_attempt_at = now(), updated_at = now(), \
+                    cancel_requested_at = CASE WHEN $2::shipment_status = 'cancel_pending' \
+                                               THEN now() END \
+             WHERE id = $1",
         )
         .bind(id)
         .bind(target)
@@ -218,6 +231,7 @@ struct BookingCall {
 struct DueCheck {
     due: bool,
     pickup_moved: bool,
+    sender_stale: bool,
     quote_expired: bool,
     quoted_kobo: i64,
     request_token: String,
@@ -244,7 +258,17 @@ pub async fn book_one(
     )
     .await
     .unwrap_or(Err(CourierError::Timeout));
-    record_booking(state, &call, result, tolerance_bps).await
+    let label = result.as_ref().ok().map(|b| b.provider_order_id.clone());
+    let recorded = record_booking(state, &call, result, tolerance_bps).await;
+    if let (Err(_), Some(label)) = (&recorded, &label) {
+        // The provider's order id is not personal data, and only this line keeps it.
+        tracing::error!(
+            shipment_id = %id,
+            provider_order_id = %label,
+            "booking made but its outcome was not recorded"
+        );
+    }
+    recorded
 }
 
 /// Step 1 of the module docs. `None` when there is nothing to send: the row is
@@ -275,8 +299,10 @@ async fn take_lease(
         "SELECT s.status = 'booking_pending' AND s.next_attempt_at <= now() \
                     AND o.status = 'paid' AND o.held_at IS NULL \
                     AND NOT c.provider_flagged AS due, \
-                st.pickup_courier_address_code IS DISTINCT FROM o.courier_sender_code \
+                COALESCE(st.pickup_moved_at >= COALESCE(d.created_at, o.created_at), false) \
                     AS pickup_moved, \
+                st.pickup_courier_address_code IS DISTINCT FROM o.courier_sender_code \
+                    AS sender_stale, \
                 COALESCE(d.created_at, o.created_at) <= now() - make_interval(days => $2) \
                     AS quote_expired, \
                 s.quoted_kobo, o.courier_request_token AS request_token, o.courier_id, \
@@ -339,7 +365,7 @@ async fn take_lease(
         "shipment.booking_started",
         SUBJECT,
         Some(id),
-        json!({ "attempt": attempts }),
+        json!({ "attempt": attempts, "sender_stale": check.sender_stale }),
     )
     .await?;
     tx.commit().await.context("commit booking lease")?;
@@ -462,8 +488,12 @@ async fn record_booking(
         "UPDATE shipments SET status = $3::shipment_status, provider_order_id = $4, \
                 tracking_url = $5, courier_name = $6, courier_phone_enc = $7, \
                 charged_kobo = $8, last_error = $9, sending_until = NULL, updated_at = now(), \
-                next_attempt_at = now() + make_interval(secs => \
-                    (SELECT {BACKOFF_SQL} FROM (SELECT $10::int AS a) x)) \
+                next_attempt_at = CASE WHEN $3::shipment_status = 'booking_pending' \
+                    THEN now() + make_interval(secs => \
+                        (SELECT {BACKOFF_SQL} FROM (SELECT $10::int AS a) x)) \
+                    ELSE now() END, \
+                cancel_requested_at = CASE WHEN $3::shipment_status = 'cancel_pending' \
+                                           THEN now() END \
          WHERE id = $1 AND status = 'booking' AND sending_until = $2 RETURNING id"
     ))
     .bind(call.id)
@@ -487,7 +517,7 @@ async fn record_booking(
         audit::record(
             &mut tx,
             None,
-            "shipment.late_outcome",
+            LATE_OUTCOME,
             SUBJECT,
             Some(call.id),
             json!({
@@ -552,46 +582,64 @@ async fn record_booking(
 
 /// Drains one `cancel_pending` row: a lease, `cancel` outside any transaction,
 /// then the outcome fenced on the lease. `Ok(true)` when it ended `cancelled`.
-/// A worker that dies mid-call leaves `cancel_pending`, and the row is sent again
-/// once its lease runs out; a cancel repeated that way can only fail, which flags
-/// the row for the owner.
+/// `Unavailable` means the call never left, so the row stays `cancel_pending`
+/// with the jobs' backoff, up to [`MAX_CANCEL_ATTEMPTS`] calls. Every other
+/// error is `cancel_failed`, for the owner. A worker that dies mid-call leaves
+/// `cancel_pending`, and the row is sent again once its lease runs out; a
+/// cancel repeated that way can only fail, which flags the row.
 pub async fn cancel_one(
     state: &AppState,
     courier: &dyn CourierProvider,
     id: Uuid,
 ) -> Result<bool, AppError> {
-    let claimed: Option<(OffsetDateTime, String)> = sqlx::query_as(&format!(
-        "UPDATE shipments SET sending_until = now() + interval '{LEASE}', updated_at = now() \
-         WHERE id = $1 AND status = 'cancel_pending' \
+    let claimed: Option<(OffsetDateTime, i32, String)> = sqlx::query_as(&format!(
+        "UPDATE shipments SET sending_until = now() + interval '{LEASE}', \
+                cancel_attempts = cancel_attempts + 1, updated_at = now() \
+         WHERE id = $1 AND status = 'cancel_pending' AND next_attempt_at <= now() \
            AND (sending_until IS NULL OR sending_until < now()) \
-         RETURNING sending_until, provider_order_id"
+         RETURNING sending_until, cancel_attempts, provider_order_id"
     ))
     .bind(id)
     .fetch_optional(&state.db)
     .await
     .context("claim cancel")?;
-    let Some((lease, provider_order_id)) = claimed else {
+    let Some((lease, attempts, provider_order_id)) = claimed else {
         return Ok(false);
     };
     let result = tokio::time::timeout(CANCEL_CALL_TIMEOUT, courier.cancel(&provider_order_id))
         .await
         .unwrap_or(Err(CourierError::Timeout));
-    let (status, error): (&str, Option<String>) = match result {
-        Ok(()) => ("cancelled", None),
-        Err(CourierError::Rejected { code, .. }) => ("cancel_failed", Some(code)),
-        Err(CourierError::Timeout) => ("cancel_failed", Some("timed out".into())),
-        Err(_) => ("cancel_failed", Some("unavailable".into())),
+    let (status, action, error): (&str, &str, Option<String>) = match result {
+        Ok(()) => ("cancelled", "shipment.cancelled", None),
+        Err(CourierError::Unavailable) if attempts < MAX_CANCEL_ATTEMPTS => (
+            "cancel_pending",
+            "shipment.cancel_retry",
+            Some("unavailable".into()),
+        ),
+        Err(e) => {
+            let error = match e {
+                CourierError::Rejected { code, .. } => code,
+                CourierError::Unavailable => "unavailable".into(),
+                CourierError::Timeout => "timed out".into(),
+                CourierError::Inconclusive => "inconclusive".into(),
+                _ => "unexpected".into(),
+            };
+            ("cancel_failed", "shipment.cancel_failed", Some(error))
+        }
     };
     let mut tx = state.db.begin().await.context("begin")?;
-    let fenced: Option<Uuid> = sqlx::query_scalar(
+    let fenced: Option<Uuid> = sqlx::query_scalar(&format!(
         "UPDATE shipments SET status = $3::shipment_status, last_error = $4, \
-                sending_until = NULL, updated_at = now() \
-         WHERE id = $1 AND status = 'cancel_pending' AND sending_until = $2 RETURNING id",
-    )
+                sending_until = NULL, updated_at = now(), \
+                next_attempt_at = now() + make_interval(secs => \
+                    (SELECT {BACKOFF_SQL} FROM (SELECT $5::int AS a) x)) \
+         WHERE id = $1 AND status = 'cancel_pending' AND sending_until = $2 RETURNING id"
+    ))
     .bind(id)
     .bind(lease)
     .bind(status)
     .bind(&error)
+    .bind(attempts)
     .fetch_optional(&mut *tx)
     .await
     .context("record cancel outcome")?;
@@ -600,19 +648,25 @@ pub async fn cancel_one(
             outcome = status,
             "cancel lease lost; late answer not recorded"
         );
+        audit::record(
+            &mut tx,
+            None,
+            "shipment.late_cancel_outcome",
+            SUBJECT,
+            Some(id),
+            json!({ "outcome": status, "error": error }),
+        )
+        .await?;
+        tx.commit().await.context("commit late cancel")?;
         return Ok(false);
     }
     audit::record(
         &mut tx,
         None,
-        if status == "cancelled" {
-            "shipment.cancelled"
-        } else {
-            "shipment.cancel_failed"
-        },
+        action,
         SUBJECT,
         Some(id),
-        json!({ "reason": "refund", "error": error }),
+        json!({ "reason": "refund", "error": error, "attempt": attempts }),
     )
     .await?;
     tx.commit().await.context("commit cancel outcome")?;

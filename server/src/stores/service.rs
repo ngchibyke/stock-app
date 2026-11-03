@@ -497,8 +497,13 @@ pub async fn update_store(
         .clone()
         .unwrap_or_else(|| current.description.clone());
     validate_description(&description)?;
-    let address_enc = match &patch.pickup_address {
-        Some(a) => cipher.encrypt(&validate_address(a)?),
+    let new_address = patch
+        .pickup_address
+        .as_deref()
+        .map(validate_address)
+        .transpose()?;
+    let address_enc = match &new_address {
+        Some(a) => cipher.encrypt(a),
         None => current.pickup_address_enc.clone(),
     };
     let state = patch
@@ -536,6 +541,11 @@ pub async fn update_store(
     };
 
     let mut changed: Vec<&str> = Vec::new();
+    if let Some(a) = &new_address
+        && cipher.decrypt(&current.pickup_address_enc)? != *a
+    {
+        changed.push("pickup_address");
+    }
     if courier != current.delivery_courier {
         changed.push("delivery_courier");
     }
@@ -572,13 +582,15 @@ pub async fn update_store(
     if touched {
         validate_delivery_details(courier, own, fee, phone_enc.is_some(), area)?;
     }
+    // Only a real change of place stops bookings already quoted (Task 9).
+    let pickup_moved = ["pickup_address", "pickup_area_council", "pickup_postcode"]
+        .iter()
+        .any(|field| changed.contains(field));
     // A moved pickup, or a new sender phone, invalidates the courier's saved
     // address code (checkout's delivery options refill it).
-    let pickup_moved = patch.pickup_address.is_some()
-        || changed.contains(&"pickup_area_council")
-        || changed.contains(&"pickup_postcode")
-        || changed.contains(&"business_phone");
-    let courier_code = if pickup_moved {
+    let code_stale =
+        patch.pickup_address.is_some() || pickup_moved || changed.contains(&"business_phone");
+    let courier_code = if code_stale {
         None
     } else {
         current.pickup_courier_address_code
@@ -588,7 +600,8 @@ pub async fn update_store(
         "UPDATE stores SET name = $2, description = $3, pickup_address_enc = $4, pickup_state = $5, \
                            delivery_courier = $6, delivery_self = $7, pickup_area_council = $8, \
                            pickup_postcode = $9, business_phone_enc = $10, \
-                           self_delivery_fee_kobo = $11, pickup_courier_address_code = $12 \
+                           self_delivery_fee_kobo = $11, pickup_courier_address_code = $12, \
+                           pickup_moved_at = CASE WHEN $13 THEN now() ELSE pickup_moved_at END \
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(id)
@@ -603,6 +616,7 @@ pub async fn update_store(
     .bind(&phone_enc)
     .bind(fee)
     .bind(courier_code)
+    .bind(pickup_moved)
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;

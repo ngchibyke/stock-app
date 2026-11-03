@@ -10,6 +10,11 @@
 -- Personal data: `courier_phone_enc` is the courier's phone, encrypted with
 -- FieldCipher (never plaintext). `last_error` holds our own short codes, never
 -- provider text.
+-- When the store's pickup really moved (address, area or postcode). The saved
+-- courier address code cannot answer that: it is also cleared by a phone change
+-- and by resaving the same address.
+ALTER TABLE stores ADD COLUMN pickup_moved_at timestamptz NULL;
+
 CREATE TYPE shipment_status AS ENUM (
     'booking_pending',
     'booking',
@@ -39,6 +44,9 @@ CREATE TABLE shipments (
     quoted_kobo       bigint NOT NULL CHECK (quoted_kobo >= 0),
     charged_kobo      bigint NULL CHECK (charged_kobo >= 0),
     attempts          integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    cancel_attempts   integer NOT NULL DEFAULT 0 CHECK (cancel_attempts >= 0),
+    -- When the shipment entered `cancel_pending`.
+    cancel_requested_at timestamptz NULL,
     -- The lease and fencing token of a booking or cancel call in flight.
     sending_until     timestamptz NULL,
     next_attempt_at   timestamptz NOT NULL DEFAULT now(),

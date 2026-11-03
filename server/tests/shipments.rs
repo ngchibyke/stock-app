@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use axum::http::Method;
 use common::TestApp;
-use serde_json::Value;
+use serde_json::{Value, json};
 use server::{
     checkout::{SettleOutcome, settle_payment},
     couriers::{CourierError, Rate, fake::default_rate},
+    delivery::shipments::book_one,
     escrow::{
         jobs::{JobReport, run_due_jobs},
         refund::refund_order,
@@ -18,6 +19,7 @@ use server::{
     payments::PaymentStatus,
 };
 use sqlx::PgPool;
+use tracing_test::traced_test;
 use uuid::Uuid;
 
 const METHOD: &str = "mono_directpay";
@@ -191,6 +193,46 @@ async fn attention(app: &TestApp, token: &str) -> Value {
         .await;
     assert_eq!(res.status, 200, "{}", res.json);
     res.json
+}
+
+/// The seller's `PATCH /stores/{id}`.
+async fn patch_store(app: &TestApp, f: &Fixture, body: Value) {
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{}", f.store_id),
+            Some(body),
+            Some(&f.seller),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+}
+
+async fn pickup_code(app: &TestApp, f: &Fixture) -> Option<i64> {
+    sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores WHERE id = $1")
+        .bind(f.store_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+async fn shipment_id(app: &TestApp, order_id: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+/// Waits for the fake to have received `n` cancel calls.
+async fn cancel_started(app: &TestApp, n: usize) {
+    for _ in 0..500 {
+        if app.courier.cancel_calls() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("cancel was not called");
 }
 
 /// Waits for the fake to have received `n` book calls.
@@ -443,14 +485,7 @@ async fn quote_under_7_days_still_books(pool: PgPool) {
 async fn pickup_moved_never_calls_book(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = ready_order(&app).await;
-    sqlx::query(
-        "UPDATE stores SET pickup_courier_address_code = pickup_courier_address_code + 1 \
-         WHERE id = $1",
-    )
-    .bind(f.store_id)
-    .execute(&app.pool)
-    .await
-    .unwrap();
+    patch_store(&app, &f, json!({ "pickup_area_council": "bwari" })).await;
     tick(&app).await;
     make_due(&app).await;
     tick(&app).await;
@@ -468,7 +503,10 @@ async fn pickup_moved_never_calls_book(pool: PgPool) {
 async fn cleared_pickup_code_counts_as_moved(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = ready_order(&app).await;
-    sqlx::query("UPDATE stores SET pickup_courier_address_code = NULL WHERE id = $1")
+    patch_store(&app, &f, json!({ "pickup_address": "9 New Road, Garki" })).await;
+    assert_eq!(pickup_code(&app, &f).await, None);
+    // A later quote refills the code; the order was still quoted from the old place.
+    sqlx::query("UPDATE stores SET pickup_courier_address_code = 777 WHERE id = $1")
         .bind(f.store_id)
         .execute(&app.pool)
         .await
@@ -479,6 +517,75 @@ async fn cleared_pickup_code_counts_as_moved(pool: PgPool) {
         Some("pickup_moved")
     );
     assert_eq!(app.courier.book_calls(), 0);
+}
+
+#[sqlx::test]
+async fn moved_postcode_counts_as_moved(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    patch_store(&app, &f, json!({ "pickup_postcode": "FC01AB12CDE" })).await;
+    tick(&app).await;
+    assert_eq!(
+        shipment(&app, f.order_id).await.last_error.as_deref(),
+        Some("pickup_moved")
+    );
+    assert_eq!(app.courier.book_calls(), 0);
+}
+
+/// The address is unchanged, so the courier still goes to the right place; the
+/// old number stays on the label, which the audit row records.
+#[sqlx::test]
+async fn phone_change_still_books(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    patch_store(&app, &f, json!({ "business_phone": "08031119999" })).await;
+    assert_eq!(pickup_code(&app, &f).await, None);
+    tick(&app).await;
+    assert_eq!(status(&app, f.order_id).await, "booked");
+    assert_eq!(app.courier.book_calls(), 1);
+    let started = audits(&app, "shipment.booking_started").await;
+    assert_eq!(started[0]["sender_stale"], true);
+}
+
+#[sqlx::test]
+async fn resaving_the_same_address_still_books(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    patch_store(
+        &app,
+        &f,
+        json!({
+            "pickup_address": "  12 Unique Street, Wuse 2 ",
+            "pickup_area_council": "amac"
+        }),
+    )
+    .await;
+    // Still cleared, as before: only the booking decision changes.
+    assert_eq!(pickup_code(&app, &f).await, None);
+    let moved: Option<time::OffsetDateTime> =
+        sqlx::query_scalar("SELECT pickup_moved_at FROM stores WHERE id = $1")
+            .bind(f.store_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(moved, None);
+    tick(&app).await;
+    assert_eq!(status(&app, f.order_id).await, "booked");
+}
+
+#[sqlx::test]
+async fn move_before_the_quote_still_books(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    sqlx::query("UPDATE stores SET pickup_moved_at = now() - interval '1 day' WHERE id = $1")
+        .bind(f.store_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    tick(&app).await;
+    assert_eq!(status(&app, f.order_id).await, "booked");
+    let started = audits(&app, "shipment.booking_started").await;
+    assert_eq!(started[0]["sender_stale"], false);
 }
 
 /// A process that died mid-call leaves `booking` behind. The POST may have
@@ -546,6 +653,247 @@ async fn late_booking_answer_does_not_overwrite(pool: PgPool) {
     let late = audits(&app, "shipment.late_outcome").await;
     assert_eq!(late.len(), 1);
     assert_eq!(late[0]["provider_order_id"], "fake-1");
+
+    // The paid label reaches the owner, not only the audit log.
+    let owner = app.owner_token().await;
+    let json = attention(&app, &owner).await;
+    let items = json["shipments_attention"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{json}");
+    assert_eq!(items[0]["late_provider_order_id"], "fake-1");
+}
+
+/// A lost-lease answer stays listed whatever the row does next.
+#[sqlx::test]
+async fn late_label_stays_listed_after_the_row_moves_on(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    let id = shipment_id(&app, f.order_id).await;
+    sqlx::query(
+        "INSERT INTO audit_log (action, subject_type, subject_id, detail) \
+         VALUES ('shipment.late_outcome', 'shipment', $1, '{\"provider_order_id\": \"fake-9\"}')",
+    )
+    .bind(id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let owner = app.owner_token().await;
+    let json = attention(&app, &owner).await;
+    assert_eq!(
+        json["shipments_attention"][0]["late_provider_order_id"], "fake-9",
+        "{json}"
+    );
+}
+
+/// The label exists but the row could not be written: the log is all that is left.
+#[traced_test]
+#[sqlx::test]
+async fn unrecorded_booking_logs_the_label(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION refuse_booked() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'write refused'; END $$; \
+         CREATE TRIGGER refuse_booked BEFORE UPDATE ON shipments FOR EACH ROW \
+             WHEN (NEW.status = 'booked') EXECUTE FUNCTION refuse_booked();",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let report = tick(&app).await;
+    assert_eq!(report.failed, 1);
+    assert_eq!(status(&app, f.order_id).await, "booking");
+    assert!(logs_contain("fake-1"), "label id not logged");
+}
+
+/// Two instances claiming the same ids: the order lock lets one through.
+#[sqlx::test]
+async fn two_ticks_at_once_book_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.delay_next_book(Duration::from_millis(200));
+    let (a, b) = tokio::join!(run_due_jobs(&app.state), run_due_jobs(&app.state));
+    assert_eq!(a.failed + b.failed, 0);
+    assert_eq!(a.shipments_booked + b.shipments_booked, 1);
+    assert_eq!(app.courier.book_calls(), 1);
+    assert_eq!(status(&app, f.order_id).await, "booked");
+}
+
+/// `book_one` re-checks the row: a claim is no promise it is still due.
+#[sqlx::test]
+async fn book_one_refuses_a_row_no_longer_due(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    let id = shipment_id(&app, f.order_id).await;
+
+    // Held between the claim and the call.
+    sqlx::query("UPDATE orders SET held_at = now(), hold_reason = 'x' WHERE id = $1")
+        .bind(f.order_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let booked = book_one(&app.state, app.courier.as_ref(), id, 1000).await;
+    assert!(!booked.unwrap());
+    assert_eq!(status(&app, f.order_id).await, "booking_pending");
+    assert_eq!(app.courier.book_calls(), 0);
+
+    // Leased by another worker.
+    sqlx::query("UPDATE orders SET held_at = NULL, hold_reason = NULL WHERE id = $1")
+        .bind(f.order_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    hold_lease(&app, f.order_id).await;
+    let booked = book_one(&app.state, app.courier.as_ref(), id, 1000).await;
+    assert!(!booked.unwrap());
+    assert_eq!(status(&app, f.order_id).await, "booking");
+    assert_eq!(app.courier.book_calls(), 0);
+}
+
+#[sqlx::test]
+async fn booked_without_a_charge_is_on_the_attention_list(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    // No rate: the fake reports no charged amount, as an unreadable fee would.
+    app.courier.set_rates(vec![]);
+    tick(&app).await;
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "booked");
+    assert_eq!(row.charged_kobo, None);
+    let owner = app.owner_token().await;
+    let json = attention(&app, &owner).await;
+    assert_eq!(json["shipments_attention"][0]["status"], "booked", "{json}");
+}
+
+#[sqlx::test]
+async fn unavailable_cancel_retries_then_succeeds(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    app.courier.fail_cancel_with(CourierError::Unavailable);
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+
+    tick(&app).await;
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "cancel_pending");
+    assert_eq!(row.last_error.as_deref(), Some("unavailable"));
+    let first = wait_secs(&app, f.order_id).await;
+    assert!((290.0..=361.0).contains(&first), "first wait {first}");
+    // Not due yet.
+    tick(&app).await;
+    assert_eq!(app.courier.cancel_calls(), 1);
+
+    app.courier.clear_cancel_failure();
+    make_due(&app).await;
+    assert_eq!(tick(&app).await.shipments_cancelled, 1);
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "cancelled");
+    assert_eq!(row.last_error, None);
+    assert_eq!(app.courier.cancel_calls(), 2);
+}
+
+#[sqlx::test]
+async fn unavailable_cancel_fails_after_8(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    app.courier.fail_cancel_with(CourierError::Unavailable);
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    for _ in 0..7 {
+        tick(&app).await;
+        assert_eq!(status(&app, f.order_id).await, "cancel_pending");
+        assert!(wait_secs(&app, f.order_id).await <= 21_600.0);
+        make_due(&app).await;
+    }
+    tick(&app).await;
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "cancel_failed");
+    assert_eq!(row.last_error.as_deref(), Some("unavailable"));
+    make_due(&app).await;
+    tick(&app).await;
+    assert_eq!(app.courier.cancel_calls(), 8);
+}
+
+async fn uncertain_cancel_stops(pool: PgPool, err: CourierError, label: &str) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    app.courier.fail_cancel_with(err);
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    tick(&app).await;
+    make_due(&app).await;
+    tick(&app).await;
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "cancel_failed");
+    assert_eq!(row.last_error.as_deref(), Some(label));
+    assert_eq!(app.courier.cancel_calls(), 1);
+}
+
+/// A cancel that may have landed is not repeated.
+#[sqlx::test]
+async fn timed_out_cancel_is_terminal(pool: PgPool) {
+    uncertain_cancel_stops(pool, CourierError::Timeout, "timed out").await;
+}
+
+#[sqlx::test]
+async fn inconclusive_cancel_is_terminal(pool: PgPool) {
+    uncertain_cancel_stops(pool, CourierError::Inconclusive, "inconclusive").await;
+}
+
+#[sqlx::test]
+async fn lost_cancel_fence_is_audited(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    app.courier.delay_next_cancel(Duration::from_millis(400));
+    let running = {
+        let state = app.state.clone();
+        tokio::spawn(async move { run_due_jobs(&state).await })
+    };
+    cancel_started(&app, 1).await;
+    // Another worker took the row after the lease ran out.
+    sqlx::query(
+        "UPDATE shipments SET sending_until = now() + interval '2 minutes' WHERE order_id = $1",
+    )
+    .bind(f.order_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    running.await.unwrap();
+    assert_eq!(status(&app, f.order_id).await, "cancel_pending");
+    let late = audits(&app, "shipment.late_cancel_outcome").await;
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0]["outcome"], "cancelled");
+}
+
+#[sqlx::test]
+async fn old_cancel_pending_is_on_the_attention_list(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    let owner = app.owner_token().await;
+
+    let json = attention(&app, &owner).await;
+    assert!(
+        json["shipments_attention"].as_array().unwrap().is_empty(),
+        "{json}"
+    );
+
+    sqlx::query(
+        "UPDATE shipments SET cancel_requested_at = now() - interval '61 minutes' \
+         WHERE order_id = $1",
+    )
+    .bind(f.order_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    let json = attention(&app, &owner).await;
+    assert_eq!(
+        json["shipments_attention"][0]["status"], "cancel_pending",
+        "{json}"
+    );
 }
 
 #[sqlx::test]

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    delivery::shipments::{PRICE_ABOVE_QUOTE, WALLET_ALERT},
+    delivery::shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
     error::AppError,
 };
 
@@ -281,7 +281,9 @@ pub struct Reconciliation {
     pub blocked_payouts: Vec<PayoutView>,
     /// Shipments waiting on a person, oldest change first: `booking_unknown`,
     /// `booking_failed` (while the order still needs delivering), `cancel_failed`,
-    /// a booking still in flight on a refunded order, and bookings charged above
+    /// a `cancel_pending` older than [`CANCEL_STUCK_AFTER`], a booking still in
+    /// flight on a refunded order, a booking with no charged amount, a booking
+    /// answer that arrived after its lease was lost, and bookings charged above
     /// the quote in the last [`ALERT_WINDOW_DAYS`] days.
     pub shipments_attention: Vec<ShipmentAttention>,
     /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
@@ -290,6 +292,9 @@ pub struct Reconciliation {
     /// Rows per section; a full section has more behind it.
     pub limit: i64,
 }
+
+/// How long a shipment may wait in `cancel_pending` before it is listed.
+pub const CANCEL_STUCK_AFTER: &str = "1 hour";
 
 /// How far back the audit-log alert sections of [`Reconciliation`] look.
 /// The alerts have no acknowledgement: they age out instead.
@@ -337,6 +342,9 @@ pub struct ShipmentAttention {
     /// Our own short code, never provider text.
     pub last_error: Option<String>,
     pub price_above_quote: bool,
+    /// A label the provider made after the booking's lease was lost: paid for,
+    /// and on no shipment row.
+    pub late_provider_order_id: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -414,26 +422,39 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .fetch_all(db)
     .await
     .context("list payout amount mismatches")?;
-    let shipments_attention = sqlx::query_as::<_, ShipmentAttention>(
+    let shipments_attention = sqlx::query_as::<_, ShipmentAttention>(&format!(
         "WITH above AS ( \
              SELECT DISTINCT subject_id FROM audit_log \
-             WHERE action = $3 AND at > now() - make_interval(days => $2)) \
+             WHERE action = $3 AND at > now() - make_interval(days => $2)), \
+         late AS ( \
+             SELECT DISTINCT ON (subject_id) subject_id, detail->>'provider_order_id' AS label \
+             FROM audit_log \
+             WHERE action = $4 AND detail->>'provider_order_id' IS NOT NULL \
+             ORDER BY subject_id, at DESC, id DESC) \
          SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
                 o.status::text AS order_status, s.provider_order_id, s.quoted_kobo, \
                 s.charged_kobo, s.attempts, s.last_error, \
-                above.subject_id IS NOT NULL AS price_above_quote, s.updated_at \
+                above.subject_id IS NOT NULL AS price_above_quote, \
+                late.label AS late_provider_order_id, s.updated_at \
          FROM shipments s JOIN orders o ON o.id = s.order_id \
               LEFT JOIN above ON above.subject_id = s.id \
+              LEFT JOIN late ON late.subject_id = s.id \
          WHERE s.status IN ('booking_unknown', 'cancel_failed') \
             OR (s.status = 'booking_failed' \
                 AND o.status NOT IN ('refund_pending', 'refunded', 'cancelled')) \
             OR (s.status = 'booking' AND o.status IN ('refund_pending', 'refunded')) \
+            OR (s.status = 'cancel_pending' \
+                AND s.cancel_requested_at < now() - interval '{CANCEL_STUCK_AFTER}') \
+            OR (s.status IN ('booked', 'confirmed', 'picked_up', 'in_transit', 'completed') \
+                AND s.charged_kobo IS NULL) \
             OR above.subject_id IS NOT NULL \
-         ORDER BY s.updated_at, s.id LIMIT $1",
-    )
+            OR late.subject_id IS NOT NULL \
+         ORDER BY s.updated_at, s.id LIMIT $1"
+    ))
     .bind(MAX_LIMIT)
     .bind(ALERT_WINDOW_DAYS)
     .bind(PRICE_ABOVE_QUOTE)
+    .bind(LATE_OUTCOME)
     .fetch_all(db)
     .await
     .context("list attention shipments")?;
