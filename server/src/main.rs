@@ -87,6 +87,8 @@ async fn main() -> anyhow::Result<()> {
         verify_gate: Arc::new(server::payments::VerifyGate::default()),
         // REVISIT(nipost): swap in a real adapter once NIPOST's API is documented.
         postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
+        // Task 5 wires Shipbubble here.
+        courier: None,
     };
 
     match command {

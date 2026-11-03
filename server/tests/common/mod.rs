@@ -82,6 +82,8 @@ pub struct TestApp {
     pub otp: Arc<RecordingOtpSender>,
     /// The registered payment provider (name "fake", method "mono_directpay").
     pub fake: Arc<FakeProvider>,
+    /// The installed courier provider (always a fake).
+    pub courier: Arc<server::couriers::fake::FakeCourier>,
 }
 
 impl TestApp {
@@ -96,6 +98,7 @@ impl TestApp {
         let fake = Arc::new(FakeProvider::new());
         let mut providers = ProviderRegistry::new();
         providers.register(fake.clone());
+        let courier = Arc::new(server::couriers::fake::FakeCourier::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -105,6 +108,7 @@ impl TestApp {
             payment_redirect_url: TEST_REDIRECT_URL.into(),
             verify_gate: Arc::new(gate),
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
+            courier: Some(courier.clone()),
         };
         Self {
             router: build_app(state.clone()),
@@ -112,6 +116,7 @@ impl TestApp {
             pool,
             otp,
             fake,
+            courier,
         }
     }
 

@@ -5,6 +5,7 @@ pub mod auth;
 pub mod cart;
 pub mod checkout;
 pub mod config;
+pub mod couriers;
 pub mod crypto;
 pub mod delivery;
 pub mod error;
@@ -46,6 +47,8 @@ pub struct AppState {
     pub verify_gate: Arc<payments::VerifyGate>,
     /// Postcode check for delivery addresses (`ManualPostcode` until a NIPOST adapter exists).
     pub postcodes: Arc<dyn delivery::postcode::PostcodeProvider>,
+    /// Courier provider (Shipbubble); `None` when no key is configured.
+    pub courier: Option<Arc<dyn couriers::CourierProvider>>,
 }
 
 async fn health() -> Json<Value> {
