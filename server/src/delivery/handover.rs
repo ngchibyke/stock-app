@@ -22,6 +22,8 @@ use crate::{audit, crypto::FieldCipher, error::AppError};
 
 /// Wrong entries that start a lock.
 const MAX_FAILURES: i32 = 5;
+/// Digits in a code.
+const CODE_LEN: usize = 6;
 
 /// A fresh handover code: 6 decimal digits, uniformly from the OS CSPRNG.
 pub fn generate() -> String {
@@ -47,6 +49,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 ///
 /// - locked -> 409 `handover_locked` (the counter is not touched);
 /// - no code on the order (not out for delivery) -> 409 `invalid_order_state`;
+/// - not 6 digits (blank, a slip) -> 422 `handover_code_wrong`, not an attempt:
+///   it cannot be the code, so it is neither counted nor audited;
 /// - mismatch -> `handover_failures + 1`; the 5th sets `handover_locked_until
 ///   = now() + 1h` and resets the counter; 422 `handover_code_wrong`;
 /// - match -> resets the counter; Ok.
@@ -76,6 +80,9 @@ pub async fn verify(
     let Some(enc) = enc else {
         return Err(AppError::Conflict("invalid_order_state"));
     };
+    if !well_formed(code) {
+        return Err(wrong_code());
+    }
     let expected = cipher.decrypt(&enc)?;
     if constant_time_eq(expected.as_bytes(), code.as_bytes()) {
         sqlx::query("UPDATE orders SET handover_failures = 0 WHERE id = $1")
@@ -102,10 +109,19 @@ pub async fn verify(
     .await
     .context("count handover failure")?;
     attempt(conn, actor, order_id, false, locked_now).await?;
-    Err(AppError::Unprocessable(
+    Err(wrong_code())
+}
+
+fn wrong_code() -> AppError {
+    AppError::Unprocessable(
         "handover_code_wrong",
         "That code is not right. Ask the buyer for the code shown in their order.".into(),
-    ))
+    )
+}
+
+/// Could `code` be a handover code at all?
+fn well_formed(code: &str) -> bool {
+    code.len() == CODE_LEN && code.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Audits one attempt. Never the code.
@@ -144,6 +160,14 @@ mod tests {
     fn codes_vary() {
         let codes: std::collections::HashSet<String> = (0..50).map(|_| generate()).collect();
         assert!(codes.len() > 40);
+    }
+
+    #[test]
+    fn only_six_digits_are_well_formed() {
+        assert!(well_formed("012345"));
+        for bad in ["", "12345", "1234567", "12345a", " 12345", "١٢٣٤٥٦"] {
+            assert!(!well_formed(bad), "{bad}");
+        }
     }
 
     #[test]

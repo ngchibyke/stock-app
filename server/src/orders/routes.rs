@@ -323,10 +323,17 @@ async fn delivered(
         OffsetDateTime::now_utc(),
     )
     .await?;
-    if outcome == Handover::Delivered
-        && let Err(e) = release_order(&state, id, ReleaseReason::BuyerConfirmed).await
-    {
-        tracing::warn!(error = %e, "release after handover not done; auto-release covers it");
+    if outcome == Handover::Delivered {
+        match release_order(&state, id, ReleaseReason::BuyerConfirmed).await {
+            Ok(()) => {}
+            // Expected: a hold must stop the money. Auto-release picks it up after unhold.
+            Err(AppError::Conflict("order_held")) => {
+                tracing::info!("order held at handover; not released");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "release after handover failed; auto-release covers it");
+            }
+        }
     }
     seller_view(&state, &user, id).await
 }

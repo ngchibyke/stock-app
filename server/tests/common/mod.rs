@@ -221,6 +221,25 @@ impl TestApp {
         }
     }
 
+    /// `mark_delivered` for tests of what happens after delivery. The service
+    /// refuses self-delivery orders (the default checkout here), so the order
+    /// becomes a part-2 one, with no delivery method, first.
+    pub async fn mark_delivered(
+        &self,
+        order_id: Uuid,
+        at: time::OffsetDateTime,
+    ) -> Result<(), server::error::AppError> {
+        sqlx::query(
+            "UPDATE orders SET delivery_method = NULL \
+             WHERE id = $1 AND delivery_method = 'self'",
+        )
+        .bind(order_id)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        server::orders::service::mark_delivered(&self.pool, order_id, at).await
+    }
+
     /// Makes outstanding OTPs look older so the issue throttle window passes.
     pub async fn age_otps(&self, secs: i32) {
         sqlx::query(

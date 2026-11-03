@@ -11,7 +11,7 @@ use server::{
         send_payout, settle_payout,
     },
     ledger::{self, Account, Entry},
-    orders::service::{mark_delivered, mark_picked_up},
+    orders::service::mark_picked_up,
     payments::{
         PaymentStatus, PayoutState, ProviderError,
         fake::{FAKE_SIGNATURE_HEADER, FAKE_WEBHOOK_SECRET},
@@ -284,7 +284,7 @@ async fn release_amount_matches_formula(pool: PgPool) {
 async fn release_from_delivered_and_wrong_states_are_noops(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = picked_up_order(&app, 10_000, 10, true).await;
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     exec(
@@ -633,7 +633,7 @@ async fn held_order_not_paid_out(pool: PgPool) {
 async fn held_order_cannot_be_released_except_by_owner(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = picked_up_order(&app, 10_000, 10, true).await;
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     exec(
@@ -687,7 +687,7 @@ async fn auto_release_requires_delivered_and_due(pool: PgPool) {
     assert_eq!(order_status(&app, f.order_id).await, "picked_up");
 
     // Delivered, deadline not reached: skipped.
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     auto().await.unwrap();
@@ -1366,7 +1366,7 @@ async fn mark_delivered_sets_release_at_from_settings_at_that_time(pool: PgPool)
         "UPDATE platform_settings SET release_after_hours = 24",
     )
     .await;
-    mark_delivered(&app.pool, f.order_id, at).await.unwrap();
+    app.mark_delivered(f.order_id, at).await.unwrap();
     let (status, release_ok): (String, bool) = sqlx::query_as(
         "SELECT status::text, release_at = delivered_at + interval '24 hours' FROM orders",
     )
@@ -1381,7 +1381,7 @@ async fn mark_delivered_sets_release_at_from_settings_at_that_time(pool: PgPool)
         "UPDATE platform_settings SET release_after_hours = 72",
     )
     .await;
-    mark_delivered(&app.pool, f.order_id, at).await.unwrap();
+    app.mark_delivered(f.order_id, at).await.unwrap();
     assert!(
         scalar_bool(
             &app,
@@ -1395,7 +1395,7 @@ async fn mark_delivered_sets_release_at_from_settings_at_that_time(pool: PgPool)
         Err(AppError::Conflict("invalid_order_state"))
     ));
     assert!(matches!(
-        mark_delivered(&app.pool, Uuid::new_v4(), at).await,
+        app.mark_delivered(Uuid::new_v4(), at).await,
         Err(AppError::NotFound)
     ));
     let _ = f.variant_id;
@@ -1414,7 +1414,8 @@ async fn deliver_requires_pickup(pool: PgPool) {
     )
     .await;
     assert!(matches!(
-        mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc()).await,
+        app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
+            .await,
         Err(AppError::Conflict("invalid_order_state"))
     ));
 }
@@ -1785,7 +1786,7 @@ async fn happy_path_end_to_end(pool: PgPool) {
     let now = OffsetDateTime::now_utc();
     for order in [order_a, order_b] {
         mark_picked_up(&app.pool, order, now).await.unwrap();
-        mark_delivered(&app.pool, order, now).await.unwrap();
+        app.mark_delivered(order, now).await.unwrap();
         assert_eq!(order_status(&app, order).await, "delivered");
     }
 

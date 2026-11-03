@@ -8,6 +8,9 @@ use common::TestApp;
 use serde_json::{Value, json};
 use server::{
     checkout::{SettleOutcome, settle_payment},
+    error::AppError,
+    escrow::jobs::run_due_jobs,
+    orders::service,
     payments::PaymentStatus,
 };
 use sqlx::PgPool;
@@ -233,11 +236,16 @@ async fn delivered_without_right_code_is_refused(pool: PgPool) {
     let res = step(&app, f.order_id, "out-for-delivery", &f.seller).await;
     assert_eq!(res.status, 200, "{}", res.json);
     let code = code_of(&app, f.order_id).await;
+    let res = deliver(&app, f.order_id, &wrong(&code), &f.seller).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(error_code(&res), "handover_code_wrong");
+    // Anything that is not 6 digits is refused the same way, but is not an
+    // attempt: it is not counted or audited, so a slip cannot lock a seller out.
     for bad in [
-        wrong(&code),
         String::new(),
         "12345".into(),
         format!("{code}0"),
+        "abcdef".into(),
     ] {
         let res = deliver(&app, f.order_id, &bad, &f.seller).await;
         assert_eq!(res.status, 422, "{}", res.json);
@@ -249,7 +257,14 @@ async fn delivered_without_right_code_is_refused(pool: PgPool) {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    assert_eq!(failures, 4);
+    assert_eq!(failures, 1);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action = 'order.handover_attempt'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(attempts, 1);
     // A missing code is a bad body, not an attempt.
     let res = app
         .request(
@@ -293,6 +308,12 @@ async fn handover_code_locks_after_five_wrong(pool: PgPool) {
     assert_eq!(res.status, 409, "{}", res.json);
     assert_eq!(error_code(&res), "handover_locked");
     assert_eq!(status_of(&app, f.order_id).await, "out_for_delivery");
+    // So is a malformed entry: the lock answers first.
+    for bad in ["", "12345"] {
+        let res = deliver(&app, f.order_id, bad, &f.seller).await;
+        assert_eq!(res.status, 409, "{}", res.json);
+        assert_eq!(error_code(&res), "handover_locked");
+    }
 
     // Once the lock has expired, the right code works.
     sqlx::query(
@@ -467,6 +488,19 @@ async fn ready_marks_courier_order(pool: PgPool) {
     .unwrap();
     assert_eq!(audits, 1);
 
+    // Idempotent only while `paid`: any later status is refused.
+    for status in ["picked_up", "refunded"] {
+        sqlx::query("UPDATE orders SET status = $2::order_status WHERE id = $1")
+            .bind(f.order_id)
+            .bind(status)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let res = step(&app, f.order_id, "ready", &f.seller).await;
+        assert_eq!(res.status, 409, "{status}: {}", res.json);
+        assert_eq!(error_code(&res), "invalid_order_state");
+    }
+
     // A self-delivery order is never "ready" for a courier.
     let app2_order = {
         let (_, buyer2) = app.sign_up_verified("08022222229").await;
@@ -628,13 +662,20 @@ async fn handover_code_is_cleared_when_the_order_ends_without_it(pool: PgPool) {
 #[sqlx::test]
 async fn mark_delivered_accepts_out_for_delivery(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let f = paid_order(&app, "self").await;
-    out_for_delivery(&app, &f).await;
-    server::orders::service::mark_delivered(&app.pool, f.order_id, time::OffsetDateTime::now_utc())
+    let f = paid_order(&app, "courier").await;
+    let now = time::OffsetDateTime::now_utc();
+    service::mark_picked_up(&app.pool, f.order_id, now)
+        .await
+        .unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    service::mark_out_for_delivery(&mut tx, &app.state.cipher, f.order_id, now)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    service::mark_delivered(&app.pool, f.order_id, now)
         .await
         .unwrap();
     assert_eq!(status_of(&app, f.order_id).await, "delivered");
-    assert!(!has_code(&app, f.order_id).await);
     let release_at: Option<time::OffsetDateTime> =
         sqlx::query_scalar("SELECT release_at FROM orders WHERE id = $1")
             .bind(f.order_id)
@@ -642,4 +683,122 @@ async fn mark_delivered_accepts_out_for_delivery(pool: PgPool) {
             .await
             .unwrap();
     assert!(release_at.is_some());
+}
+
+/// Nothing can skip the handover code on a self-delivery order.
+#[sqlx::test]
+async fn mark_delivered_refuses_a_self_order(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app, "self").await;
+    let now = time::OffsetDateTime::now_utc();
+    let res = step(&app, f.order_id, "picked-up", &f.seller).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let err = service::mark_delivered(&app.pool, f.order_id, now)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Conflict("invalid_order_state")));
+    assert_eq!(status_of(&app, f.order_id).await, "picked_up");
+
+    let res = step(&app, f.order_id, "out-for-delivery", &f.seller).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let err = service::mark_delivered(&app.pool, f.order_id, now)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Conflict("invalid_order_state")));
+    assert_eq!(status_of(&app, f.order_id).await, "out_for_delivery");
+    assert!(has_code(&app, f.order_id).await);
+}
+
+/// Attempts racing each other are counted one by one: exactly 5 are compared
+/// and the rest meet the one lock they started.
+#[sqlx::test]
+async fn concurrent_wrong_attempts_make_one_lock(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app, "self").await;
+    let code = out_for_delivery(&app, &f).await;
+    let bad = wrong(&code);
+    let attempt = || deliver(&app, f.order_id, &bad, &f.seller);
+    let (a, b, c, d, e, g, h, i, j, k) = tokio::join!(
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt(),
+        attempt()
+    );
+    let all = [a, b, c, d, e, g, h, i, j, k];
+    let count = |status: u16, code: &str| {
+        all.iter()
+            .filter(|r| r.status == status && error_code(r) == code)
+            .count()
+    };
+    assert_eq!(count(422, "handover_code_wrong"), 5);
+    assert_eq!(count(409, "handover_locked"), 5);
+
+    let (failures, locked): (i32, bool) = sqlx::query_as(
+        "SELECT handover_failures, handover_locked_until > now() FROM orders WHERE id = $1",
+    )
+    .bind(f.order_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!((failures, locked), (0, true));
+    assert_eq!(status_of(&app, f.order_id).await, "out_for_delivery");
+}
+
+/// A held order keeps its money through the handover; once the hold lifts,
+/// auto-release pays it (the backstop for a release that did not happen).
+#[sqlx::test]
+async fn held_handover_is_released_by_the_job_after_unhold(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app, "self").await;
+    let code = out_for_delivery(&app, &f).await;
+    let owner = app.owner_token().await;
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/admin/orders/{}/hold", f.order_id),
+            Some(json!({ "reason": "buyer complaint" })),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = deliver(&app, f.order_id, &code, &f.seller).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(res.json["held"], true);
+    assert_eq!(status_of(&app, f.order_id).await, "delivered");
+
+    // Past the deadline but held: the job leaves it.
+    sqlx::query("UPDATE orders SET release_at = now() - interval '1 hour' WHERE id = $1")
+        .bind(f.order_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let report = run_due_jobs(&app.state).await;
+    assert_eq!(report.released, 0, "{report:?}");
+    assert_eq!(status_of(&app, f.order_id).await, "delivered");
+
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/admin/orders/{}/unhold", f.order_id),
+            Some(json!({ "note": "complaint resolved" })),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let report = run_due_jobs(&app.state).await;
+    assert_eq!(report.released, 1, "{report:?}");
+    assert_eq!(status_of(&app, f.order_id).await, "completed");
+    let reason: String =
+        sqlx::query_scalar("SELECT release_reason FROM payouts WHERE order_id = $1")
+            .bind(f.order_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(reason, "auto_after_delivery");
 }

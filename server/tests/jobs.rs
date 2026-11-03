@@ -16,7 +16,7 @@ use server::{
         JobReport, MAX_REFUND_ATTEMPTS, SHIP_DEADLINE_PER_TICK, refund_missed_ship_deadline,
         run_due_jobs, run_loop_every,
     },
-    orders::service::{mark_delivered, mark_picked_up},
+    orders::service::mark_picked_up,
     payments::{PaymentStatus, PayoutState, ProviderError},
 };
 use sqlx::PgPool;
@@ -151,7 +151,7 @@ async fn delivered_order(app: &TestApp) -> Fixture {
     let f = paid_order(app).await;
     let now = OffsetDateTime::now_utc();
     mark_picked_up(&app.pool, f.order_id, now).await.unwrap();
-    mark_delivered(&app.pool, f.order_id, now).await.unwrap();
+    app.mark_delivered(f.order_id, now).await.unwrap();
     f
 }
 
@@ -659,7 +659,7 @@ async fn no_release_without_delivered_at(pool: PgPool) {
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
 
     // Positive control: once delivered and due, it releases.
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     exec(

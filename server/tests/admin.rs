@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use server::{
     checkout::{SettleOutcome, settle_payment},
     escrow::{SettlePayoutOutcome, settle_payout},
-    orders::service::{mark_delivered, mark_picked_up},
+    orders::service::mark_picked_up,
     payments::{
         PaymentStatus, PayoutState, ProviderError,
         fake::{FAKE_SIGNATURE_HEADER, FAKE_WEBHOOK_SECRET},
@@ -141,7 +141,7 @@ async fn delivered_order(app: &TestApp) -> Fixture {
     mark_picked_up(&app.pool, f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     f

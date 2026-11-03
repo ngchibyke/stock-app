@@ -7,8 +7,8 @@
 //! - [`mark_delivered`]: `picked_up | out_for_delivery -> delivered` (sets
 //!   `delivered_at`, and `release_at = delivered_at + release_after_hours`, the
 //!   setting read at that moment, so a later settings change never moves the
-//!   deadline). The courier path; a self-delivery seller goes through
-//!   [`deliver_with_code`].
+//!   deadline). Not for self-delivery orders: those are 409, whatever their
+//!   status, so nothing can skip the handover code.
 //! - [`deliver_with_code`]: `out_for_delivery -> delivered` on a self-delivery
 //!   order, only with the buyer's handover code.
 //! - [`mark_ready`]: a `paid` courier order is ready for collection (`ready_at`).
@@ -28,6 +28,56 @@ use crate::{
 
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 
+/// An order under its lock.
+#[derive(sqlx::FromRow)]
+struct Locked {
+    status: String,
+    self_delivery: bool,
+    courier: bool,
+    ready: bool,
+}
+
+/// Takes the order lock in the caller's transaction.
+async fn lock_order(conn: &mut PgConnection, order_id: Uuid) -> Result<Locked, AppError> {
+    sqlx::query(LOCK_TIMEOUT)
+        .execute(&mut *conn)
+        .await
+        .context("set lock_timeout")?;
+    sqlx::query_as(
+        "SELECT status::text AS status, \
+                COALESCE(delivery_method = 'self', false) AS self_delivery, \
+                COALESCE(delivery_method = 'courier', false) AS courier, \
+                ready_at IS NOT NULL AS ready \
+         FROM orders WHERE id = $1 FOR UPDATE",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(busy_err("order_busy", "lock order"))?
+    .ok_or(AppError::NotFound)
+}
+
+/// The one "delivered" write: clears any handover code (single use) and
+/// snapshots the auto-release deadline from the setting at this moment.
+async fn set_delivered(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    at: OffsetDateTime,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE orders SET status = 'delivered', delivered_at = $2, handover_code_enc = NULL, \
+                release_at = $2 + make_interval(hours => \
+                    (SELECT release_after_hours FROM platform_settings WHERE id)) \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(at)
+    .execute(conn)
+    .await
+    .context("mark delivered")?;
+    Ok(())
+}
+
 /// `paid -> picked_up` at `at`.
 pub async fn mark_picked_up(
     db: &PgPool,
@@ -38,7 +88,8 @@ pub async fn mark_picked_up(
 }
 
 /// `picked_up | out_for_delivery -> delivered` at `at`, snapshotting the
-/// auto-release deadline.
+/// auto-release deadline. A self-delivery order is 409 `invalid_order_state`:
+/// it is only delivered through [`deliver_with_code`].
 pub async fn mark_delivered(
     db: &PgPool,
     order_id: Uuid,
@@ -64,26 +115,16 @@ pub async fn mark_out_for_delivery(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<(), AppError> {
-    sqlx::query(LOCK_TIMEOUT)
-        .execute(&mut *conn)
-        .await
-        .context("set lock_timeout")?;
-    let (status, self_delivery): (String, bool) = sqlx::query_as(
-        "SELECT status::text, COALESCE(delivery_method = 'self', false) \
-         FROM orders WHERE id = $1 FOR UPDATE",
-    )
-    .bind(order_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(busy_err("order_busy", "lock order"))?
-    .ok_or(AppError::NotFound)?;
-    if status == "out_for_delivery" {
+    let order = lock_order(conn, order_id).await?;
+    if order.status == "out_for_delivery" {
         return Ok(());
     }
-    if status != "picked_up" {
+    if order.status != "picked_up" {
         return Err(AppError::Conflict("invalid_order_state"));
     }
-    let code = self_delivery.then(|| cipher.encrypt(&handover::generate()));
+    let code = order
+        .self_delivery
+        .then(|| cipher.encrypt(&handover::generate()));
     sqlx::query(
         "UPDATE orders SET status = 'out_for_delivery', out_for_delivery_at = $2, \
                 handover_code_enc = $3, handover_failures = 0, handover_locked_until = NULL \
@@ -131,23 +172,11 @@ pub async fn deliver_with_code(
     at: OffsetDateTime,
 ) -> Result<Handover, AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    sqlx::query(LOCK_TIMEOUT)
-        .execute(&mut *tx)
-        .await
-        .context("set lock_timeout")?;
-    let (status, self_delivery): (String, bool) = sqlx::query_as(
-        "SELECT status::text, COALESCE(delivery_method = 'self', false) \
-         FROM orders WHERE id = $1 FOR UPDATE",
-    )
-    .bind(order_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(busy_err("order_busy", "lock order"))?
-    .ok_or(AppError::NotFound)?;
-    if !self_delivery {
+    let order = lock_order(&mut tx, order_id).await?;
+    if !order.self_delivery {
         return Err(AppError::Conflict("invalid_order_state"));
     }
-    match status.as_str() {
+    match order.status.as_str() {
         "delivered" | "completed" => return Ok(Handover::Already),
         "out_for_delivery" => {}
         _ => return Err(AppError::Conflict("invalid_order_state")),
@@ -163,17 +192,7 @@ pub async fn deliver_with_code(
         }
         return Err(e);
     }
-    sqlx::query(
-        "UPDATE orders SET status = 'delivered', delivered_at = $2, handover_code_enc = NULL, \
-                release_at = $2 + make_interval(hours => \
-                    (SELECT release_after_hours FROM platform_settings WHERE id)) \
-         WHERE id = $1",
-    )
-    .bind(order_id)
-    .bind(at)
-    .execute(&mut *tx)
-    .await
-    .context("mark delivered")?;
+    set_delivered(&mut tx, order_id, at).await?;
     audit::record(
         &mut tx,
         Some(actor),
@@ -188,8 +207,8 @@ pub async fn deliver_with_code(
 }
 
 /// A `paid` courier order is ready for the courier to collect: sets `ready_at`
-/// at `at`. Idempotent: once set, `ready_at` keeps its first value (whatever
-/// the status by then). Task 9 books the shipment from here.
+/// at `at`. Idempotent while the order is still `paid`: `ready_at` keeps its
+/// first value. Any later status is 409. Task 9 books the shipment from here.
 pub async fn mark_ready(
     db: &PgPool,
     actor: Uuid,
@@ -197,28 +216,12 @@ pub async fn mark_ready(
     at: OffsetDateTime,
 ) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    sqlx::query(LOCK_TIMEOUT)
-        .execute(&mut *tx)
-        .await
-        .context("set lock_timeout")?;
-    let (status, courier, ready): (String, bool, bool) = sqlx::query_as(
-        "SELECT status::text, COALESCE(delivery_method = 'courier', false), \
-                ready_at IS NOT NULL \
-         FROM orders WHERE id = $1 FOR UPDATE",
-    )
-    .bind(order_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(busy_err("order_busy", "lock order"))?
-    .ok_or(AppError::NotFound)?;
-    if !courier {
+    let order = lock_order(&mut tx, order_id).await?;
+    if !order.courier || order.status != "paid" {
         return Err(AppError::Conflict("invalid_order_state"));
     }
-    if ready {
+    if order.ready {
         return Ok(());
-    }
-    if status != "paid" {
-        return Err(AppError::Conflict("invalid_order_state"));
     }
     sqlx::query("UPDATE orders SET ready_at = $2 WHERE id = $1")
         .bind(order_id)
@@ -247,21 +250,15 @@ async fn transition(
     to: &'static str,
 ) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    sqlx::query(LOCK_TIMEOUT)
-        .execute(&mut *tx)
-        .await
-        .context("set lock_timeout")?;
-    let status: String =
-        sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1 FOR UPDATE")
-            .bind(order_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(busy_err("order_busy", "lock order"))?
-            .ok_or(AppError::NotFound)?;
-    if status == to {
+    let order = lock_order(&mut tx, order_id).await?;
+    // Guarded here, under the lock: a self-delivery order needs its code.
+    if to == "delivered" && order.self_delivery {
+        return Err(AppError::Conflict("invalid_order_state"));
+    }
+    if order.status == to {
         return Ok(());
     }
-    if !from.contains(&status.as_str()) {
+    if !from.contains(&order.status.as_str()) {
         return Err(AppError::Conflict("invalid_order_state"));
     }
     if to == "picked_up" {
@@ -272,18 +269,7 @@ async fn transition(
             .await
             .context("mark picked up")?;
     } else {
-        sqlx::query(
-            "UPDATE orders SET status = 'delivered', delivered_at = $2, \
-                    handover_code_enc = NULL, \
-                    release_at = $2 + make_interval(hours => \
-                        (SELECT release_after_hours FROM platform_settings WHERE id)) \
-             WHERE id = $1",
-        )
-        .bind(order_id)
-        .bind(at)
-        .execute(&mut *tx)
-        .await
-        .context("mark delivered")?;
+        set_delivered(&mut tx, order_id, at).await?;
     }
     audit::record(
         &mut tx,
