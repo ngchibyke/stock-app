@@ -33,6 +33,9 @@ pub enum Account {
     Escrow,
     PlatformRevenue,
     ProviderFees,
+    /// What the courier wallet was charged, moved out of `PlatformRevenue` at
+    /// booking. So `PlatformRevenue` can fall as well as grow.
+    CourierCosts,
     SellerPayable,
     SellerPaid,
     /// Money returned to buyers.

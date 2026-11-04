@@ -16,8 +16,13 @@
 //!    (well under the lease, so a live worker always answers within it).
 //! 3. The outcome is written under the order lock, fenced on the lease
 //!    (`status = 'booking' AND sending_until = <ours>`):
-//!    - success: `booked`, with what the provider charged. A charge above the
-//!      quote plus the tolerance raises `shipment.price_above_quote`;
+//!    - success: `booked`, with what the provider charged. The charge is booked
+//!      in that same transaction, `courier_costs +charged`,
+//!      `platform_revenue -charged`, key `("courier_charge", shipment_id)`,
+//!      whatever happens to the order later: no cancel credit is posted until
+//!      the sandbox shows what the wallet gets back. An unreadable charge posts
+//!      nothing and stays on the attention list. A charge above the quote plus
+//!      the tolerance raises `shipment.price_above_quote`;
 //!    - `Unavailable` (definitely not sent): back to `booking_pending` with the
 //!      jobs' backoff, then `booking_failed` after [`MAX_BOOK_ATTEMPTS`] calls;
 //!    - `Rejected`: `booking_failed`, with `last_error` the code only;
@@ -63,6 +68,7 @@ use crate::{
     couriers::{Booking, CourierError, CourierProvider},
     error::AppError,
     escrow::jobs::BACKOFF_SQL,
+    ledger::{self, Account, Entry},
 };
 
 /// Calls to `book` before an always-unavailable provider gives up.
@@ -86,6 +92,7 @@ pub const WALLET_ALERT: &str = "courier.wallet_alert";
 /// A booking 400 may be an empty wallet; the two cannot be told apart.
 const WALLET_REFUSAL_CODE: &str = "http_400";
 const SUBJECT: &str = "shipment";
+const CHARGE_KIND: &str = "courier_charge";
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 
 /// Inserts the order's `booking_pending` shipment, unless it has one. The
@@ -480,8 +487,8 @@ async fn record_booking(
     );
     // No lock_timeout here: this answer may have cost money, so it waits its turn.
     let mut tx = state.db.begin().await.context("begin")?;
-    let order_status: String =
-        sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1 FOR UPDATE")
+    let (order_status, checkout_id): (String, Uuid) =
+        sqlx::query_as("SELECT status::text, checkout_id FROM orders WHERE id = $1 FOR UPDATE")
             .bind(call.order_id)
             .fetch_one(&mut *tx)
             .await
@@ -541,6 +548,26 @@ async fn record_booking(
         .await?;
         tx.commit().await.context("commit late outcome")?;
         return Ok(false);
+    }
+    // Nothing to post for a free label: the ledger refuses an empty set.
+    if let Some(charged) = charged.filter(|c| *c > 0) {
+        let entry = |account, amount_kobo| Entry {
+            order_id: Some(call.order_id),
+            checkout_id: Some(checkout_id),
+            account,
+            amount_kobo,
+            kind: CHARGE_KIND,
+            reference: booking.map(|b| b.provider_order_id.clone()),
+        };
+        ledger::post(
+            &mut tx,
+            (CHARGE_KIND, &call.id.to_string()),
+            &[
+                entry(Account::CourierCosts, charged),
+                entry(Account::PlatformRevenue, -charged),
+            ],
+        )
+        .await?;
     }
     let (action, detail) = &outcome.audit;
     audit::record(

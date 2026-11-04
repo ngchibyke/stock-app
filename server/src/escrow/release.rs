@@ -18,7 +18,8 @@
 //!    order (`delivery_method = 'self'`) is part of the seller's payout (the
 //!    payout fee and stamp duty are computed on it) and not of
 //!    `platform_revenue`; a courier fee, or none (part-2 orders), stays in
-//!    `platform_revenue`, which pays the courier. The cut is on items only.
+//!    `platform_revenue`, which pays the courier: the charge left it for
+//!    `courier_costs` at booking. The cut is on items only.
 //!    The payout fee is fixed here, from the fee schedule snapshotted on the
 //!    order when it was paid (orders paid before that snapshot existed use the
 //!    schedule at release). An owner decision ([`release_by_owner`]) also

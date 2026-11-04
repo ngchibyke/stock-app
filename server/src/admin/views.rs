@@ -488,8 +488,7 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
             OR (s.status = 'booking' AND o.status IN ('refund_pending', 'refunded')) \
             OR (s.status = 'cancel_pending' \
                 AND s.cancel_requested_at < now() - interval '{CANCEL_STUCK_AFTER}') \
-            OR (s.status IN ('booked', 'confirmed', 'picked_up', 'in_transit', 'completed') \
-                AND s.charged_kobo IS NULL) \
+            OR (s.provider_order_id IS NOT NULL AND s.charged_kobo IS NULL) \
             OR above.subject_id IS NOT NULL \
             OR late.subject_id IS NOT NULL \
          UNION ALL \

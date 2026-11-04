@@ -175,6 +175,18 @@ async fn audits(app: &TestApp, action: &str) -> Vec<Value> {
         .unwrap()
 }
 
+/// The order's `courier_charge` ledger entries, in posting order.
+async fn charge_entries(app: &TestApp, order_id: Uuid) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT account::text, amount_kobo FROM ledger_entries \
+         WHERE order_id = $1 AND kind = 'courier_charge' ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap()
+}
+
 /// Puts the shipment in `booking` with a live lease, as a worker mid-call would.
 async fn hold_lease(app: &TestApp, order_id: Uuid) {
     sqlx::query(
@@ -763,6 +775,126 @@ async fn booked_without_a_charge_is_on_the_attention_list(pool: PgPool) {
     let owner = app.owner_token().await;
     let json = attention(&app, &owner).await;
     assert_eq!(json["shipments_attention"][0]["status"], "booked", "{json}");
+}
+
+/// The attention list is the only record of a label with no known charge: it
+/// must stay there once a refund has moved the shipment on.
+#[sqlx::test]
+async fn cancelled_without_a_charge_stays_on_the_attention_list(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.set_rates(vec![]);
+    tick(&app).await;
+    assert_eq!(shipment(&app, f.order_id).await.status, "booked");
+    assert!(charge_entries(&app, f.order_id).await.is_empty());
+
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    tick(&app).await;
+    assert_eq!(shipment(&app, f.order_id).await.status, "cancelled");
+    let owner = app.owner_token().await;
+    let json = attention(&app, &owner).await;
+    assert_eq!(
+        json["shipments_attention"][0]["status"], "cancelled",
+        "{json}"
+    );
+    assert!(charge_entries(&app, f.order_id).await.is_empty());
+}
+
+#[sqlx::test]
+async fn a_booking_books_its_charge_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    assert!(charge_entries(&app, f.order_id).await.is_empty());
+    tick(&app).await;
+    let booked = vec![
+        ("courier_costs".to_string(), QUOTE),
+        ("platform_revenue".to_string(), -QUOTE),
+    ];
+    assert_eq!(charge_entries(&app, f.order_id).await, booked);
+    // The entries point at the label, for matching with the wallet statement.
+    let refs: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT ref FROM ledger_entries WHERE kind = 'courier_charge'")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(refs, [Some("fake-1".into()), Some("fake-1".into())]);
+
+    // Another tick, then the same shipment answered again: the key holds.
+    tick(&app).await;
+    sqlx::query(
+        "UPDATE shipments SET status = 'booking_pending', provider_order_id = NULL, \
+                charged_kobo = NULL WHERE order_id = $1",
+    )
+    .bind(f.order_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    app.courier.set_rates(vec![Rate {
+        charged_kobo: QUOTE + 1,
+        ..default_rate()
+    }]);
+    tick(&app).await;
+    assert_eq!(shipment(&app, f.order_id).await.status, "booked");
+    assert_eq!(app.courier.book_calls(), 2);
+    assert_eq!(charge_entries(&app, f.order_id).await, booked);
+}
+
+/// A free label must not fail the outcome write: the ledger refuses an empty set.
+#[sqlx::test]
+async fn a_free_label_books_and_posts_nothing(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.set_rates(vec![Rate {
+        charged_kobo: 0,
+        ..default_rate()
+    }]);
+    let report = tick(&app).await;
+    assert_eq!(report.failed, 0, "{report:?}");
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.status, "booked");
+    assert_eq!(row.charged_kobo, Some(0));
+    assert!(charge_entries(&app, f.order_id).await.is_empty());
+}
+
+/// The label outlived the refund: the buyer is repaid in full and the wallet
+/// stays debited, so the cost stays on the books.
+#[sqlx::test]
+async fn refund_with_cancel_failed_leaves_the_cost_on_the_books(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = ready_order(&app).await;
+    tick(&app).await;
+    app.courier.fail_cancel_with(CourierError::Rejected {
+        code: "http_400".into(),
+        message: "already processed".into(),
+    });
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    tick(&app).await;
+    assert_eq!(shipment(&app, f.order_id).await.status, "cancel_failed");
+
+    const TOTAL: i64 = 10_000 + QUOTE;
+    const FEE: i64 = 10;
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT account::text, sum(amount_kobo)::bigint FROM ledger_entries \
+         WHERE order_id = $1 GROUP BY account ORDER BY account::text",
+    )
+    .bind(f.order_id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("buyer_funds".to_string(), -TOTAL),
+            ("courier_costs".to_string(), QUOTE),
+            ("escrow".to_string(), 0),
+            ("platform_revenue".to_string(), -QUOTE - FEE),
+            ("provider_fees".to_string(), FEE),
+            ("refunds".to_string(), TOTAL),
+        ]
+    );
+    // No credit of any kind until the sandbox shows what the wallet gets back.
+    assert_eq!(charge_entries(&app, f.order_id).await.len(), 2);
 }
 
 #[sqlx::test]

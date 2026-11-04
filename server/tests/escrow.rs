@@ -2310,6 +2310,9 @@ async fn courier_end_to_end(pool: PgPool) {
     let label = label.expect("a provider label");
     run_due_jobs(&app.state).await;
     assert_eq!(app.courier.book_calls(), 1, "never booked twice");
+    // The wallet's charge leaves revenue at booking, whatever the order does next.
+    assert_eq!(balance(&app, "courier_costs").await, DELIVERY_FEE);
+    assert_eq!(balance(&app, "platform_revenue").await, -DELIVERY_FEE);
 
     // Courier webhooks: picked_up, in_transit, completed.
     let mut statuses = Vec::new();
@@ -2369,11 +2372,10 @@ async fn courier_end_to_end(pool: PgPool) {
         order_accounts(&app, order).await,
         [
             ("buyer_funds".to_string(), -total),
+            ("courier_costs".to_string(), DELIVERY_FEE),
             ("escrow".to_string(), 0),
-            (
-                "platform_revenue".to_string(),
-                CUT + DELIVERY_FEE + PAYOUT_FEE
-            ),
+            // The fee came in and went out: revenue is the cut and the payout fee.
+            ("platform_revenue".to_string(), CUT + PAYOUT_FEE),
             ("provider_fees".to_string(), COLLECTION_FEE),
             ("seller_payable".to_string(), PAYOUT),
         ]

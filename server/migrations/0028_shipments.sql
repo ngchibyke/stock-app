@@ -10,6 +10,10 @@
 -- Personal data: `courier_phone_enc` is the courier's phone, encrypted with
 -- FieldCipher (never plaintext). `last_error` holds our own short codes, never
 -- provider text.
+-- What the courier wallet pays. The enum value is added here, not in 0012, which has
+-- been released; nothing in this file uses it.
+ALTER TYPE ledger_account ADD VALUE 'courier_costs';
+
 -- When the store's pickup really moved (address, area or postcode). The saved
 -- courier address code cannot answer that: it is also cleared by a phone change
 -- and by resaving the same address.
