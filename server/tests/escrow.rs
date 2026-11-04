@@ -1527,12 +1527,11 @@ async fn seller_pays_no_collection_fee_on_a_courier_fee(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f =
         picked_up_order_with_method(&app, 1_000_000, 1_500, 500_000, Some("courier"), true).await;
-    let (seller, platform): (i64, i64) = sqlx::query_as(
-        "SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let (seller, platform): (i64, i64) =
+        sqlx::query_as("SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!((seller, platform), (1_000, 500));
     // The seller's view and the payout agree: 1,000,000 - 50,000 - 1,000 - 3,500.
     assert_eq!(seller_expected_payout(&app, &f).await, 945_500);
@@ -1548,12 +1547,11 @@ async fn seller_pays_no_collection_fee_on_a_courier_fee(pool: PgPool) {
 async fn seller_pays_collection_fee_on_a_self_delivery_fee(pool: PgPool) {
     let app = TestApp::new(pool).await;
     picked_up_order_with_method(&app, 1_000_000, 1_500, 500_000, Some("self"), true).await;
-    let (seller, platform): (i64, i64) = sqlx::query_as(
-        "SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders",
-    )
-    .fetch_one(&app.pool)
-    .await
-    .unwrap();
+    let (seller, platform): (i64, i64) =
+        sqlx::query_as("SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
     assert_eq!((seller, platform), (1_500, 0));
 }
 
@@ -2175,6 +2173,8 @@ async fn happy_path_end_to_end(pool: PgPool) {
 // ------------------------------------------------- delivery end to end (part 3)
 
 const ITEMS: i64 = 1_000_000;
+/// Whoever earns it: the seller's fee on the self-delivery path, the courier's
+/// charge (the fake's default rate) on the courier path.
 const DELIVERY_FEE: i64 = 150_000;
 /// The provider's collection fee on the whole payment.
 const COLLECTION_FEE: i64 = 1_500;
@@ -2379,9 +2379,20 @@ async fn self_delivery_end_to_end(pool: PgPool) {
             Some(&l.seller_token),
         )
         .await;
-    assert!(res.status >= 400, "{}", res.json);
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "handover_code_wrong");
     assert_eq!(order_status(&app, order).await, "out_for_delivery");
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
+    // The failed attempt is audited, without either code.
+    let attempts: Vec<serde_json::Value> =
+        sqlx::query_scalar("SELECT detail FROM audit_log WHERE action = 'order.handover_attempt'")
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["ok"], false);
+    let text = attempts[0].to_string();
+    assert!(!text.contains(&code) && !text.contains(wrong), "{text}");
     let res = app
         .request(
             Method::POST,
