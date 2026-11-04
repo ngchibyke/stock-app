@@ -15,7 +15,10 @@
 //!   the window.
 //! - `Cancelled` below `picked_up` sets the shipment `cancelled` with an attention
 //!   item, and the order stays `paid` with `ready_at` kept, so the owner can
-//!   re-book. Above that it is ignored.
+//!   re-book. On `picked_up` or `in_transit` nothing moves, but a person must look:
+//!   the courier disowns a parcel it holds, and only the 30-day backstop would
+//!   notice ([`CANCELLED_AFTER_PICKUP`], attention item). After `completed` it is
+//!   ignored.
 //! - A `cancelled` shipment comes back only on `PickedUp` or later: a parcel moved.
 //! - Refunded or cancelled order: the event and the shipment's state are recorded
 //!   but the order never moves ([`AFTER_REFUND`], attention item).
@@ -24,9 +27,16 @@
 //!   neither the shipment nor the order moves.
 //! - A self-delivery order is never moved: only its handover code delivers it.
 //!
+//! A signed update for a label no shipment has writes [`UNKNOWN_SHIPMENT`]: the
+//! label and the state are the only evidence that can resolve a `booking_unknown`
+//! row. An unsigned request never gets this far, so it writes nothing.
+//!
 //! Ignored updates are logged with the cause only. Neither logs nor audit rows
 //! carry the phone, the URL or any provider text. The courier's phone is stored
-//! encrypted, and a tracking URL only if it is https.
+//! encrypted: a forward move replaces it, an update of the shipment's own rank
+//! fills it if we have none (a poll's repeat included, since the phone can appear
+//! after the status), and a refunded order keeps none, since nothing will show it.
+//! A tracking URL is stored only if it is https.
 
 use anyhow::Context;
 use serde_json::json;
@@ -48,6 +58,10 @@ use crate::{
 pub const AFTER_REFUND: &str = "shipment.after_refund";
 /// Audit action: the courier moved a parcel whose cancel was asked for.
 pub const CANCEL_LOST: &str = "shipment.cancel_lost";
+/// Audit action: the courier cancelled a parcel it has collected.
+pub const CANCELLED_AFTER_PICKUP: &str = "shipment.cancelled_after_pickup";
+/// Audit action: a signed update named a label no shipment has.
+pub const UNKNOWN_SHIPMENT: &str = "courier.unknown_shipment";
 /// Statuses the poll asks about.
 pub const POLLED_STATUSES: &str = "'booked', 'confirmed', 'picked_up', 'in_transit'";
 /// A shipment is polled after this long with no event and no poll.
@@ -58,6 +72,8 @@ const SUBJECT: &str = "shipment";
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 /// Longest tracking URL kept.
 const MAX_TRACKING_URL: usize = 2048;
+/// A longer "label" is not one: it is logged, not audited.
+const MAX_LABEL_LEN: usize = 200;
 
 /// What [`apply_courier_update`] did.
 #[non_exhaustive]
@@ -139,6 +155,8 @@ enum Step {
     Cancel { surprise: bool },
     /// The courier moved a parcel we asked to cancel.
     CancelLost,
+    /// The courier says it cancelled a parcel it holds.
+    CancelAfterPickup,
     /// Recorded only, with the cause for the log.
     Ignore(&'static str),
 }
@@ -171,7 +189,8 @@ fn decide(current: &str, state: ShipmentState) -> Step {
     match state {
         Cancelled if current == "cancelled" => Step::Ignore("lower_rank"),
         Cancelled if rank < PickedUp.rank() => Step::Cancel { surprise: true },
-        Cancelled => Step::Ignore("cancel_after_pickup"),
+        Cancelled if current == "completed" => Step::Ignore("cancel_after_completed"),
+        Cancelled => Step::CancelAfterPickup,
         Pending | Confirmed if current == "cancelled" => Step::Ignore("lower_rank"),
         s if s.rank() <= rank => Step::Ignore("lower_rank"),
         Confirmed => Step::Forward("confirmed"),
@@ -207,6 +226,14 @@ pub async fn apply_courier_update(
     .context("find shipment")?;
     let Some((id, order_id, provider)) = found else {
         tracing::warn!(cause = "unknown_shipment", "courier update ignored");
+        if update.provider_order_id.len() <= MAX_LABEL_LEN {
+            let detail = json!({
+                "provider_order_id": update.provider_order_id,
+                "state": update.state.as_str(),
+            });
+            audit::record(&mut tx, None, UNKNOWN_SHIPMENT, "courier", None, detail).await?;
+            tx.commit().await.context("commit unknown shipment")?;
+        }
         return Ok(Applied::UnknownShipment);
     };
     let (order_status, courier_order): (String, bool) = sqlx::query_as(
@@ -238,15 +265,35 @@ pub async fn apply_courier_update(
     .fetch_optional(&mut *tx)
     .await
     .context("record courier event")?;
-    if inserted.is_none() {
-        tracing::info!(cause = "duplicate", "courier update ignored");
-        return Ok(Applied::Ignored);
-    }
-
     let refunded = matches!(
         order_status.as_str(),
         "refund_pending" | "refunded" | "cancelled"
     );
+    let phone_enc = (!refunded)
+        .then_some(update.courier_phone.as_deref())
+        .flatten()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| state.cipher.encrypt(p));
+    // Ahead of the duplicate check: a poll's repeats share a key.
+    let same_rank = update.state != ShipmentState::Cancelled
+        && rank_of(&shipment_status) == Some(update.state.rank());
+    if same_rank && phone_enc.is_some() {
+        sqlx::query(
+            "UPDATE shipments SET courier_phone_enc = COALESCE(courier_phone_enc, $2) \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(&phone_enc)
+        .execute(&mut *tx)
+        .await
+        .context("store courier phone")?;
+    }
+    if inserted.is_none() {
+        tx.commit().await.context("commit repeat")?;
+        tracing::info!(cause = "duplicate", "courier update ignored");
+        return Ok(Applied::Ignored);
+    }
+
     let step = decide(&shipment_status, update.state);
     let mut change = Change::default();
     let applied = match step {
@@ -270,6 +317,24 @@ pub async fn apply_courier_update(
             .await?;
             Applied::Updated
         }
+        Step::CancelAfterPickup => {
+            change.attention = Some("cancelled_after_pickup");
+            let detail = json!({ "status": shipment_status });
+            audit::record(
+                &mut tx,
+                None,
+                CANCELLED_AFTER_PICKUP,
+                SUBJECT,
+                Some(id),
+                detail,
+            )
+            .await?;
+            tracing::warn!(
+                cause = "cancelled_after_pickup",
+                "courier update not applied"
+            );
+            Applied::Recorded
+        }
         Step::CancelLost => {
             change.attention = Some("cancel_lost");
             let detail = json!({ "state": update.state.as_str(), "status": shipment_status });
@@ -281,11 +346,7 @@ pub async fn apply_courier_update(
         }
         Step::Forward(target) => {
             change.status = Some(target);
-            change.phone_enc = update
-                .courier_phone
-                .as_deref()
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| state.cipher.encrypt(p));
+            change.phone_enc = phone_enc;
             change.tracking_url = safe_tracking_url(update.tracking_url.as_deref());
             let detail = json!({ "from": shipment_status, "to": target });
             audit::record(
@@ -483,12 +544,13 @@ mod tests {
         let surprise = Step::Cancel { surprise: true };
         assert_eq!(decide("booked", Cancelled), surprise);
         assert_eq!(decide("confirmed", Cancelled), surprise);
-        for current in ["picked_up", "in_transit", "completed"] {
-            assert_eq!(
-                decide(current, Cancelled),
-                Step::Ignore("cancel_after_pickup")
-            );
+        for current in ["picked_up", "in_transit"] {
+            assert_eq!(decide(current, Cancelled), Step::CancelAfterPickup);
         }
+        assert_eq!(
+            decide("completed", Cancelled),
+            Step::Ignore("cancel_after_completed")
+        );
         assert_eq!(decide("cancelled", Cancelled), Step::Ignore("lower_rank"));
     }
 

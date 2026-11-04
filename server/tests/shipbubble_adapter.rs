@@ -668,7 +668,7 @@ fn webhook_status_changed_maps_state() {
 fn webhook_logs_wallet_alert_and_unknown_status_cause_without_values() {
     let c = ShipbubbleCourier::new(config("http://127.0.0.1:1")).unwrap();
     let wallet = json!({
-        "event": "wallet.auto_topup.succeeded",
+        "event": "wallet.auto_topup.failed",
         "amount": 987654,
         "currency": "NGN",
         "ref_code": "REF-SECRET-42"
@@ -677,11 +677,11 @@ fn webhook_logs_wallet_alert_and_unknown_status_cause_without_values() {
     assert_eq!(
         c.parse_webhook(&h, &body).unwrap(),
         CourierEvent::WalletAlert {
-            event: "wallet.auto_topup.succeeded".into()
+            event: "wallet.auto_topup.failed".into()
         }
     );
     assert!(logs_contain("wallet_alert"));
-    assert!(logs_contain("wallet.auto_topup.succeeded"));
+    assert!(logs_contain("wallet.auto_topup.failed"));
     assert!(!logs_contain("987654"));
     assert!(!logs_contain("REF-SECRET-42"));
     let (h, body) = signed(&status_event("shipment.status.changed", "teleported"));
@@ -698,6 +698,8 @@ fn webhook_unknown_event_is_ignored() {
         status_event("shipment.sla.updated", "in_transit"),
         status_event("shipment.cod.remitted", "completed"),
         status_event("shipment.something.new", "completed"),
+        // A successful top-up is not a warning.
+        json!({"event": "wallet.auto_topup.succeeded", "amount": 1000, "currency": "NGN", "ref_code": "r1"}),
         // Unknown status string and missing order id: ignored, not an error.
         status_event("shipment.status.changed", "returned"),
         json!({"event": "shipment.status.changed", "status": "completed"}),
@@ -712,10 +714,6 @@ fn webhook_unknown_event_is_ignored() {
     }
     // Wallet events carry only a name from the adapter's list.
     for (payload, event) in [
-        (
-            json!({"event": "wallet.auto_topup.succeeded", "amount": 1000, "currency": "NGN", "ref_code": "r1"}),
-            "wallet.auto_topup.succeeded",
-        ),
         (
             json!({"event": "wallet.auto_topup.failed", "reason": "charge_failed", "failure_count": 2}),
             "wallet.auto_topup.failed",

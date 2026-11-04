@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 use crate::{
     audit,
-    delivery::shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
+    delivery::{
+        events::UNKNOWN_SHIPMENT,
+        shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
+    },
     error::AppError,
 };
 
@@ -284,8 +287,10 @@ pub struct Reconciliation {
     /// a `cancel_pending` older than [`CANCEL_STUCK_AFTER`], a booking still in
     /// flight on a refunded order, a booking with no charged amount, a booking
     /// answer that arrived after its lease was lost, bookings charged above
-    /// the quote in the last [`ALERT_WINDOW_DAYS`] days, and any shipment with
-    /// an `attention` reason.
+    /// the quote in the last [`ALERT_WINDOW_DAYS`] days, any shipment with an
+    /// `attention` reason, and labels from signed webhooks that no shipment has
+    /// (`attention = unknown_label`, last [`ALERT_WINDOW_DAYS`] days, one row per
+    /// label), which may be the label of a `booking_unknown` shipment.
     pub shipments_attention: Vec<ShipmentAttention>,
     /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
     /// first.
@@ -328,22 +333,28 @@ pub struct PayoutAmountMismatch {
 }
 
 /// A shipment on the attention list. No courier name or phone, for anyone.
+/// An unknown label matches no shipment, so its row has no `id`, `order_id`,
+/// `store_id`, `order_status` or `quoted_kobo`, and its `status` is
+/// `unknown_label`.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ShipmentAttention {
-    pub id: Uuid,
-    pub order_id: Uuid,
-    pub store_id: Uuid,
+    pub id: Option<Uuid>,
+    pub order_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
     pub status: String,
     /// A live shipment on a refunded order shows here.
-    pub order_status: String,
+    pub order_status: Option<String>,
     pub provider_order_id: Option<String>,
-    pub quoted_kobo: i64,
+    /// The last state the courier sent for an unknown label.
+    pub courier_state: Option<String>,
+    pub quoted_kobo: Option<i64>,
     pub charged_kobo: Option<i64>,
     pub attempts: i32,
     /// Our own short code, never provider text.
     pub last_error: Option<String>,
-    /// Why a courier update needs a person: `courier_cancelled`, `cancel_lost`,
-    /// `after_refund`, `en_route_on_refund` or `not_courier_order`.
+    /// Why a courier update needs a person: `courier_cancelled`,
+    /// `cancelled_after_pickup`, `cancel_lost`, `after_refund`,
+    /// `en_route_on_refund`, `not_courier_order` or `unknown_label`.
     pub attention: Option<String>,
     pub price_above_quote: bool,
     /// A label the provider made after the booking's lease was lost: paid for,
@@ -435,9 +446,16 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
              SELECT DISTINCT ON (subject_id) subject_id, detail->>'provider_order_id' AS label \
              FROM audit_log \
              WHERE action = $4 AND detail->>'provider_order_id' IS NOT NULL \
-             ORDER BY subject_id, at DESC, id DESC) \
+             ORDER BY subject_id, at DESC, id DESC), \
+         unknown AS ( \
+             SELECT DISTINCT ON (detail->>'provider_order_id') \
+                    detail->>'provider_order_id' AS label, detail->>'state' AS state, at \
+             FROM audit_log \
+             WHERE action = $5 AND at > now() - make_interval(days => $2) \
+             ORDER BY detail->>'provider_order_id', at DESC, id DESC) \
          SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
-                o.status::text AS order_status, s.provider_order_id, s.quoted_kobo, \
+                o.status::text AS order_status, s.provider_order_id, \
+                NULL::text AS courier_state, s.quoted_kobo, \
                 s.charged_kobo, s.attempts, s.last_error, s.attention, \
                 above.subject_id IS NOT NULL AS price_above_quote, \
                 late.label AS late_provider_order_id, s.updated_at \
@@ -455,12 +473,18 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
                 AND s.charged_kobo IS NULL) \
             OR above.subject_id IS NOT NULL \
             OR late.subject_id IS NOT NULL \
-         ORDER BY s.updated_at, s.id LIMIT $1"
+         UNION ALL \
+         SELECT NULL, NULL, NULL, 'unknown_label', NULL, u.label, u.state, NULL, NULL, 0, \
+                NULL, 'unknown_label', false, NULL, u.at \
+         FROM unknown u \
+         WHERE NOT EXISTS (SELECT 1 FROM shipments s WHERE s.provider_order_id = u.label) \
+         ORDER BY updated_at, id LIMIT $1"
     ))
     .bind(MAX_LIMIT)
     .bind(ALERT_WINDOW_DAYS)
     .bind(PRICE_ABOVE_QUOTE)
     .bind(LATE_OUTCOME)
+    .bind(UNKNOWN_SHIPMENT)
     .fetch_all(db)
     .await
     .context("list attention shipments")?;

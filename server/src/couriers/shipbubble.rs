@@ -439,7 +439,6 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 fn loggable_wallet_event(event: &str) -> &'static str {
     match event {
         "wallet.threshold.alert" => "wallet.threshold.alert",
-        "wallet.auto_topup.succeeded" => "wallet.auto_topup.succeeded",
         "wallet.auto_topup.failed" => "wallet.auto_topup.failed",
         _ => "wallet.other",
     }
@@ -683,6 +682,8 @@ impl CourierProvider for ShipbubbleCourier {
         let event = str_at(&payload, "event").ok_or(CourierError::Inconclusive)?;
         match event {
             "shipment.status.changed" | "shipment.cancelled" => {}
+            // A successful top-up is good news, not a warning.
+            "wallet.auto_topup.succeeded" => return Ok(CourierEvent::Ignored),
             e if e.starts_with("wallet.") => {
                 let event = loggable_wallet_event(e);
                 tracing::warn!(provider = SHIPBUBBLE_NAME, event, "wallet_alert");

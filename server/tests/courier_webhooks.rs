@@ -488,6 +488,13 @@ async fn concurrent_duplicates_land_once(pool: PgPool) {
 async fn bad_signature_is_401_and_nothing_written(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = booked_order(&app).await;
+    let audit_rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_log")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap()
+    };
+    let before = audit_rows().await;
     let body =
         serde_json::to_vec(&json!({ "provider_order_id": LABEL, "state": "completed" })).unwrap();
     for headers in [vec![], vec![(FAKE_SIGNATURE_HEADER, "wrong")]] {
@@ -497,6 +504,17 @@ async fn bad_signature_is_401_and_nothing_written(pool: PgPool) {
         assert_eq!(res.status, 401, "{}", res.json);
         assert_eq!(res.json["error"]["code"], "invalid_signature");
     }
+    // Not even for a label we do not know, or a wallet event.
+    for body in [
+        json!({ "provider_order_id": "nobody", "state": "completed" }),
+        json!({ "event": "wallet.threshold.alert" }),
+    ] {
+        let res = app
+            .send_raw(Method::POST, HOOK, &[], serde_json::to_vec(&body).unwrap())
+            .await;
+        assert_eq!(res.status, 401, "{}", res.json);
+    }
+    assert_eq!(audit_rows().await, before, "no audit row");
     assert!(
         events(&app, f.order_id)
             .await
@@ -552,6 +570,83 @@ async fn unknown_shipment_is_200_and_logged(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+#[sqlx::test]
+async fn unknown_label_is_audited_without_the_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    hook(
+        &app,
+        json!({ "provider_order_id": "SB-LOST", "state": "picked_up",
+                "courier_phone": COURIER_PHONE,
+                "tracking_url": "https://track.fake.test/lost" }),
+    )
+    .await;
+    let rows = audits(&app, "courier.unknown_shipment").await;
+    assert_eq!(
+        rows,
+        [json!({ "provider_order_id": "SB-LOST", "state": "picked_up" })]
+    );
+}
+
+/// The rows of the owner's list that are unknown labels.
+async fn unknown_labels(app: &TestApp) -> Vec<Value> {
+    reconciliation(app).await["shipments_attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["attention"] == "unknown_label")
+        .cloned()
+        .collect()
+}
+
+#[sqlx::test]
+async fn unknown_labels_are_listed_once_each(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    for (label, state) in [
+        ("SB-1", "pending"),
+        ("SB-1", "picked_up"),
+        ("SB-1", "in_transit"),
+        ("SB-2", "completed"),
+    ] {
+        hook(&app, json!({ "provider_order_id": label, "state": state })).await;
+    }
+    let rows = unknown_labels(&app).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let sb1 = rows
+        .iter()
+        .find(|r| r["provider_order_id"] == "SB-1")
+        .expect("SB-1 listed");
+    assert_eq!(sb1["courier_state"], "in_transit", "the latest state");
+    assert_eq!(sb1["status"], "unknown_label");
+    assert!(sb1["id"].is_null() && sb1["order_id"].is_null());
+    assert_eq!(audits(&app, "courier.unknown_shipment").await.len(), 4);
+}
+
+#[sqlx::test]
+async fn an_unknown_label_leaves_the_list_once_a_shipment_has_it(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    // The webhook beat the booking's commit.
+    hook(
+        &app,
+        json!({ "provider_order_id": LABEL, "state": "confirmed" }),
+    )
+    .await;
+    assert_eq!(unknown_labels(&app).await.len(), 1);
+    booked_order(&app).await;
+    assert!(unknown_labels(&app).await.is_empty());
+}
+
+#[sqlx::test]
+async fn an_oversized_label_is_not_audited(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let res = hook(
+        &app,
+        json!({ "provider_order_id": "x".repeat(201), "state": "pending" }),
+    )
+    .await;
+    assert_eq!(res.status, 200);
+    assert!(audits(&app, "courier.unknown_shipment").await.is_empty());
 }
 
 #[sqlx::test]
@@ -679,6 +774,100 @@ async fn courier_phone_is_stored_encrypted(pool: PgPool) {
     assert!(kept.is_some());
 }
 
+async fn stored_phone(app: &TestApp, order_id: Uuid) -> Option<String> {
+    let enc: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT courier_phone_enc FROM shipments WHERE order_id = $1")
+            .bind(order_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    enc.map(|e| app.state.cipher.decrypt(&e).unwrap())
+}
+
+#[sqlx::test]
+async fn a_phone_first_seen_on_a_same_rank_update_is_stored(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    courier_says(&app, "picked_up").await;
+    assert_eq!(stored_phone(&app, f.order_id).await, None);
+    let res = hook(
+        &app,
+        json!({ "provider_order_id": LABEL, "state": "picked_up",
+                "occurred_at": "2026-11-01T10:00:00Z", "courier_phone": COURIER_PHONE }),
+    )
+    .await;
+    assert_eq!(res.json["status"], "ignored");
+    assert_eq!(
+        stored_phone(&app, f.order_id).await.as_deref(),
+        Some(COURIER_PHONE)
+    );
+    // A same-rank update does not replace a phone we already have.
+    hook(
+        &app,
+        json!({ "provider_order_id": LABEL, "state": "picked_up",
+                "occurred_at": "2026-11-01T11:00:00Z", "courier_phone": "08000000000" }),
+    )
+    .await;
+    assert_eq!(
+        stored_phone(&app, f.order_id).await.as_deref(),
+        Some(COURIER_PHONE)
+    );
+}
+
+#[sqlx::test]
+async fn a_phone_on_a_repeat_with_the_same_key_is_stored(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    // The poll gives no time, so its repeats share a key; the courier's phone
+    // can still appear on a later answer.
+    courier_says(&app, "in_transit").await;
+    let res = hook(
+        &app,
+        json!({ "provider_order_id": LABEL, "state": "in_transit",
+                "courier_phone": COURIER_PHONE }),
+    )
+    .await;
+    assert_eq!(res.json["status"], "ignored");
+    assert_eq!(courier_events(&app, f.order_id).await, ["in_transit"]);
+    assert_eq!(
+        stored_phone(&app, f.order_id).await.as_deref(),
+        Some(COURIER_PHONE)
+    );
+}
+
+#[sqlx::test]
+async fn a_lower_rank_update_stores_no_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    courier_says(&app, "in_transit").await;
+    hook(
+        &app,
+        json!({ "provider_order_id": LABEL, "state": "picked_up",
+                "courier_phone": COURIER_PHONE }),
+    )
+    .await;
+    assert_eq!(stored_phone(&app, f.order_id).await, None);
+}
+
+#[sqlx::test]
+async fn a_refunded_order_stores_no_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    courier_says(&app, "picked_up").await;
+    owner_refund(&app, f.order_id).await;
+    // Forward, then same rank: neither is kept.
+    for at in ["2026-11-01T10:00:00Z", "2026-11-01T11:00:00Z"] {
+        hook(
+            &app,
+            json!({ "provider_order_id": LABEL, "state": "in_transit",
+                    "occurred_at": at, "courier_phone": COURIER_PHONE }),
+        )
+        .await;
+    }
+    assert_eq!(shipment_status(&app, f.order_id).await, "in_transit");
+    assert_eq!(stored_phone(&app, f.order_id).await, None);
+}
+
 #[sqlx::test]
 async fn only_an_https_tracking_url_is_stored(pool: PgPool) {
     let app = TestApp::new(pool).await;
@@ -723,15 +912,50 @@ async fn cancel_after_pickup_is_ignored(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = booked_order(&app).await;
     courier_says(&app, "picked_up").await;
-    assert_eq!(
-        courier_says(&app, "cancelled").await.json["status"],
-        "ignored"
-    );
+    courier_says(&app, "cancelled").await;
     assert_eq!(shipment_status(&app, f.order_id).await, "picked_up");
     assert_eq!(order_status(&app, f.order_id).await, "picked_up");
     assert_eq!(
         courier_events(&app, f.order_id).await,
         ["picked_up", "cancelled"]
+    );
+    assert_eq!(
+        listed(&app, f.order_id).await,
+        Some(json!("cancelled_after_pickup"))
+    );
+    let rows = audits(&app, "shipment.cancelled_after_pickup").await;
+    assert_eq!(rows, [json!({ "status": "picked_up" })]);
+}
+
+#[sqlx::test]
+async fn cancel_in_transit_is_flagged_and_moves_nothing(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    courier_says(&app, "in_transit").await;
+    let res = courier_says(&app, "cancelled").await;
+    assert_eq!(res.json["status"], "received");
+    assert_eq!(shipment_status(&app, f.order_id).await, "in_transit");
+    assert_eq!(order_status(&app, f.order_id).await, "out_for_delivery");
+    assert_eq!(
+        listed(&app, f.order_id).await,
+        Some(json!("cancelled_after_pickup"))
+    );
+}
+
+#[sqlx::test]
+async fn cancel_after_completed_is_a_plain_ignore(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    courier_says(&app, "completed").await;
+    let res = courier_says(&app, "cancelled").await;
+    assert_eq!(res.json["status"], "ignored");
+    assert_eq!(shipment_status(&app, f.order_id).await, "completed");
+    assert_eq!(order_status(&app, f.order_id).await, "delivered");
+    assert_eq!(listed(&app, f.order_id).await, None);
+    assert!(
+        audits(&app, "shipment.cancelled_after_pickup")
+            .await
+            .is_empty()
     );
 }
 
@@ -896,6 +1120,40 @@ async fn completed_after_a_cancelled_refund_records_only(pool: PgPool) {
     assert_eq!(shipment_status(&app, f.order_id).await, "completed");
     assert_eq!(order_status(&app, f.order_id).await, refunded);
     assert_eq!(listed(&app, f.order_id).await, Some(json!("after_refund")));
+}
+
+#[sqlx::test]
+async fn a_refund_racing_a_webhook_lands_one_way_or_the_other(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = booked_order(&app).await;
+    let (refund, res) = tokio::join!(
+        refund_order(&app.state, f.order_id, true),
+        hook(
+            &app,
+            json!({ "provider_order_id": LABEL, "state": "picked_up" })
+        ),
+    );
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(courier_events(&app, f.order_id).await, ["picked_up"]);
+    let order = order_status(&app, f.order_id).await;
+    let shipment = shipment_status(&app, f.order_id).await;
+    if refund.is_ok() {
+        // The refund took the lock first: the cancel lost the race.
+        assert!(
+            ["refund_pending", "refunded"].contains(&order.as_str()),
+            "{order}"
+        );
+        assert_eq!(shipment, "cancel_pending");
+        assert_eq!(listed(&app, f.order_id).await, Some(json!("cancel_lost")));
+        assert_eq!(audits(&app, "shipment.after_refund").await.len(), 1);
+    } else {
+        // The webhook did: a shipped order is not this refund's to take.
+        assert_eq!(order, "picked_up");
+        assert_eq!(shipment, "picked_up");
+        assert_eq!(listed(&app, f.order_id).await, None);
+        assert!(audits(&app, "shipment.after_refund").await.is_empty());
+    }
+    assert_eq!(payouts(&app, f.order_id).await, 0);
 }
 
 // ---------------------------------------------------------------- polling
