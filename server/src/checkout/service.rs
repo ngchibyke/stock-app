@@ -308,7 +308,7 @@ pub async fn create(
     )
     .await?;
     // A store may have switched the method off (or moved its pickup) since the quote.
-    still_offered(state, &chosen).await?;
+    still_offered(state, &mut tx, &chosen).await?;
 
     let mut orders: Vec<(Uuid, OrderDraft)> = Vec::with_capacity(by_store.len());
     for (store_id, lines) in by_store {

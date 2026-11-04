@@ -878,6 +878,42 @@ fn option_id(quotes: &Quotes, store: Uuid, method: &str) -> Uuid {
         .unwrap()
 }
 
+/// The checkout transaction holds locks while it checks the chosen options, so
+/// it must read on its own connection: with one connection in the pool, a
+/// second acquire inside it can only time out.
+#[sqlx::test]
+async fn checkout_runs_on_a_pool_of_one(pool: PgPool) {
+    let one = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let app = TestApp::new(one).await;
+    let a = listing(&app, 100_000, 5).await;
+    let b = app
+        .make_active_store_with_product("08011111112", "Bukka Hut", 50_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, a.variant_id, 1).await;
+    app.set_cart(&buyer, b.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let quotes = quoted(&app, &buyer, address).await;
+    let courier = option_id(&quotes, a.store_id, "courier");
+    let own = option_id(&quotes, b.store_id, "self");
+
+    let res = app
+        .checkout_with(
+            &buyer,
+            METHOD,
+            address,
+            &[(a.store_id, courier), (b.store_id, own)],
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    app.pool.close().await;
+}
+
 fn error_code(res: &common::TestResponse) -> &str {
     res.json["error"]["code"].as_str().unwrap_or("")
 }

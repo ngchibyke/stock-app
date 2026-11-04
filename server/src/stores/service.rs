@@ -1,7 +1,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -639,9 +639,21 @@ pub async fn update_store(
     Ok(store)
 }
 
-/// How a live store delivers, decrypted, for checkout.
+/// How a live store delivers, decrypted.
 pub async fn delivery_profile(
     db: &PgPool,
+    cipher: &FieldCipher,
+    store_id: Uuid,
+) -> Result<StoreDelivery, AppError> {
+    let mut conn = db.acquire().await.context("acquire")?;
+    delivery_profile_on(&mut conn, cipher, store_id).await
+}
+
+/// [`delivery_profile`] on the caller's connection. A caller inside a
+/// transaction must use this: waiting for a second pooled connection while it
+/// holds locks can starve the pool.
+pub async fn delivery_profile_on(
+    conn: &mut PgConnection,
     cipher: &FieldCipher,
     store_id: Uuid,
 ) -> Result<StoreDelivery, AppError> {
@@ -649,7 +661,7 @@ pub async fn delivery_profile(
         "SELECT {COLUMNS} FROM stores WHERE id = $1 AND deleted_at IS NULL"
     ))
     .bind(store_id)
-    .fetch_optional(db)
+    .fetch_optional(conn)
     .await
     .context("load store delivery")?
     .ok_or(AppError::NotFound)?;

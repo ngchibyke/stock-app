@@ -57,7 +57,7 @@ use crate::{
     limits::MAX_CHECKOUT_TOTAL_KOBO,
     products::service::unit_price,
     settings,
-    stores::service::{StoreDelivery, delivery_profile},
+    stores::service::{StoreDelivery, delivery_profile, delivery_profile_on},
 };
 
 /// Most courier rates offered per store (ruling T6f).
@@ -821,12 +821,15 @@ pub async fn chosen_options(
 /// method (a seller may have switched it off since the quote), and that a
 /// courier quote was made from the store's current pickup address code (a moved
 /// pickup resets it). Otherwise 422 `delivery_option_invalid`. No network call.
+/// Reads on the checkout's own connection: the transaction holds locks, so it
+/// must not wait for a second pooled connection.
 pub async fn still_offered(
     state: &AppState,
+    conn: &mut PgConnection,
     chosen: &HashMap<Uuid, ChosenOption>,
 ) -> Result<(), AppError> {
     for (store_id, option) in chosen {
-        let profile = match delivery_profile(&state.db, &state.cipher, *store_id).await {
+        let profile = match delivery_profile_on(&mut *conn, &state.cipher, *store_id).await {
             Ok(p) => p,
             Err(AppError::NotFound) => return Err(option_invalid()),
             Err(e) => return Err(e),
