@@ -202,7 +202,8 @@ async fn begin(
         bool,
     ) = sqlx::query_as(
         "SELECT o.status::text, o.items_total_kobo, o.delivery_fee_kobo, \
-                    o.collection_fee_share_kobo, o.checkout_id, c.provider, \
+                    o.collection_fee_share_kobo + o.collection_fee_courier_kobo, \
+                    o.checkout_id, c.provider, \
                     o.held_at IS NOT NULL \
              FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
              WHERE o.id = $1 FOR UPDATE OF o",

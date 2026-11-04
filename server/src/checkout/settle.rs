@@ -24,7 +24,8 @@
 //!    Paid: checkout and orders `paid`, deadlines and the payout fee schedule
 //!    snapshotted from the settings, each delivery order's `promised_date`
 //!    recomputed from `paid_at` (never earlier than the date shown at checkout),
-//!    provider fee split across orders, ledger
+//!    provider fee split across orders (each order's seller part on its items
+//!    and any self-delivery fee, the platform's part on a courier fee), ledger
 //!    `buyer_funds -T`, `escrow +T` per order, provider hold ->
 //!    `provider_flagged`, the cart lines cleared.
 //! 4. For a webhook, the event is marked processed in that same transaction, or
@@ -253,8 +254,9 @@ async fn apply(
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err("lock checkout"))?;
-    let orders: Vec<(Uuid, i64, i64)> = sqlx::query_as(
-        "SELECT id, items_total_kobo, delivery_fee_kobo FROM orders \
+    let orders: Vec<(Uuid, i64, i64, bool)> = sqlx::query_as(
+        "SELECT id, items_total_kobo, delivery_fee_kobo, \
+                COALESCE(delivery_method::text = 'self', false) FROM orders \
          WHERE checkout_id = $1 ORDER BY id FOR UPDATE",
     )
     .bind(checkout_id)
@@ -387,21 +389,37 @@ async fn apply(
 
     let totals = orders
         .iter()
-        .map(|(_, items, delivery)| {
+        .map(|(_, items, delivery, _)| {
             items
                 .checked_add(*delivery)
                 .ok_or_else(|| anyhow::anyhow!("order total overflow"))
         })
         .collect::<Result<Vec<i64>, _>>()?;
-    let shares = split_proportional(fee, &totals);
+    // The whole fee is split in one go, so the parts sum to it exactly: per
+    // order, the seller's part (items plus a self-delivery fee) then the
+    // platform's part (a courier fee, which is never the seller's money).
+    let bases: Vec<i64> = orders
+        .iter()
+        .zip(&totals)
+        .flat_map(|((_, items, delivery, self_delivery), total)| {
+            if *self_delivery {
+                [*total, 0]
+            } else {
+                [*items, *delivery]
+            }
+        })
+        .collect();
+    let shares = split_proportional(fee, &bases);
     // The seller's payout fee schedule is fixed now, like the deadlines: a
     // later owner fee change never alters an order already paid.
     let fees = settings.fee_schedule();
     let mut entries = Vec::with_capacity(orders.len() * 2);
-    for (((order_id, _, _), total), share) in orders.iter().zip(&totals).zip(&shares) {
+    for (((order_id, ..), total), parts) in
+        orders.iter().zip(&totals).zip(shares.chunks_exact(2))
+    {
         sqlx::query(
             "UPDATE orders SET status = 'paid', paid_at = now(), cancelled_at = NULL, \
-                    collection_fee_share_kobo = $2, \
+                    collection_fee_share_kobo = $2, collection_fee_courier_kobo = $11, \
                     ship_by = now() + make_interval(hours => $3), \
                     backstop_at = now() + make_interval(days => $4), \
                     fee_small_kobo = $5, fee_large_kobo = $6, fee_threshold_kobo = $7, \
@@ -411,7 +429,7 @@ async fn apply(
              WHERE id = $1",
         )
         .bind(order_id)
-        .bind(share)
+        .bind(parts[0])
         .bind(settings.ship_deadline_hours)
         .bind(settings.backstop_days)
         .bind(fees.small_fee)
@@ -420,6 +438,7 @@ async fn apply(
         .bind(fees.stamp_duty_kobo)
         .bind(fees.stamp_duty_threshold)
         .bind(promised)
+        .bind(parts[1])
         .execute(&mut *tx)
         .await
         .map_err(db_err("mark order paid"))?;
@@ -452,7 +471,7 @@ async fn apply(
 
     let mut refunds = Vec::new();
     if refund {
-        for (order_id, _, _) in &orders {
+        for (order_id, ..) in &orders {
             refunds.push(begin_refund(&mut tx, *order_id, false, "paid_after_expiry").await?);
         }
         audit::record(

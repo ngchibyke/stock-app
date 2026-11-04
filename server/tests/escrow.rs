@@ -1428,8 +1428,9 @@ async fn release_ledger_routes_delivery_to_platform_revenue(pool: PgPool) {
     let f = picked_up_order_with_delivery(&app, 1_000_000, 1_500, 200_000, true).await;
     release(&app, &f).await;
     let p = payout(&app).await;
-    // Delivery never reaches the seller: the payout is the same as without it.
-    assert_eq!(p.amount_kobo, 945_000);
+    // Delivery never reaches the seller, and neither does the collection fee on
+    // it: 1,250 of the 1,500 is on the items, 250 on the delivery fee.
+    assert_eq!(p.amount_kobo, 945_250);
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT account::text, amount_kobo FROM ledger_entries WHERE kind = 'release' ORDER BY id",
     )
@@ -1440,10 +1441,10 @@ async fn release_ledger_routes_delivery_to_platform_revenue(pool: PgPool) {
         rows,
         [
             ("escrow".to_string(), -1_200_000),
-            ("platform_revenue".to_string(), 50_000 + 200_000),
+            ("platform_revenue".to_string(), 50_000 + 200_000 - 250),
             ("provider_fees".to_string(), 1_500),
             ("platform_revenue".to_string(), 3_500),
-            ("seller_payable".to_string(), 945_000),
+            ("seller_payable".to_string(), 945_250),
         ]
     );
     assert_eq!(balance(&app, "escrow").await, 0);
@@ -1500,21 +1501,203 @@ async fn courier_fee_stays_platform_revenue(pool: PgPool) {
     let f =
         picked_up_order_with_method(&app, 1_000_000, 1_500, 150_000, Some("courier"), true).await;
     release(&app, &f).await;
-    // Same payout as an order without delivery: 1,000,000 - 50,000 - 1,500 - 3,500.
+    // The 1,500 fee on 1,150,000 is 1,304 on the items, 196 on the courier fee.
+    // 1,000,000 - 50,000 - 1,304 - 3,500.
     let p = payout(&app).await;
-    assert_eq!(p.amount_kobo, 945_000);
+    assert_eq!(p.amount_kobo, 945_196);
     assert_eq!(p.fee_kobo, 3_500);
     assert_eq!(
         release_entries(&app).await,
         [
             ("escrow".to_string(), -1_150_000),
-            ("platform_revenue".to_string(), 50_000 + 150_000),
+            ("platform_revenue".to_string(), 50_000 + 150_000 - 196),
             ("provider_fees".to_string(), 1_500),
             ("platform_revenue".to_string(), 3_500),
-            ("seller_payable".to_string(), 945_000),
+            ("seller_payable".to_string(), 945_196),
         ]
     );
     assert_eq!(balance(&app, "escrow").await, 0);
+    assert_orders_balance(&app).await;
+}
+
+/// N10,000 of items and a N5,000 courier fee: a third of the fee is on money the
+/// seller never receives, so the platform bears it.
+#[sqlx::test]
+async fn seller_pays_no_collection_fee_on_a_courier_fee(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f =
+        picked_up_order_with_method(&app, 1_000_000, 1_500, 500_000, Some("courier"), true).await;
+    let (seller, platform): (i64, i64) = sqlx::query_as(
+        "SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!((seller, platform), (1_000, 500));
+    // The seller's view and the payout agree: 1,000,000 - 50,000 - 1,000 - 3,500.
+    assert_eq!(seller_expected_payout(&app, &f).await, 945_500);
+    release(&app, &f).await;
+    assert_eq!(payout(&app).await.amount_kobo, 945_500);
+    assert_eq!(balance(&app, "provider_fees").await, 1_500);
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_orders_balance(&app).await;
+}
+
+/// A self-delivery fee is the seller's money, so it stays in the seller's base.
+#[sqlx::test]
+async fn seller_pays_collection_fee_on_a_self_delivery_fee(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    picked_up_order_with_method(&app, 1_000_000, 1_500, 500_000, Some("self"), true).await;
+    let (seller, platform): (i64, i64) = sqlx::query_as(
+        "SELECT collection_fee_share_kobo, collection_fee_courier_kobo FROM orders",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!((seller, platform), (1_500, 0));
+}
+
+/// One checkout, a courier order and a self-delivery order: the fee parts sum to
+/// the whole fee, refunding one order leaves the other's books alone, and each
+/// order balances. Items 200,000 + 50,000, delivery 150,000 + 70,000, fee 7,050.
+#[sqlx::test]
+async fn mixed_cart_splits_the_fee_and_refunds_one_order(pool: PgPool) {
+    const FEE: i64 = 7_050;
+    let app = TestApp::new(pool).await;
+    let a = app
+        .make_active_store_with_product(SELLER, "Mama Put", 100_000, 5)
+        .await;
+    let b = app
+        .make_active_store_with_product("08011111112", "Bukka Hut", 50_000, 5)
+        .await;
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{}", b.store_id),
+            Some(json!({ "self_delivery_fee_kobo": 70_000 })),
+            Some(&b.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, a.variant_id, 2).await;
+    app.set_cart(&buyer, b.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let quotes = app.delivery_options(&buyer, address).await;
+    assert_eq!(quotes.status, 200, "{}", quotes.json);
+    let option = |store: Uuid, method: &str| -> Uuid {
+        quotes.json["stores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["store_id"] == store.to_string())
+            .unwrap()["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["method"] == method)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let res = app
+        .checkout_with(
+            &buyer,
+            METHOD,
+            address,
+            &[
+                (a.store_id, option(a.store_id, "courier")),
+                (b.store_id, option(b.store_id, "self")),
+            ],
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    assert_eq!(res.json["total_kobo"], 470_000);
+    let reference = res.json["reference"].as_str().unwrap().to_string();
+    app.fake.set_payment(
+        &reference,
+        PaymentStatus::Successful {
+            amount_kobo: 470_000,
+            fee_kobo: FEE,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.clone(),
+        },
+    );
+    assert_eq!(
+        settle_payment(&app.state, &reference).await.unwrap(),
+        SettleOutcome::Paid
+    );
+    let order_of = |store: Uuid| {
+        sqlx::query_as::<_, (Uuid, i64, i64)>(
+            "SELECT id, collection_fee_share_kobo, collection_fee_courier_kobo \
+             FROM orders WHERE store_id = $1",
+        )
+        .bind(store)
+        .fetch_one(&app.pool)
+    };
+    let (courier_order, seller_a, platform_a) = order_of(a.store_id).await.unwrap();
+    let (self_order, seller_b, platform_b) = order_of(b.store_id).await.unwrap();
+    assert_eq!((seller_a, platform_a), (3_000, 2_250));
+    assert_eq!((seller_b, platform_b), (1_800, 0));
+    assert_eq!(seller_a + platform_a + seller_b + platform_b, FEE);
+
+    // Refund the self-delivery order: only its own money moves.
+    refund_order(&app.state, self_order, true).await.unwrap();
+    assert_eq!(
+        order_accounts(&app, self_order).await,
+        [
+            ("buyer_funds".to_string(), -120_000),
+            ("escrow".to_string(), 0),
+            ("platform_revenue".to_string(), -1_800),
+            ("provider_fees".to_string(), 1_800),
+            ("refunds".to_string(), 120_000),
+        ]
+    );
+    assert_eq!(
+        order_accounts(&app, courier_order).await,
+        [
+            ("buyer_funds".to_string(), -350_000),
+            ("escrow".to_string(), 350_000),
+        ]
+    );
+    assert_eq!(balance(&app, "escrow").await, 350_000);
+
+    // Release the courier order: the seller pays their part, the platform the rest.
+    // 200,000 - 10,000 cut - 3,000 share - 3,500 payout fee = 183,500.
+    mark_picked_up(&app.pool, courier_order, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    release_order(&app.state, courier_order, ReleaseReason::BuyerConfirmed)
+        .await
+        .unwrap();
+    assert_eq!(
+        order_accounts(&app, courier_order).await,
+        [
+            ("buyer_funds".to_string(), -350_000),
+            ("escrow".to_string(), 0),
+            ("platform_revenue".to_string(), 157_750 + 3_500),
+            ("provider_fees".to_string(), 5_250),
+            ("seller_payable".to_string(), 183_500),
+        ]
+    );
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_eq!(balance(&app, "provider_fees").await, FEE);
+    assert_orders_balance(&app).await;
+}
+
+/// The collection fee on a refunded courier order is all the platform's.
+#[sqlx::test]
+async fn refund_absorbs_both_parts_of_the_collection_fee(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f =
+        picked_up_order_with_method(&app, 1_000_000, 1_500, 500_000, Some("courier"), true).await;
+    exec(&app, "UPDATE orders SET status = 'paid'").await;
+    refund_order(&app.state, f.order_id, false).await.unwrap();
+    assert_eq!(balance(&app, "provider_fees").await, 1_500);
+    assert_eq!(balance(&app, "platform_revenue").await, -1_500);
     assert_orders_balance(&app).await;
 }
 
@@ -2278,9 +2461,13 @@ async fn courier_end_to_end(pool: PgPool) {
 
     const CUT: i64 = 50_000;
     const PAYOUT_FEE: i64 = 3_500;
-    // The delivery fee never reaches the seller.
-    const PAYOUT: i64 = ITEMS - CUT - COLLECTION_FEE - PAYOUT_FEE;
-    assert_eq!(PAYOUT, 945_000);
+    // The collection fee on 1,150,000: 1,304 on the items, 196 on the courier fee.
+    const SELLER_SHARE: i64 = 1_304;
+    const PLATFORM_SHARE: i64 = COLLECTION_FEE - SELLER_SHARE;
+    // The delivery fee never reaches the seller. No stamp duty: the 948,696
+    // before the payout fee is under the N10,000 threshold.
+    const PAYOUT: i64 = ITEMS - CUT - SELLER_SHARE - PAYOUT_FEE;
+    assert_eq!(PAYOUT, 945_196);
 
     let app = TestApp::new(pool).await;
     let (l, buyer) = delivery_listing(&app, None).await;
@@ -2362,7 +2549,10 @@ async fn courier_end_to_end(pool: PgPool) {
         release_entries(&app).await,
         [
             ("escrow".to_string(), -total),
-            ("platform_revenue".to_string(), CUT + DELIVERY_FEE),
+            (
+                "platform_revenue".to_string(),
+                CUT + DELIVERY_FEE - PLATFORM_SHARE
+            ),
             ("provider_fees".to_string(), COLLECTION_FEE),
             ("platform_revenue".to_string(), PAYOUT_FEE),
             ("seller_payable".to_string(), PAYOUT),
@@ -2374,8 +2564,12 @@ async fn courier_end_to_end(pool: PgPool) {
             ("buyer_funds".to_string(), -total),
             ("courier_costs".to_string(), DELIVERY_FEE),
             ("escrow".to_string(), 0),
-            // The fee came in and went out: revenue is the cut and the payout fee.
-            ("platform_revenue".to_string(), CUT + PAYOUT_FEE),
+            // The delivery fee came in and went out to the courier: revenue is
+            // the cut and the payout fee, less the fee the platform bears.
+            (
+                "platform_revenue".to_string(),
+                CUT + PAYOUT_FEE - PLATFORM_SHARE
+            ),
             ("provider_fees".to_string(), COLLECTION_FEE),
             ("seller_payable".to_string(), PAYOUT),
         ]

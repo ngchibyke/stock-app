@@ -19,7 +19,9 @@
 //!    payout fee and stamp duty are computed on it) and not of
 //!    `platform_revenue`; a courier fee, or none (part-2 orders), stays in
 //!    `platform_revenue`, which pays the courier: the charge left it for
-//!    `courier_costs` at booking. The cut is on items only.
+//!    `courier_costs` at booking. The cut is on items only. The part of the
+//!    collection fee charged on a courier fee is the platform's too: it goes to
+//!    `provider_fees` out of `platform_revenue`, and never touches the payout.
 //!    The payout fee is fixed here, from the fee schedule snapshotted on the
 //!    order when it was paid (orders paid before that snapshot existed use the
 //!    schedule at release). An owner decision ([`release_by_owner`]) also
@@ -222,6 +224,7 @@ struct ReleaseRow {
     self_delivery: bool,
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
+    collection_fee_courier_kobo: i64,
     checkout_id: Uuid,
     paid_at: Option<OffsetDateTime>,
     has_payout: bool,
@@ -313,7 +316,8 @@ async fn release(
     let row: ReleaseRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.delivery_fee_kobo, \
                 COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
-                o.platform_cut_kobo, o.collection_fee_share_kobo, o.checkout_id, c.paid_at, \
+                o.platform_cut_kobo, o.collection_fee_share_kobo, \
+                o.collection_fee_courier_kobo, o.checkout_id, c.paid_at, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
                 o.held_at IS NOT NULL AS held, o.delivered_at IS NOT NULL AS delivered, \
                 COALESCE(o.release_at <= now(), false) AS release_due, \
@@ -346,6 +350,7 @@ async fn release(
     let delivery = row.delivery_fee_kobo;
     let cut = row.platform_cut_kobo;
     let share = row.collection_fee_share_kobo;
+    let courier_share = row.collection_fee_courier_kobo;
     // A self-delivery fee belongs to the seller; a courier fee (or none, on
     // part-2 orders) stays with the platform, which pays the courier. The
     // platform cut applies to items only.
@@ -375,7 +380,9 @@ async fn release(
     let cut_and_delivery = cut
         .checked_add(platform_delivery)
         .and_then(|x| x.checked_sub(shortfall))
+        .and_then(|x| x.checked_sub(courier_share))
         .ok_or_else(too_large)?;
+    let provider_fee = share.checked_add(courier_share).ok_or_else(too_large)?;
 
     let now = OffsetDateTime::now_utc();
     let paid_at = row.paid_at.unwrap_or(now);
@@ -403,7 +410,7 @@ async fn release(
         &[
             entry(Account::Escrow, -gross),
             entry(Account::PlatformRevenue, cut_and_delivery),
-            entry(Account::ProviderFees, share),
+            entry(Account::ProviderFees, provider_fee),
             // The payout fee charged to the seller is platform revenue; the
             // provider's real fee is booked when settle_payout learns it.
             entry(Account::PlatformRevenue, payout_fee),

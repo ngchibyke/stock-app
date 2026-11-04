@@ -46,6 +46,11 @@ ALTER TABLE orders
     -- FieldCipher-encrypted JSON of the DeliveryAddress chosen at checkout.
     ADD COLUMN delivery_address_enc  bytea NULL,
     ADD COLUMN delivery_area         area_council NULL,
+    -- The part of the provider's collection fee charged on a courier fee: platform
+    -- money, so the platform bears it. `collection_fee_share_kobo` is the seller's
+    -- part, charged on items plus any self-delivery fee.
+    ADD COLUMN collection_fee_courier_kobo bigint NOT NULL DEFAULT 0
+        CHECK (collection_fee_courier_kobo >= 0),
     -- Shown at checkout, recomputed from paid_at when the payment settles (never earlier).
     ADD COLUMN promised_date         date NULL,
     ADD COLUMN courier_request_token text NULL,
