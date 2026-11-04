@@ -1988,3 +1988,400 @@ async fn happy_path_end_to_end(pool: PgPool) {
         0
     );
 }
+
+// ------------------------------------------------- delivery end to end (part 3)
+
+const ITEMS: i64 = 1_000_000;
+const DELIVERY_FEE: i64 = 150_000;
+/// The provider's collection fee on the whole payment.
+const COLLECTION_FEE: i64 = 1_500;
+
+/// One buyer with one unit of a N10,000 product in the cart; `self_fee` is set
+/// on the store when given. Returns the listing and the buyer's token.
+async fn delivery_listing(app: &TestApp, self_fee: Option<i64>) -> (common::Listing, String) {
+    let l = app
+        .make_active_store_with_product(SELLER, "Mama Put", ITEMS, 5)
+        .await;
+    if let Some(fee) = self_fee {
+        let res = app
+            .request(
+                Method::PATCH,
+                &format!("/stores/{}", l.store_id),
+                Some(json!({ "self_delivery_fee_kobo": fee })),
+                Some(&l.seller_token),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.json);
+    }
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    assert_eq!(app.set_cart(&buyer, l.variant_id, 1).await.status, 200);
+    (l, buyer)
+}
+
+/// Address, delivery options, then checkout choosing the `method` option;
+/// returns (checkout id, payment reference, order total, the option's fee).
+async fn checkout_choosing(
+    app: &TestApp,
+    buyer: &str,
+    l: &common::Listing,
+    method: &str,
+) -> (Uuid, String, i64, i64) {
+    let address = app.add_address(buyer, "amac").await;
+    let opts = app.delivery_options(buyer, address).await;
+    assert_eq!(opts.status, 200, "{}", opts.json);
+    let option = opts.json["stores"][0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["method"] == method)
+        .unwrap_or_else(|| panic!("no {method} option in {}", opts.json))
+        .clone();
+    let option_id: Uuid = option["id"].as_str().unwrap().parse().unwrap();
+    let res = app
+        .checkout_with(buyer, METHOD, address, &[(l.store_id, option_id)])
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    (
+        res.json["checkout_id"].as_str().unwrap().parse().unwrap(),
+        res.json["reference"].as_str().unwrap().to_string(),
+        res.json["total_kobo"].as_i64().unwrap(),
+        option["fee_kobo"].as_i64().unwrap(),
+    )
+}
+
+/// The provider says the payment succeeded and its webhook arrives; returns
+/// the single order's id.
+async fn pay_by_webhook(app: &TestApp, checkout_id: Uuid, reference: &str, total: i64) -> Uuid {
+    app.fake.set_payment(
+        reference,
+        PaymentStatus::Successful {
+            amount_kobo: total,
+            fee_kobo: COLLECTION_FEE,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.to_string(),
+        },
+    );
+    let body = json!({ "event_id": "pay-e2e", "kind": "payment", "reference": reference })
+        .to_string()
+        .into_bytes();
+    let res = app
+        .send_raw(
+            Method::POST,
+            "/webhooks/fake",
+            &[(FAKE_SIGNATURE_HEADER, FAKE_WEBHOOK_SECRET)],
+            body,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(res.json["status"], "received");
+    sqlx::query_scalar("SELECT id FROM orders WHERE checkout_id = $1")
+        .bind(checkout_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+async fn seller_step(app: &TestApp, order: Uuid, name: &str, token: &str) -> serde_json::Value {
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{order}/{name}"),
+            None,
+            Some(token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{name}: {}", res.json);
+    res.json
+}
+
+async fn tracking(app: &TestApp, order: Uuid, token: &str) -> serde_json::Value {
+    let res = app
+        .request(
+            Method::GET,
+            &format!("/orders/{order}/tracking"),
+            None,
+            Some(token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    res.json
+}
+
+/// Every account's sum for the order; also checks the order sums to zero.
+async fn order_accounts(app: &TestApp, order: Uuid) -> Vec<(String, i64)> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT account::text, sum(amount_kobo)::bigint FROM ledger_entries \
+         WHERE order_id = $1 GROUP BY account ORDER BY account::text",
+    )
+    .bind(order)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.iter().map(|r| r.1).sum::<i64>(), 0, "order sums to 0");
+    rows
+}
+
+/// Self-delivery, through the routes: address, options, checkout, the payment
+/// webhook, the seller's steps, the handover code, and the payout. Amounts are
+/// worked out by hand: items 1,000,000 - 50,000 cut (5% of items only)
+/// - 1,500 collection fee + 150,000 self fee = 1,098,500 before the payout
+/// fee; that is over N10,000, so the fee is 3,500 and stamp duty 5,000:
+/// payout 1,090,000.
+#[sqlx::test]
+async fn self_delivery_end_to_end(pool: PgPool) {
+    use server::escrow::jobs::run_due_jobs;
+
+    const CUT: i64 = 50_000;
+    const PAYOUT_FEE: i64 = 3_500;
+    const STAMP_DUTY: i64 = 5_000;
+    const PAYOUT: i64 = ITEMS - CUT - COLLECTION_FEE + DELIVERY_FEE - PAYOUT_FEE - STAMP_DUTY;
+    assert_eq!(PAYOUT, 1_090_000);
+
+    let app = TestApp::new(pool).await;
+    let (l, buyer) = delivery_listing(&app, Some(DELIVERY_FEE)).await;
+
+    // Address, options and checkout: the buyer pays items plus the seller's fee.
+    let (checkout_id, reference, total, fee) = checkout_choosing(&app, &buyer, &l, "self").await;
+    assert_eq!(fee, DELIVERY_FEE);
+    assert_eq!(total, ITEMS + DELIVERY_FEE);
+
+    // The payment webhook.
+    let order = pay_by_webhook(&app, checkout_id, &reference, total).await;
+    assert_eq!(order_status(&app, order).await, "paid");
+    assert_eq!(balance(&app, "escrow").await, total);
+
+    // Before pickup the seller has the area council only; the buyer has no code.
+    let t = tracking(&app, order, &l.seller_token).await;
+    assert_eq!(t["delivery_area"], "amac");
+    assert!(t.get("buyer_contact").is_none(), "{t}");
+    assert!(
+        tracking(&app, order, &buyer)
+            .await
+            .get("handover_code")
+            .is_none()
+    );
+
+    // Picked up, then out for delivery.
+    assert_eq!(
+        seller_step(&app, order, "picked-up", &l.seller_token).await["status"],
+        "picked_up"
+    );
+    assert_eq!(
+        seller_step(&app, order, "out-for-delivery", &l.seller_token).await["status"],
+        "out_for_delivery"
+    );
+    // The buyer sees the code; the seller never does, but now sees the contact.
+    let t = tracking(&app, order, &buyer).await;
+    let code = t["handover_code"]
+        .as_str()
+        .expect("buyer sees the code")
+        .to_string();
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|b| b.is_ascii_digit()));
+    assert_eq!(t["contact"]["name"], "Mama Put");
+    let seller_view = tracking(&app, order, &l.seller_token).await;
+    assert!(seller_view.get("handover_code").is_none(), "{seller_view}");
+    assert!(!seller_view.to_string().contains(&code), "{seller_view}");
+    assert_eq!(seller_view["buyer_contact"]["recipient_name"], "Ada Buyer");
+    assert_eq!(seller_view["buyer_contact"]["phone"], "+2348077777777");
+
+    // A wrong code moves nothing; the right one delivers, confirms and releases.
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{order}/delivered"),
+            Some(json!({ "handover_code": wrong })),
+            Some(&l.seller_token),
+        )
+        .await;
+    assert!(res.status >= 400, "{}", res.json);
+    assert_eq!(order_status(&app, order).await, "out_for_delivery");
+    assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{order}/delivered"),
+            Some(json!({ "handover_code": code })),
+            Some(&l.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(order_status(&app, order).await, "completed");
+
+    // The payout, to the kobo.
+    let p = payout(&app).await;
+    assert_eq!(p.amount_kobo, PAYOUT);
+    assert_eq!(p.fee_kobo, PAYOUT_FEE + STAMP_DUTY);
+    assert_eq!(p.release_reason.as_deref(), Some("buyer_confirmed"));
+    assert_eq!(
+        release_entries(&app).await,
+        [
+            ("escrow".to_string(), -total),
+            ("platform_revenue".to_string(), CUT),
+            ("provider_fees".to_string(), COLLECTION_FEE),
+            ("platform_revenue".to_string(), PAYOUT_FEE + STAMP_DUTY),
+            ("seller_payable".to_string(), PAYOUT),
+        ]
+    );
+
+    // Ledger: balanced, escrow empty, the self fee went to the seller.
+    assert_eq!(
+        order_accounts(&app, order).await,
+        [
+            ("buyer_funds".to_string(), -total),
+            ("escrow".to_string(), 0),
+            (
+                "platform_revenue".to_string(),
+                CUT + PAYOUT_FEE + STAMP_DUTY
+            ),
+            ("provider_fees".to_string(), COLLECTION_FEE),
+            ("seller_payable".to_string(), PAYOUT),
+        ]
+    );
+    assert_orders_balance(&app).await;
+    assert_eq!(balance(&app, "escrow").await, 0);
+
+    // The contact is gone for both sides, and the code with it.
+    let t = tracking(&app, order, &l.seller_token).await;
+    assert!(t.get("buyer_contact").is_none(), "{t}");
+    assert!(!t.to_string().contains("8077777777"), "{t}");
+    let t = tracking(&app, order, &buyer).await;
+    assert!(t.get("contact").is_none(), "{t}");
+    assert!(t.get("handover_code").is_none(), "{t}");
+
+    // Once the payment has settled the next tick sends the payout, once.
+    exec(
+        &app,
+        "UPDATE payouts SET send_after = now() - interval '1 minute'",
+    )
+    .await;
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!((r.payouts_processed, r.failed), (1, 0), "{r:?}");
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!(r.payouts_processed, 0, "{r:?}");
+    let sent = app.fake.payouts();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].amount_kobo, PAYOUT);
+}
+
+/// Courier delivery, through the routes and the fake courier: the seller marks
+/// ready, the job books, courier webhooks walk the shipment, the release
+/// window runs from our receipt of `completed`, and the delivery fee ends in
+/// `platform_revenue` (the platform pays the courier), not the seller's payout.
+#[sqlx::test]
+async fn courier_end_to_end(pool: PgPool) {
+    use server::{
+        couriers::fake::FAKE_SIGNATURE_HEADER as COURIER_SIG, escrow::jobs::run_due_jobs,
+    };
+
+    const CUT: i64 = 50_000;
+    const PAYOUT_FEE: i64 = 3_500;
+    // The delivery fee never reaches the seller.
+    const PAYOUT: i64 = ITEMS - CUT - COLLECTION_FEE - PAYOUT_FEE;
+    assert_eq!(PAYOUT, 945_000);
+
+    let app = TestApp::new(pool).await;
+    let (l, buyer) = delivery_listing(&app, None).await;
+    let (checkout_id, reference, total, fee) = checkout_choosing(&app, &buyer, &l, "courier").await;
+    assert_eq!(fee, DELIVERY_FEE);
+    assert_eq!(total, ITEMS + DELIVERY_FEE);
+    let order = pay_by_webhook(&app, checkout_id, &reference, total).await;
+    assert_eq!(order_status(&app, order).await, "paid");
+
+    // The seller never sees a courier order's buyer contact.
+    let t = tracking(&app, order, &l.seller_token).await;
+    assert!(t.get("buyer_contact").is_none(), "{t}");
+
+    // The seller marks it ready; the job books the courier exactly once.
+    seller_step(&app, order, "ready", &l.seller_token).await;
+    assert_eq!(app.courier.book_calls(), 0, "booking is the job's work");
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!(r.failed, 0, "{r:?}");
+    assert_eq!(app.courier.book_calls(), 1);
+    let (ship, label): (String, Option<String>) =
+        sqlx::query_as("SELECT status::text, provider_order_id FROM shipments WHERE order_id = $1")
+            .bind(order)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(ship, "booked");
+    let label = label.expect("a provider label");
+    run_due_jobs(&app.state).await;
+    assert_eq!(app.courier.book_calls(), 1, "never booked twice");
+
+    // Courier webhooks: picked_up, in_transit, completed.
+    let mut statuses = Vec::new();
+    for state in ["picked_up", "in_transit", "completed"] {
+        let res = app
+            .send_raw(
+                Method::POST,
+                "/webhooks/couriers/fake",
+                &[(COURIER_SIG, "ok")],
+                serde_json::to_vec(&json!({ "provider_order_id": label, "state": state })).unwrap(),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{state}: {}", res.json);
+        statuses.push(order_status(&app, order).await);
+    }
+    assert_eq!(statuses, ["picked_up", "out_for_delivery", "delivered"]);
+    // Delivered starts the window; it moves no money by itself.
+    assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
+    assert_eq!(balance(&app, "escrow").await, total);
+    // The window runs from when we received `completed`: 72 hours.
+    assert!(
+        scalar_bool(
+            &app,
+            "SELECT release_at = delivered_at + interval '72 hours' \
+               AND delivered_at > now() - interval '5 minutes' FROM orders"
+        )
+        .await
+    );
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!(r.released, 0, "{r:?}");
+    assert_eq!(order_status(&app, order).await, "delivered");
+
+    // Back-date the window and run the jobs: released, paid out without the fee.
+    exec(
+        &app,
+        "UPDATE orders SET release_at = now() - interval '1 hour'",
+    )
+    .await;
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!((r.released, r.failed), (1, 0), "{r:?}");
+    assert_eq!(order_status(&app, order).await, "completed");
+    let p = payout(&app).await;
+    assert_eq!(p.amount_kobo, PAYOUT);
+    assert_eq!(p.fee_kobo, PAYOUT_FEE);
+    assert_eq!(p.release_reason.as_deref(), Some("auto_after_delivery"));
+    assert_eq!(
+        release_entries(&app).await,
+        [
+            ("escrow".to_string(), -total),
+            ("platform_revenue".to_string(), CUT + DELIVERY_FEE),
+            ("provider_fees".to_string(), COLLECTION_FEE),
+            ("platform_revenue".to_string(), PAYOUT_FEE),
+            ("seller_payable".to_string(), PAYOUT),
+        ]
+    );
+    assert_eq!(
+        order_accounts(&app, order).await,
+        [
+            ("buyer_funds".to_string(), -total),
+            ("escrow".to_string(), 0),
+            (
+                "platform_revenue".to_string(),
+                CUT + DELIVERY_FEE + PAYOUT_FEE
+            ),
+            ("provider_fees".to_string(), COLLECTION_FEE),
+            ("seller_payable".to_string(), PAYOUT),
+        ]
+    );
+    assert_orders_balance(&app).await;
+    assert_eq!(balance(&app, "escrow").await, 0);
+    // Running the jobs again changes nothing.
+    let r = run_due_jobs(&app.state).await;
+    assert_eq!(r.released, 0, "{r:?}");
+    assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 1);
+}

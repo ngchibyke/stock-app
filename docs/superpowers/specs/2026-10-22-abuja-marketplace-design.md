@@ -105,21 +105,34 @@ All money movements are written to an **append-only ledger** (payment, hold, rel
 
 **Coverage at launch:** stores and delivery addresses must be inside the FCT. Buyers elsewhere can browse but not check out ("Coming to your city soon").
 
-**Addresses:** at checkout the buyer's address is resolved to a **NIPOST 11-character digital postcode** (live nationwide since 1 Oct 2026) via the NIPOST postcode API (`api.postcode.gov.ng`). Free basic lookup/validity; deeper levels need KYB and credits. **Owner must request developer access** (g2g@postcode.gov.ng / "Integrate with us" on postcode.gov.ng). Official API docs were not found publicly — builder must design this behind an interface so a manual/Google-Maps fallback works until access is granted.
+**Addresses:** the buyer saves an address and chooses one of the six FCT **area councils** (AMAC, Bwari, Gwagwalada, Kuje, Kwali, Abaji); that choice, never the word "Abuja" in free text, decides whether the address is inside the FCT (Suleja, Mararaba, Karu and Masaka are not). The **NIPOST 11-character digital postcode** (live nationwide since 1 Oct 2026, coverage still incomplete) is **optional**: when given it is normalised (spaces and `-` stripped, upper-cased) and must be `FC` plus 9 letters or digits. It is checked through the NIPOST postcode API (`api.postcode.gov.ng`), behind an interface with a manual fallback. Free basic lookup/validity; deeper levels need KYB and credits. **Owner must request developer access** (g2g@postcode.gov.ng / "Integrate with us" on postcode.gov.ng). Official API docs were not found publicly, so the NIPOST adapter is not built yet and the manual fallback is what runs.
 
 **Delivery methods (chosen per store):**
-- **Courier via Shipbubble** — one integration covering 20+ Nigerian couriers (GIG, Kwik, etc.): rates at checkout, label/pickup booking, status updates via signed webhooks (HMAC-SHA512, `x-ship-signature`). Terminal Africa is the fallback aggregator.
+- **Courier via Shipbubble** — one integration covering 20+ Nigerian couriers (GIG, Kwik, etc.): rates at checkout, label/pickup booking, status updates via signed webhooks (HMAC-SHA512, `x-ship-signature`) with a polling fallback. Terminal Africa is the fallback aggregator.
 - **Self-delivery** — seller taps *Picked up → Out for delivery → Delivered*.
 
-**Handover code:** every order gets a short code shown to the buyer; the person delivering enters it on handover. Entering it = buyer confirmation (triggers release).
+**Delivery options at checkout** *(my call)*: the server quotes and owns every amount; the app only sends back the option the buyer chose.
+- A store offers self-delivery (its own flat fee) and/or courier (up to the 3 cheapest Shipbubble rates, priced at what Shipbubble will charge). One platform-wide parcel category is used until products map to courier categories; parcel size is the largest length and width and the summed height, with 10 cm for any missing dimension.
+- Each option is **single-use** and **bound to the buyer, store, address and the exact cart** (a fingerprint of its variants and quantities), and expires after 30 minutes. If the cart or address changes, or a live or paid order already used the option, checkout refuses it and the buyer asks for fresh options. Fresh quotes are capped per buyer per hour.
+- The buyer pays items plus the delivery fee. The platform cut (5%) is on items only. A **self-delivery** fee goes to the seller at release; a **courier** fee goes to platform revenue, because the platform pays Shipbubble from its wallet.
+
+**Courier booking** *(my call)*: the seller marks the order *ready*; a background job then books the courier from the quote stored at checkout.
+- A quote 7 days old or more, or a store whose pickup location moved after the quote, fails the booking for the owner to re-quote (an owner action, plan 6), rather than booking a stale price.
+- The courier has no idempotency key, so a booking that times out is **never retried automatically**: it is held as *unknown* for the owner to check. A booked price above the quote by more than a tolerance raises an attention item; the buyer is never charged twice.
+- A refund after booking always goes ahead; the courier cancel is sent afterwards and flagged for the owner if the courier refuses it.
+- Courier statuses only move forward (a late or repeated webhook cannot move an order back), and a cancellation after pickup is flagged for the owner, not applied.
+
+**Handover code** *(my call)*: only **self-delivery** orders have one, because couriers do not use our app and nobody could check a code on a courier order. The 6-digit code is created when the seller marks the order **out for delivery** (not at payment, so it cannot be learned early), stored encrypted, shown to the buyer only while the order is out for delivery ("Give this only to the person handing you the parcel"), and cleared once used. The person delivering enters it on handover. Entering it = buyer confirmation (triggers release immediately). After 5 wrong entries entry is locked for 1 hour, and every attempt is audited without the code itself.
 
 **What counts as "delivered"** *(my call, protects buyers)*:
 - **Self-delivery:** the seller **cannot** mark Delivered without the buyer's handover code (or the buyer pressing "Received"). No code → no release clock.
-- **Courier:** couriers won't use our app, so Shipbubble's "delivered" webhook starts the 3-day release window; the buyer can still complain within it.
+- **Courier:** couriers won't use our app, so Shipbubble's "delivered" webhook starts the 3-day release window; the buyer can still complain within it. The window counts from when **our server received** the webhook, not from the time the courier states, so a back-dated status cannot shorten it. The webhook never releases money by itself; the release job does when the window ends.
 
-**Phone numbers** *(my call)*: chat blocks phone numbers. The buyer's phone is shown to a self-delivering seller only once the order is "Out for delivery", and hidden again when it completes. The tracking call button calls the courier's or seller's business line, not a personal number shared in chat.
+**Phone numbers** *(my call)*: chat blocks phone numbers. A self-delivering seller sees the buyer's phone and full address only while the order is "Out for delivery" (before that, the area council only); both are hidden again once it is delivered, completed, cancelled or refunded, and each reveal is audited. For courier orders the seller never sees the buyer's phone or address; Shipbubble receives them for the label. The tracking call button calls the courier's phone (from Shipbubble) or the store's business line, not a personal number shared in chat.
 
-**Next-day promise:** orders paid before a daily **cut-off (6pm, owner-configurable)** are promised for next-day delivery; after cut-off, the day after. Shown honestly at checkout.
+**Next-day promise:** orders paid before a daily **cut-off (6pm Africa/Lagos, owner-configurable)** are promised for next-day delivery; after cut-off, the day after. Delivery days skip Sundays and the public holidays in the owner-editable holiday list *(my call: couriers do not run on those days)*. Shown honestly at checkout, and recomputed and fixed at payment.
+
+**Ship deadline** *(my call)*: the 48 hours in section 5 are **calendar hours** from payment; Sundays and holidays do not pause them. An unshipped order is refunded and the seller gets a strike. For self-delivery, "shipped" means the seller marked it picked up; for courier, it means marked ready (the order is not struck if the booking then fails or the courier cancels; the owner resolves those). The rule applies only to orders paid on or after an **enforce-from** date (set when the job was switched on), so older orders are never swept up. Orders with no delivery method (from before delivery tracking) are excluded and listed for the owner.
 
 ### Tracking screen (must be polished, not templated)
 
@@ -127,7 +140,7 @@ Based on Baymard order-tracking research and established delivery-app patterns:
 1. **Top:** expected delivery day + current status, large and unambiguous.
 2. **Timeline:** vertical, timestamped steps (Paid → Seller preparing → Picked up → Out for delivery → Delivered → Confirmed).
 3. **Courier/seller name + call button** — buyers never leave the app to track.
-4. **Handover code** clearly visible on "Out for delivery".
+4. **Handover code** clearly visible on "Out for delivery" (self-delivery only).
 5. **Map** only during "Out for delivery" (and only if the courier provides location) — not a constant, battery-heavy map.
 6. Order details below.
 
