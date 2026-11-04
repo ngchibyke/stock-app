@@ -78,6 +78,7 @@ impl OtpSender for RecordingOtpSender {
 pub struct TestResponse {
     pub status: u16,
     pub json: Value,
+    pub headers: axum::http::HeaderMap,
 }
 
 pub struct TestApp {
@@ -173,13 +174,18 @@ impl TestApp {
 
         let res = self.router.clone().oneshot(req).await.expect("infallible");
         let status = res.status().as_u16();
+        let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
         let json = if bytes.is_empty() {
             Value::Null
         } else {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
-        TestResponse { status, json }
+        TestResponse {
+            status,
+            json,
+            headers,
+        }
     }
 
     /// Sends raw bytes with the given headers (no content type unless given).
@@ -197,10 +203,12 @@ impl TestApp {
         let req = builder.body(Body::from(body)).expect("valid request");
         let res = self.router.clone().oneshot(req).await.expect("infallible");
         let status = res.status().as_u16();
+        let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
         TestResponse {
             status,
             json: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            headers,
         }
     }
 
@@ -214,10 +222,12 @@ impl TestApp {
             .expect("valid request");
         let res = self.router.clone().oneshot(req).await.expect("infallible");
         let status = res.status().as_u16();
+        let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.expect("body").to_bytes();
         TestResponse {
             status,
             json: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            headers,
         }
     }
 

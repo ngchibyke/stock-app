@@ -7,6 +7,8 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State},
+    http::header,
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -30,6 +32,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/orders", get(list))
         .route("/orders/{id}", get(show))
+        .route("/orders/{id}/tracking", get(tracking))
         .route("/orders/{id}/cancel", post(cancel))
         .route("/orders/{id}/received", post(received))
         .route("/orders/{id}/picked-up", post(picked_up))
@@ -87,6 +90,18 @@ async fn show(
     Ok(Json(
         views::get_for_viewer(&state.db, user.id, staff, id).await?,
     ))
+}
+
+/// The tracking timeline, for the order's buyer or its store owner only. It can
+/// carry contact details and the handover code, so it is never cached.
+async fn tracking(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let id = parse_id(&id)?;
+    let view = crate::delivery::tracking::get(&state, user.id, id).await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(view)))
 }
 
 async fn store_orders(

@@ -9,3 +9,4 @@ pub mod options;
 pub mod postcode;
 pub mod promise;
 pub mod shipments;
+pub mod tracking;

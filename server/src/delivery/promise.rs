@@ -59,6 +59,11 @@ pub fn next_pickup_date(now: OffsetDateTime, cutoff_minutes: i32, holidays: &[Da
     day
 }
 
+/// The calendar date at `now` in Africa/Lagos.
+pub fn lagos_date(now: OffsetDateTime) -> Date {
+    now.to_offset(LAGOS).date()
+}
+
 /// Holidays the owner maintains in `bank_holidays` (from two days back onwards).
 pub async fn load_holidays(db: &PgPool) -> Result<Vec<Date>, AppError> {
     let from = OffsetDateTime::now_utc().to_offset(LAGOS).date() - Duration::days(2);
