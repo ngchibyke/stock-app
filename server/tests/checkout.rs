@@ -914,6 +914,41 @@ async fn checkout_runs_on_a_pool_of_one(pool: PgPool) {
     app.pool.close().await;
 }
 
+/// Retention (plan 8) must be able to clear the buyer's address snapshot, but
+/// nothing else may leave a delivery order without one.
+#[sqlx::test]
+async fn address_snapshot_clears_only_with_a_purge_stamp(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = listing(&app, 10_000, 5).await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let res = app.checkout(&buyer, METHOD).await;
+    assert_eq!(res.status, 201, "{}", res.json);
+
+    let err = sqlx::query("UPDATE orders SET delivery_address_enc = NULL")
+        .execute(&app.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.as_database_error().unwrap().constraint(),
+        Some("orders_delivery_details")
+    );
+    sqlx::query(
+        "UPDATE orders SET delivery_address_enc = NULL, delivery_address_purged_at = now()",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM orders WHERE delivery_address_enc IS NULL"
+        )
+        .await,
+        1
+    );
+}
+
 fn error_code(res: &common::TestResponse) -> &str {
     res.json["error"]["code"].as_str().unwrap_or("")
 }

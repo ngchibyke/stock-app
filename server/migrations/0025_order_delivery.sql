@@ -45,6 +45,8 @@ ALTER TABLE orders
     ADD COLUMN delivery_option_id    uuid NULL REFERENCES delivery_options (id),
     -- FieldCipher-encrypted JSON of the DeliveryAddress chosen at checkout.
     ADD COLUMN delivery_address_enc  bytea NULL,
+    -- When a retention purge cleared the snapshot (plan 8): the only way it may be NULL.
+    ADD COLUMN delivery_address_purged_at timestamptz NULL,
     ADD COLUMN delivery_area         area_council NULL,
     -- The part of the provider's collection fee charged on a courier fee: platform
     -- money, so the platform bears it. `collection_fee_share_kobo` is the seller's
@@ -61,8 +63,8 @@ ALTER TABLE orders
     ADD COLUMN courier_sender_code   bigint NULL,
     ADD CONSTRAINT orders_delivery_details CHECK (
         delivery_method IS NULL
-        OR (delivery_address_enc IS NOT NULL AND delivery_area IS NOT NULL
-            AND promised_date IS NOT NULL)
+        OR ((delivery_address_enc IS NOT NULL OR delivery_address_purged_at IS NOT NULL)
+            AND delivery_area IS NOT NULL AND promised_date IS NOT NULL)
     ),
     ADD CONSTRAINT orders_courier_details CHECK (
         (delivery_method IS DISTINCT FROM 'courier')
