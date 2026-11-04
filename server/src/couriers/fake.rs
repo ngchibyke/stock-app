@@ -62,6 +62,7 @@ pub struct FakeCourier {
     book_failure: Mutex<Option<CourierError>>,
     book_delay: Mutex<Option<Duration>>,
     booking_phone: Mutex<Option<String>>,
+    booking_url: Mutex<Option<String>>,
     cancel_failure: Mutex<Option<CourierError>>,
     cancel_delay: Mutex<Option<Duration>>,
     updates: Mutex<VecDeque<CourierUpdate>>,
@@ -81,6 +82,7 @@ impl Default for FakeCourier {
             book_failure: Mutex::default(),
             book_delay: Mutex::default(),
             booking_phone: Mutex::default(),
+            booking_url: Mutex::default(),
             cancel_failure: Mutex::default(),
             cancel_delay: Mutex::default(),
             updates: Mutex::default(),
@@ -123,6 +125,11 @@ impl FakeCourier {
     }
 
     /// The courier phone every later `book` reports.
+    /// The tracking URL bookings answer with, in place of the default.
+    pub fn set_booking_url(&self, url: &str) {
+        *self.booking_url.lock().unwrap() = Some(url.to_string());
+    }
+
     pub fn set_booking_phone(&self, phone: Option<String>) {
         *self.booking_phone.lock().unwrap() = phone;
     }
@@ -229,7 +236,13 @@ impl CourierProvider for FakeCourier {
         let rate = self.rates.lock().unwrap().first().cloned();
         Ok(Booking {
             provider_order_id: format!("fake-{n}"),
-            tracking_url: Some(format!("https://track.fake.test/fake-{n}")),
+            tracking_url: Some(
+                self.booking_url
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| format!("https://track.fake.test/fake-{n}")),
+            ),
             courier_name: rate
                 .as_ref()
                 .map_or_else(|| "Fake Courier".into(), |r| r.courier_name.clone()),

@@ -17,7 +17,9 @@
 //!   Courier errors are logged by class only (their `Display` carries no detail).
 //! - Quote cost: an unexpired, unused courier quote for the same buyer, store,
 //!   address, cart and sender code is reused without a provider call. Fresh quotes
-//!   are capped at [`MAX_QUOTES_PER_HOUR`] per buyer (429 `too_many_attempts`).
+//!   are capped at [`MAX_QUOTES_PER_HOUR`] per buyer (429 `too_many_attempts`). An
+//!   unexpired, unused self-delivery option at the same fee is reused too, so
+//!   repeat calls do not add rows.
 //!
 //! An option is valid at checkout only for the same buyer, store and address,
 //! before it expires (`courier_quote_ttl_minutes`), while the store's cart lines
@@ -69,6 +71,8 @@ pub const NO_DELIVERY_OPTION: &str = "no_delivery_option";
 pub const MAX_QUOTES_PER_HOUR: i64 = 20;
 /// A quote expiring sooner than this is not reused: the buyer needs time to pay.
 const REUSE_MARGIN_MINUTES: i32 = 2;
+/// Audit action: a late payment revived an order whose quote another order holds.
+pub const QUOTE_REUSED: &str = "order.quote_reused";
 
 /// How an order is delivered. Postgres `delivery_method`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -458,6 +462,42 @@ async fn reusable_courier(
         .collect())
 }
 
+/// The latest unexpired, unused self-delivery option for this buyer, store,
+/// address and cart at the store's current fee, if any.
+async fn reusable_self(
+    db: &PgPool,
+    buyer: Uuid,
+    store_id: Uuid,
+    address_id: Uuid,
+    fingerprint: &str,
+    fee_kobo: i64,
+) -> Result<Option<OptionView>, AppError> {
+    let row: Option<(Uuid, Date)> = sqlx::query_as(&format!(
+        "SELECT d.id, d.promised_date FROM delivery_options d \
+         WHERE d.buyer_id = $1 AND d.store_id = $2 AND d.address_id = $3 \
+           AND d.cart_fingerprint = $4 AND d.method = 'self' AND d.fee_kobo = $5 \
+           AND d.expires_at > now() + make_interval(mins => {REUSE_MARGIN_MINUTES}) \
+           AND NOT {USED} \
+         ORDER BY d.created_at DESC, d.id LIMIT 1"
+    ))
+    .bind(buyer)
+    .bind(store_id)
+    .bind(address_id)
+    .bind(fingerprint)
+    .bind(fee_kobo)
+    .fetch_optional(db)
+    .await
+    .context("find reusable self option")?;
+    Ok(row.map(|(id, promised)| OptionView {
+        id,
+        method: DeliveryMethod::SelfDelivery,
+        fee_kobo,
+        courier_name: None,
+        delivery_eta: None,
+        promised_date: promised.to_string(),
+    }))
+}
+
 /// Fresh courier quotes this buyer asked for in the last hour (requests that
 /// reached the provider), counted from the audit trail.
 async fn recent_quotes(db: &PgPool, buyer: Uuid) -> Result<i64, AppError> {
@@ -518,14 +558,18 @@ pub async fn options_for(
         };
         let fingerprint = cart_fingerprint(&cart.lines);
         let mut new = Vec::new();
+        let mut own = None;
         if profile.self_delivery
             && let Some(fee) = profile.self_fee_kobo
         {
-            new.push(NewOption {
-                method: DeliveryMethod::SelfDelivery,
-                fee_kobo: fee,
-                rate: None,
-            });
+            own = reusable_self(&state.db, buyer, store_id, address.id, &fingerprint, fee).await?;
+            if own.is_none() {
+                new.push(NewOption {
+                    method: DeliveryMethod::SelfDelivery,
+                    fee_kobo: fee,
+                    rate: None,
+                });
+            }
         }
         let courier = state.courier.is_some() && courier_offered(&profile);
         let mut reused = Vec::new();
@@ -533,8 +577,10 @@ pub async fn options_for(
             reused = reusable_courier(&state.db, buyer, store_id, address.id, &fingerprint, sender)
                 .await?;
         }
+        let needs_quote = courier && reused.is_empty();
+        reused.extend(own);
         plans.push(StorePlan {
-            needs_quote: courier && reused.is_empty(),
+            needs_quote,
             store_id,
             cart,
             fingerprint,

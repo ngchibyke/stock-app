@@ -486,6 +486,35 @@ async fn courier_pickup_moved_not_struck(pool: PgPool) {
         .await;
 }
 
+/// The kill switch stops refunds. A flag changes no order, so it still runs.
+#[sqlx::test]
+async fn kill_switch_leaves_pickup_flags_on(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app).await;
+    make_courier(&app, f.order_id, true).await;
+    add_shipment(&app, f.order_id, "booked", Some("fake-1"), None, None).await;
+    exec(
+        &app,
+        "UPDATE platform_settings SET jobs_ship_deadline_enabled = false",
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '25 hours'",
+    )
+    .await;
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM audit_log WHERE action = 'shipment.pickup_overdue'",
+        )
+        .await,
+        1
+    );
+}
+
 /// A ready courier order still unpicked 24h after `ship_by`: one audit row and
 /// one attention entry, no refund, no strike, however many ticks run.
 #[sqlx::test]

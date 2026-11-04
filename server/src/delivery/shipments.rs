@@ -66,6 +66,7 @@ use crate::{
     AppState, audit,
     checkout::service::busy_err,
     couriers::{Booking, CourierError, CourierProvider},
+    delivery::events::safe_tracking_url,
     error::AppError,
     escrow::jobs::BACKOFF_SQL,
     ledger::{self, Account, Entry},
@@ -189,6 +190,15 @@ pub async fn on_refund(conn: &mut PgConnection, order_id: Uuid) -> Result<(), Ap
     let Some((id, status)) = row else {
         return Ok(());
     };
+    // A refunded order shows nobody the courier's phone, so it keeps none.
+    sqlx::query(
+        "UPDATE shipments SET courier_phone_enc = NULL \
+         WHERE id = $1 AND courier_phone_enc IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *conn)
+    .await
+    .context("clear courier phone on refund")?;
     let (target, action, detail) = match status.as_str() {
         "booked" | "confirmed" => (
             Some("cancel_pending"),
@@ -500,8 +510,14 @@ async fn record_booking(
     let outcome = decide(result, call.attempts, refunded);
     let booking = outcome.booking.as_ref();
     let phone_enc = booking
+        .filter(|_| !refunded)
         .and_then(|b| b.courier_phone.as_deref())
         .map(|phone| state.cipher.encrypt(phone));
+    let tracking_url = booking.and_then(|b| safe_tracking_url(b.tracking_url.as_deref()));
+    // The buyer's call button treats any name as a contact, so a blank is none.
+    let courier_name = booking
+        .map(|b| b.courier_name.as_str())
+        .filter(|name| !name.trim().is_empty());
     let charged = booking.and_then(|b| b.charged_kobo);
     let fenced: Option<Uuid> = sqlx::query_scalar(&format!(
         "UPDATE shipments SET status = $3::shipment_status, provider_order_id = $4, \
@@ -519,8 +535,8 @@ async fn record_booking(
     .bind(call.lease)
     .bind(outcome.status)
     .bind(booking.map(|b| b.provider_order_id.as_str()))
-    .bind(booking.and_then(|b| b.tracking_url.as_deref()))
-    .bind(booking.map(|b| b.courier_name.as_str()))
+    .bind(&tracking_url)
+    .bind(courier_name)
     .bind(&phone_enc)
     .bind(charged)
     .bind(&outcome.error)

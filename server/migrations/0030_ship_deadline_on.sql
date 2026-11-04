@@ -4,8 +4,8 @@
 -- orders paid at or after it can be refunded or struck, so the backlog of
 -- orders paid before this migration (including part-2 orders with no delivery
 -- method) is never mass-refunded. The migration sets it to now(); the owner
--- can move it earlier through the settings route (audited), and the route
--- refuses a value more than 30 days ahead.
+-- can only move it later through the settings route (audited), never earlier,
+-- and the route refuses a value more than 30 days ahead.
 -- Personal data: none.
 
 ALTER TABLE platform_settings

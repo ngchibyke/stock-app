@@ -44,6 +44,55 @@ async fn promised_now(app: &TestApp) -> String {
     promised_date(OffsetDateTime::now_utc(), 1080, &holidays).to_string()
 }
 
+/// Repeat calls add no rows while the option can still be used.
+#[sqlx::test]
+async fn self_option_is_reused_until_used_or_repriced(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = app
+        .make_active_store_with_product("08011111111", "Mama Put", 10_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified("08022222221").await;
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let self_id = |json: &serde_json::Value| {
+        json["stores"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["method"] == "self")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let first = self_id(&app.delivery_options(&buyer, address).await.json);
+    for _ in 0..3 {
+        assert_eq!(
+            self_id(&app.delivery_options(&buyer, address).await.json),
+            first
+        );
+    }
+    let rows = || {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM delivery_options WHERE method = 'self'")
+            .fetch_one(&app.pool)
+    };
+    assert_eq!(rows().await.unwrap(), 1);
+
+    // A new fee is a new option: the old price is never reused.
+    let res = app
+        .request(
+            axum::http::Method::PATCH,
+            &format!("/stores/{}", l.store_id),
+            Some(serde_json::json!({ "self_delivery_fee_kobo": 70_000 })),
+            Some(&l.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = app.delivery_options(&buyer, address).await;
+    assert_ne!(self_id(&res.json), first);
+    assert_eq!(rows().await.unwrap(), 2);
+}
+
 #[sqlx::test]
 async fn options_offer_self_and_courier_with_promised_date(pool: PgPool) {
     let app = TestApp::new(pool).await;

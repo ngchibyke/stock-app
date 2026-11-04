@@ -6,7 +6,8 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::IntoResponse,
     routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
@@ -132,7 +133,7 @@ async fn create(
     State(state): State<AppState>,
     user: AuthUser,
     AppJson(body): AppJson<NewAddress>,
-) -> Result<(StatusCode, Json<DeliveryAddress>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let recipient_name = required(&body.recipient_name, MAX_NAME, "recipient_name")?;
     let address_line = required(&body.address_line, MAX_LINE, "address_line")?;
     let phone = normalize_ng_phone(&body.phone)?;
@@ -205,6 +206,7 @@ async fn create(
 
     Ok((
         StatusCode::CREATED,
+        [(header::CACHE_CONTROL, "no-store")],
         Json(DeliveryAddress {
             id,
             area_council,
@@ -221,7 +223,7 @@ async fn create(
 async fn list(
     State(state): State<AppState>,
     user: AuthUser,
-) -> Result<Json<Vec<DeliveryAddress>>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM buyer_addresses \
          WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC, id DESC"
@@ -234,7 +236,7 @@ async fn list(
         .into_iter()
         .map(|r| r.open(&state.cipher))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Json(out))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(out)))
 }
 
 async fn remove(

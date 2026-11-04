@@ -85,7 +85,7 @@ pub enum Applied {
     Recorded,
     /// A duplicate, or below the shipment's rank. Nothing moved.
     Ignored,
-    /// No shipment has this provider order id. Nothing written.
+    /// No shipment has this provider order id. Only [`UNKNOWN_SHIPMENT`] is written.
     UnknownShipment,
 }
 
@@ -475,7 +475,7 @@ impl Change {
     }
 }
 
-fn safe_tracking_url(url: Option<&str>) -> Option<String> {
+pub(crate) fn safe_tracking_url(url: Option<&str>) -> Option<String> {
     url.filter(|u| {
         u.len() > "https://".len()
             && u.len() <= MAX_TRACKING_URL

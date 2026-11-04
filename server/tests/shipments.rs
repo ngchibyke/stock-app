@@ -897,6 +897,204 @@ async fn refund_with_cancel_failed_leaves_the_cost_on_the_books(pool: PgPool) {
     assert_eq!(charge_entries(&app, f.order_id).await.len(), 2);
 }
 
+/// A late payment revives an order after another order took its courier quote:
+/// both hold one request token, so the owner is told.
+#[sqlx::test]
+async fn late_payment_on_a_reused_quote_raises_attention(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let listing = app
+        .make_active_store_with_product(SELLER, "Mama Put", 10_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, listing.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let courier_option = |json: &Value| -> Uuid {
+        json["stores"][0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["method"] == "courier")
+            .expect("a courier option")["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let opts = app.delivery_options(&buyer, address).await;
+    let option = courier_option(&opts.json);
+    let first = app
+        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .await;
+    assert_eq!(first.status, 201, "{}", first.json);
+    let checkout_a: Uuid = first.json["checkout_id"].as_str().unwrap().parse().unwrap();
+    let reference = first.json["reference"].as_str().unwrap().to_string();
+    let total = first.json["total_kobo"].as_i64().unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    assert!(
+        server::checkout::expire_and_restore(&mut tx, checkout_a)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+
+    // The quote is free again, and a second checkout takes it.
+    let opts = app.delivery_options(&buyer, address).await;
+    assert_eq!(courier_option(&opts.json), option);
+    let second = app
+        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .await;
+    assert_eq!(second.status, 201, "{}", second.json);
+
+    app.fake.set_payment(
+        &reference,
+        PaymentStatus::Successful {
+            amount_kobo: total,
+            fee_kobo: 10,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.clone(),
+        },
+    );
+    assert_eq!(
+        settle_payment(&app.state, &reference).await.unwrap(),
+        SettleOutcome::Paid
+    );
+    assert_eq!(audits(&app, "order.quote_reused").await.len(), 1);
+    let order_id: String = sqlx::query_scalar("SELECT id::text FROM orders WHERE checkout_id = $1")
+        .bind(checkout_a)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let owner = app.owner_token().await;
+    let json = attention(&app, &owner).await;
+    let items = json["orders_attention"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{json}");
+    assert_eq!(items[0]["attention"], "quote_reused");
+    assert_eq!(items[0]["order_id"], order_id);
+}
+
+/// A late payment with nobody else on the quote raises nothing.
+#[sqlx::test]
+async fn late_payment_alone_on_its_quote_raises_nothing(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let listing = app
+        .make_active_store_with_product(SELLER, "Mama Put", 10_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, listing.variant_id, 1).await;
+    let address = app.buyer_address(&buyer).await;
+    let opts = app.delivery_options(&buyer, address).await;
+    let option: Uuid = opts.json["stores"][0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["method"] == "courier")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let res = app
+        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .await;
+    let checkout: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
+    let reference = res.json["reference"].as_str().unwrap().to_string();
+    let total = res.json["total_kobo"].as_i64().unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    server::checkout::expire_and_restore(&mut tx, checkout)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    app.fake.set_payment(
+        &reference,
+        PaymentStatus::Successful {
+            amount_kobo: total,
+            fee_kobo: 10,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.clone(),
+        },
+    );
+    assert_eq!(
+        settle_payment(&app.state, &reference).await.unwrap(),
+        SettleOutcome::Paid
+    );
+    assert!(audits(&app, "order.quote_reused").await.is_empty());
+}
+
+async fn courier_phone(app: &TestApp, order_id: Uuid) -> Option<Vec<u8>> {
+    sqlx::query_scalar("SELECT courier_phone_enc FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn refund_clears_the_courier_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.set_booking_phone(Some(COURIER_PHONE.into()));
+    tick(&app).await;
+    assert!(courier_phone(&app, f.order_id).await.is_some());
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    assert_eq!(courier_phone(&app, f.order_id).await, None);
+}
+
+#[sqlx::test]
+async fn booking_that_lands_after_the_refund_keeps_no_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.set_booking_phone(Some(COURIER_PHONE.into()));
+    app.courier.delay_next_book(Duration::from_millis(300));
+    let running = {
+        let state = app.state.clone();
+        tokio::spawn(async move { run_due_jobs(&state).await })
+    };
+    book_started(&app, 1).await;
+    refund_order(&app.state, f.order_id, true).await.unwrap();
+    running.await.unwrap();
+    let row = shipment(&app, f.order_id).await;
+    assert_eq!(row.provider_order_id.as_deref(), Some("fake-1"));
+    assert_eq!(courier_phone(&app, f.order_id).await, None);
+}
+
+#[sqlx::test]
+async fn blank_courier_name_is_stored_as_none(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier.set_rates(vec![Rate {
+        courier_name: "  ".into(),
+        ..default_rate()
+    }]);
+    tick(&app).await;
+    assert_eq!(status(&app, f.order_id).await, "booked");
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT courier_name FROM shipments WHERE order_id = $1")
+            .bind(f.order_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(name, None);
+}
+
+#[sqlx::test]
+async fn booking_stores_only_a_safe_tracking_url(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = ready_order(&app).await;
+    app.courier
+        .set_booking_url(&format!("https://track.fake.test/{}", "x".repeat(4096)));
+    tick(&app).await;
+    assert_eq!(status(&app, f.order_id).await, "booked");
+    let url: Option<String> =
+        sqlx::query_scalar("SELECT tracking_url FROM shipments WHERE order_id = $1")
+            .bind(f.order_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(url, None);
+}
+
 #[sqlx::test]
 async fn unavailable_cancel_retries_then_succeeds(pool: PgPool) {
     let app = TestApp::new(pool).await;

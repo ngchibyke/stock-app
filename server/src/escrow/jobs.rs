@@ -508,26 +508,26 @@ async fn reverify_checkouts(
 // ------------------------------------------------------------ 3. ship deadline
 
 async fn ship_deadline(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
-    if !settings::load(&state.db).await?.jobs_ship_deadline_enabled {
-        return Ok(Stats::default());
-    }
-    let sql = format!(
-        "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
-         WHERE o.status = 'paid' AND o.ship_by < now() AND o.held_at IS NULL \
-           AND NOT c.provider_flagged AND {SHIP_DEADLINE_SCOPE} AND {} \
-         ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
-        not_pushed_back(SHIP_DEADLINE, "o.id")
-    );
-    let ids = claim(state, &sql, SHIP_DEADLINE_PER_TICK).await?;
     let mut stats = Stats::default();
-    for id in ids {
-        if cancel.is_cancelled() {
-            break;
+    if settings::load(&state.db).await?.jobs_ship_deadline_enabled {
+        let sql = format!(
+            "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
+             WHERE o.status = 'paid' AND o.ship_by < now() AND o.held_at IS NULL \
+               AND NOT c.provider_flagged AND {SHIP_DEADLINE_SCOPE} AND {} \
+             ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
+            not_pushed_back(SHIP_DEADLINE, "o.id")
+        );
+        let ids = claim(state, &sql, SHIP_DEADLINE_PER_TICK).await?;
+        for id in ids {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let result = refund_missed_ship_deadline(state, id).await;
+            tally(state, &mut stats, SHIP_DEADLINE, id, result).await;
         }
-        let result = refund_missed_ship_deadline(state, id).await;
-        tally(state, &mut stats, SHIP_DEADLINE, id, result).await;
     }
-    // Flags only: they change no order, so they are not counted as refunds.
+    // Flags only: they change no order, so they run with the kill switch off
+    // too, and are not counted as refunds.
     if let Err(e) = flag_pickup_overdue(state).await {
         stats.failed += 1;
         tracing::warn!(job = SHIP_DEADLINE, error = %e, "pickup flags failed; retried next tick");

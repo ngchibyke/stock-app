@@ -16,6 +16,7 @@ use crate::{
     audit,
     delivery::{
         events::UNKNOWN_SHIPMENT,
+        options::QUOTE_REUSED,
         shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
     },
     error::AppError,
@@ -372,8 +373,9 @@ pub struct ShipmentAttention {
     pub updated_at: OffsetDateTime,
 }
 
-/// A paid order the ship-deadline job cannot judge. `attention` is
-/// `no_delivery_method`.
+/// A paid order that needs a person. `attention` is `no_delivery_method` (the
+/// ship-deadline job cannot judge it) or `quote_reused` (a late payment revived
+/// it, and another order holds the same courier quote, so one token may book twice).
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct OrderAttention {
     pub order_id: Uuid,
@@ -518,9 +520,15 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     let orders_attention = sqlx::query_as::<_, OrderAttention>(
         "SELECT o.id AS order_id, o.store_id, 'no_delivery_method' AS attention, o.paid_at \
          FROM orders o WHERE o.status = 'paid' AND o.delivery_method IS NULL \
-         ORDER BY o.paid_at, o.id LIMIT $1",
+         UNION ALL \
+         SELECT o.id, o.store_id, 'quote_reused', o.paid_at \
+         FROM orders o WHERE o.status = 'paid' AND EXISTS ( \
+             SELECT 1 FROM audit_log a WHERE a.action = $2 AND a.subject_type = 'order' \
+                AND a.subject_id = o.id) \
+         ORDER BY paid_at, order_id LIMIT $1",
     )
     .bind(MAX_LIMIT)
+    .bind(QUOTE_REUSED)
     .fetch_all(db)
     .await
     .context("list orders without a delivery method")?;

@@ -29,6 +29,7 @@ async fn seller_creates_store(pool: PgPool) {
     let (_, token) = app.make_seller("08011111111").await;
     let res = create(&app, &token, "Mama Put").await;
     assert_eq!(res.status, 201, "{}", res.json);
+    assert_eq!(res.headers["cache-control"], "no-store");
     assert_eq!(res.json["status"], "pending");
     let slug = res.json["slug"].as_str().unwrap();
     let got = app
@@ -47,7 +48,19 @@ async fn seller_creates_store(pool: PgPool) {
         .request(Method::GET, "/stores/mine", None, Some(&token))
         .await;
     assert_eq!(mine.status, 200);
+    assert_eq!(mine.headers["cache-control"], "no-store");
     assert_eq!(mine.json[0]["pickup_address"], "12 Unique Street, Wuse 2");
+    let id = res.json["id"].as_str().unwrap();
+    let patched = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "description": "Fresher goods" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(patched.status, 200, "{}", patched.json);
+    assert_eq!(patched.headers["cache-control"], "no-store");
 }
 
 #[sqlx::test]

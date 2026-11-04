@@ -27,7 +27,9 @@
 //!    provider fee split across orders (each order's seller part on its items
 //!    and any self-delivery fee, the platform's part on a courier fee), ledger
 //!    `buyer_funds -T`, `escrow +T` per order, provider hold ->
-//!    `provider_flagged`, the cart lines cleared.
+//!    `provider_flagged`, the cart lines cleared. A late payment revives an order
+//!    whose courier quote another order may have taken meanwhile: both would
+//!    book one token, so that raises [`QUOTE_REUSED`] for the owner.
 //! 4. For a webhook, the event is marked processed in that same transaction, or
 //!    after a confirmed no-op. Pending/unavailable answers leave it unprocessed,
 //!    so the provider's retry is settled again.
@@ -43,7 +45,10 @@ use uuid::Uuid;
 use super::service::{db_err, lock_reserved};
 use crate::{
     AppState, audit,
-    delivery::promise::{load_holidays, promised_date},
+    delivery::{
+        options::QUOTE_REUSED,
+        promise::{load_holidays, promised_date},
+    },
     error::AppError,
     escrow::refund::{begin_refund, send_refund},
     ledger::{self, Account, Entry},
@@ -414,9 +419,7 @@ async fn apply(
     // later owner fee change never alters an order already paid.
     let fees = settings.fee_schedule();
     let mut entries = Vec::with_capacity(orders.len() * 2);
-    for (((order_id, ..), total), parts) in
-        orders.iter().zip(&totals).zip(shares.chunks_exact(2))
-    {
+    for (((order_id, ..), total), parts) in orders.iter().zip(&totals).zip(shares.chunks_exact(2)) {
         sqlx::query(
             "UPDATE orders SET status = 'paid', paid_at = now(), cancelled_at = NULL, \
                     collection_fee_share_kobo = $2, collection_fee_courier_kobo = $11, \
@@ -484,6 +487,9 @@ async fn apply(
         )
         .await?;
     } else {
+        if after_expiry {
+            flag_reused_quotes(&mut tx, checkout_id).await?;
+        }
         clear_cart_lines(&mut tx, buyer_id, &items).await?;
         audit::record(
             &mut tx,
@@ -509,6 +515,37 @@ async fn apply(
         }
     }
     Ok(SettleOutcome::RefundedAfterExpiry)
+}
+
+/// Audits each of this checkout's orders whose courier quote is also held by
+/// another order that is not cancelled. A quote is free again once its order is
+/// cancelled, so this can only happen to an order revived by a late payment.
+async fn flag_reused_quotes(conn: &mut PgConnection, checkout_id: Uuid) -> Result<(), AppError> {
+    let reused: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT o.id, other.id FROM orders o \
+         JOIN delivery_options d ON d.id = o.delivery_option_id AND d.method = 'courier' \
+         JOIN delivery_options u ON u.method = 'courier' AND u.buyer_id = d.buyer_id \
+              AND u.store_id = d.store_id AND u.created_at = d.created_at \
+         JOIN orders other ON other.delivery_option_id = u.id AND other.id <> o.id \
+         WHERE o.checkout_id = $1 AND other.status <> 'cancelled' \
+         ORDER BY o.id, other.id",
+    )
+    .bind(checkout_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err("find reused quotes"))?;
+    for (order_id, other) in reused {
+        audit::record(
+            conn,
+            None,
+            QUOTE_REUSED,
+            "order",
+            Some(order_id),
+            json!({ "other_order_id": other }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Releases a pending checkout's reservation (`reserved_quantity -= q`); the

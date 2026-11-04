@@ -31,6 +31,7 @@ async fn create_list_delete_address(pool: PgPool) {
 
     let created = add(&app, &token, body()).await;
     assert_eq!(created.status, 201, "{}", created.json);
+    assert_eq!(created.headers["cache-control"], "no-store");
     assert_eq!(created.json["phone"], "+2348031234567");
     assert_eq!(created.json["postcode"], "FC02A09DB09");
     assert_eq!(created.json["area_council"], "amac");
@@ -94,6 +95,17 @@ async fn create_list_delete_address(pool: PgPool) {
         ["address.created", "address.created", "address.deleted"]
     );
     assert!(rows.iter().all(|r| !r.1.to_string().contains("Zambezi")));
+}
+
+#[sqlx::test]
+async fn address_list_is_never_cached(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.sign_up_verified("08031234567").await;
+    let res = app
+        .request(Method::GET, "/me/addresses", None, Some(&token))
+        .await;
+    assert_eq!(res.status, 200);
+    assert_eq!(res.headers["cache-control"], "no-store");
 }
 
 #[sqlx::test]
