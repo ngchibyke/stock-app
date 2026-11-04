@@ -415,11 +415,12 @@ async fn apply(
         })
         .collect();
     let shares = split_proportional(fee, &bases);
+    let (share_pairs, _) = shares.as_chunks::<2>();
     // The seller's payout fee schedule is fixed now, like the deadlines: a
     // later owner fee change never alters an order already paid.
     let fees = settings.fee_schedule();
     let mut entries = Vec::with_capacity(orders.len() * 2);
-    for (((order_id, ..), total), parts) in orders.iter().zip(&totals).zip(shares.chunks_exact(2)) {
+    for (((order_id, ..), total), parts) in orders.iter().zip(&totals).zip(share_pairs) {
         sqlx::query(
             "UPDATE orders SET status = 'paid', paid_at = now(), cancelled_at = NULL, \
                     collection_fee_share_kobo = $2, collection_fee_courier_kobo = $11, \
