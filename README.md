@@ -83,6 +83,6 @@ These are tracked in the roadmap:
 - Rate limits per network address on sign-up and sign-in.
 - A restricted production database role.
 - Legal review of the escrow setup, and data-protection (DPO) review.
-- The ship-deadline job (`platform_settings.jobs_ship_deadline_enabled`) stays **off** until plan 3 ships a pickup route. Until then nothing can move an order out of `paid`, so the job would refund every paid order and strike its seller.
+- The ship-deadline job is on (migration 0030) and only refunds or strikes orders paid after `platform_settings.ship_deadline_enforce_from`, which that migration sets to the moment it ran. After deploying, check the owner's reconciliation view: `orders_attention` lists paid orders with no delivery method (the job never touches them), and `shipments_attention` lists ready courier orders whose pickup is overdue.
 - Confirm with Mono which unit (kobo or naira) each product's `amount` fields use (`MONO_DIRECTPAY_AMOUNT_UNIT`, `MONO_DISBURSE_AMOUNT_UNIT`), then run a sandbox smoke test of a payment, a payout and a webhook before switching to live keys.
 - DPO review of whether the Owner should keep seeing buyer display names on order reads. Support already does not, and every staff read is audited.

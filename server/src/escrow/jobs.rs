@@ -8,12 +8,23 @@
 //!    concurrency cap and per-checkout cooldown). Each claim pushes the
 //!    checkout's own `next_reverify_at` back (5 min doubling, capped at 6h).
 //! 3. `ship_deadline`: `paid` orders past their stored `ship_by`, not held,
-//!    payment not `provider_flagged` ->
+//!    payment not `provider_flagged`, where the seller did not act: a
+//!    self-delivery order not yet picked up, or a courier order the seller
+//!    never marked ready (`ready_at IS NULL`) ->
 //!    a full refund (stock back on hand) plus a `seller_strikes` row, in one
 //!    transaction, then the refund is sent. Capped per tick, and switched off
-//!    by `platform_settings.jobs_ship_deadline_enabled` (owner kill switch).
-//!    It ships OFF (migration 0019): until plan 3 adds a pickup route nothing
-//!    can move an order out of `paid`, so it would refund every paid order.
+//!    by `platform_settings.jobs_ship_deadline_enabled` (owner kill switch;
+//!    on since migration 0030).
+//!    Never refunded or struck: an order paid before
+//!    `platform_settings.ship_deadline_enforce_from` (so turning the job on
+//!    never reaches over a backlog), an order with no `delivery_method`
+//!    (listed for the owner as `no_delivery_method`), and a courier order the
+//!    seller marked ready, whatever became of its shipment (`booking_unknown`,
+//!    `booking_failed`, `pickup_moved`, a courier cancel): those are ours or
+//!    the courier's problem, not the seller's. `ship_by` is calendar hours;
+//!    holidays do not pause it. A ready courier order still unpicked 24h after
+//!    `ship_by` gets one `shipment.pickup_overdue` audit row (the owner's
+//!    attention list), and nothing else.
 //! 4. `auto_release`: `delivered` orders past their stored `release_at`, not
 //!    held, whose checkout is not `provider_flagged` ->
 //!    [`release_order`]`(AutoAfterDelivery)`.
@@ -102,6 +113,18 @@ pub const TICK: Duration = Duration::from_secs(60);
 pub const BATCH: i64 = 100;
 /// Rows a provider-calling job handles per tick (one call or so each).
 pub const PROVIDER_CALLS_PER_TICK: i64 = 20;
+/// A ready courier order still `paid` this long after `ship_by` is flagged.
+const PICKUP_OVERDUE_AFTER: &str = "24 hours";
+/// Audit action written once per order whose courier pickup is overdue.
+pub const PICKUP_OVERDUE: &str = "shipment.pickup_overdue";
+/// SQL condition (over `orders o`): the order is inside the job's reach (the
+/// seller did not act, and it was paid after the enforcement date). Used by
+/// the claim and again under the order lock by the re-check, so the two
+/// cannot drift apart.
+const SHIP_DEADLINE_SCOPE: &str = "o.delivery_method IS NOT NULL \
+     AND (o.delivery_method = 'self' \
+          OR (o.delivery_method = 'courier' AND o.ready_at IS NULL)) \
+     AND o.paid_at >= (SELECT ship_deadline_enforce_from FROM platform_settings WHERE id)";
 /// Ship-deadline refunds per tick: a guard against a mass refund from one bad
 /// condition (a wrong deadline backfill, say); the rest wait for later ticks.
 pub const SHIP_DEADLINE_PER_TICK: i64 = 20;
@@ -491,7 +514,7 @@ async fn ship_deadline(state: &AppState, cancel: &CancellationToken) -> Result<S
     let sql = format!(
         "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
          WHERE o.status = 'paid' AND o.ship_by < now() AND o.held_at IS NULL \
-           AND NOT c.provider_flagged AND {} \
+           AND NOT c.provider_flagged AND {SHIP_DEADLINE_SCOPE} AND {} \
          ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
         not_pushed_back(SHIP_DEADLINE, "o.id")
     );
@@ -504,13 +527,62 @@ async fn ship_deadline(state: &AppState, cancel: &CancellationToken) -> Result<S
         let result = refund_missed_ship_deadline(state, id).await;
         tally(state, &mut stats, SHIP_DEADLINE, id, result).await;
     }
+    // Flags only: they change no order, so they are not counted as refunds.
+    if let Err(e) = flag_pickup_overdue(state).await {
+        stats.failed += 1;
+        tracing::warn!(job = SHIP_DEADLINE, error = %e, "pickup flags failed; retried next tick");
+    }
     Ok(stats)
+}
+
+/// Writes `shipment.pickup_overdue` once per ready courier order that is still
+/// `paid` [`PICKUP_OVERDUE_AFTER`] after `ship_by`. The order lock (SKIP LOCKED)
+/// and the audit row written in the same transaction keep two instances, and
+/// two ticks, from writing it twice. No order, refund or strike changes.
+async fn flag_pickup_overdue(state: &AppState) -> Result<u32, AppError> {
+    let mut tx = state.db.begin().await.context("begin")?;
+    sqlx::query(LOCK_TIMEOUT)
+        .execute(&mut *tx)
+        .await
+        .context("set lock_timeout")?;
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT o.id, o.store_id FROM orders o \
+         WHERE o.status = 'paid' AND o.delivery_method = 'courier' \
+           AND o.ready_at IS NOT NULL \
+           AND o.ship_by + interval '{PICKUP_OVERDUE_AFTER}' < now() \
+           AND NOT EXISTS (SELECT 1 FROM audit_log a \
+                           WHERE a.action = '{PICKUP_OVERDUE}' AND a.subject_id = o.id) \
+         ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED"
+    ))
+    .bind(BATCH)
+    .fetch_all(&mut *tx)
+    .await
+    .context("find overdue pickups")?;
+    for (order_id, store_id) in &rows {
+        audit::record(
+            &mut tx,
+            None,
+            PICKUP_OVERDUE,
+            "order",
+            Some(*order_id),
+            json!({ "store_id": store_id }),
+        )
+        .await?;
+    }
+    tx.commit().await.context("commit pickup flags")?;
+    let n = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    if n > 0 {
+        tracing::warn!(count = n, "courier pickups overdue; flagged for the owner");
+    }
+    Ok(n)
 }
 
 /// The ship-deadline action for one order (the job calls it per claimed id):
 /// refund + strike in one transaction, then the provider call. `Ok(false)`,
 /// with nothing changed, when the order is no longer due: shipped, held, its
-/// payment flagged, or already refunded for another reason.
+/// payment flagged, already refunded for another reason, or outside the job's
+/// reach (paid before `ship_deadline_enforce_from`, no delivery method, or a
+/// courier order the seller marked ready).
 pub async fn refund_missed_ship_deadline(
     state: &AppState,
     order_id: Uuid,
@@ -534,12 +606,13 @@ pub async fn refund_missed_ship_deadline(
     // and the lock (a buyer cancel makes it refund_pending, and begin_refund
     // then returns that existing refund) fails the reason / created_at check
     // and gets no strike.
-    let (due, store_id): (bool, Uuid) = sqlx::query_as(
+    let (due, store_id): (bool, Uuid) = sqlx::query_as(&format!(
         "SELECT o.held_at IS NULL AND o.ship_by < now() AND NOT c.provider_flagged \
+                AND {SHIP_DEADLINE_SCOPE} \
                 AND r.reason = $2 AND r.created_at = now(), o.store_id \
          FROM orders o JOIN refunds r ON r.order_id = o.id \
-              JOIN checkouts c ON c.id = o.checkout_id WHERE o.id = $1",
-    )
+              JOIN checkouts c ON c.id = o.checkout_id WHERE o.id = $1"
+    ))
     .bind(order_id)
     .bind(REASON)
     .fetch_one(&mut *tx)

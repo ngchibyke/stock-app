@@ -283,6 +283,7 @@ async fn reconciliation(
         + r.payout_amount_mismatches.len()
         + r.blocked_payouts.len()
         + r.shipments_attention.len()
+        + r.orders_attention.len()
         + r.wallet_alerts.len();
     viewed(&state, &staff.0, "reconciliation", rows).await?;
     Ok(Json(r))

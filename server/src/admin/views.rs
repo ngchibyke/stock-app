@@ -19,6 +19,7 @@ use crate::{
         shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
     },
     error::AppError,
+    escrow::jobs::PICKUP_OVERDUE,
 };
 
 /// Rows per list (each reconciliation section too).
@@ -288,10 +289,17 @@ pub struct Reconciliation {
     /// flight on a refunded order, a booking with no charged amount, a booking
     /// answer that arrived after its lease was lost, bookings charged above
     /// the quote in the last [`ALERT_WINDOW_DAYS`] days, any shipment with an
-    /// `attention` reason, and labels from signed webhooks that no shipment has
+    /// `attention` reason, ready courier orders still not picked up 24 hours
+    /// after `ship_by` (`attention = pickup_overdue`, while the order is `paid`;
+    /// `status` is the shipment's, or `no_shipment` before one exists), and labels from signed webhooks that no shipment has
     /// (`attention = unknown_label`, last [`ALERT_WINDOW_DAYS`] days, one row per
     /// label), which may be the label of a `booking_unknown` shipment.
     pub shipments_attention: Vec<ShipmentAttention>,
+    /// Paid orders with no `delivery_method` (part-2 orders, from before
+    /// delivery existed). The ship-deadline job never refunds or strikes them,
+    /// and nothing else moves them either, so a person must decide. Oldest
+    /// payment first.
+    pub orders_attention: Vec<OrderAttention>,
     /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
     /// first.
     pub wallet_alerts: Vec<WalletAlert>,
@@ -362,6 +370,17 @@ pub struct ShipmentAttention {
     pub late_provider_order_id: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+}
+
+/// A paid order the ship-deadline job cannot judge. `attention` is
+/// `no_delivery_method`.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct OrderAttention {
+    pub order_id: Uuid,
+    pub store_id: Uuid,
+    pub attention: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub paid_at: OffsetDateTime,
 }
 
 /// A `courier.wallet_alert` audit row.
@@ -474,6 +493,14 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
             OR above.subject_id IS NOT NULL \
             OR late.subject_id IS NOT NULL \
          UNION ALL \
+         SELECT s.id, o.id, o.store_id, COALESCE(s.status::text, 'no_shipment'), \
+                o.status::text, s.provider_order_id, NULL, \
+                COALESCE(s.quoted_kobo, o.courier_quote_kobo), s.charged_kobo, \
+                COALESCE(s.attempts, 0), s.last_error, 'pickup_overdue', false, NULL, a.at \
+         FROM audit_log a JOIN orders o ON o.id = a.subject_id \
+              LEFT JOIN shipments s ON s.order_id = o.id \
+         WHERE a.action = $6 AND o.status = 'paid' \
+         UNION ALL \
          SELECT NULL, NULL, NULL, 'unknown_label', NULL, u.label, u.state, NULL, NULL, 0, \
                 NULL, 'unknown_label', false, NULL, u.at \
          FROM unknown u \
@@ -485,9 +512,19 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .bind(PRICE_ABOVE_QUOTE)
     .bind(LATE_OUTCOME)
     .bind(UNKNOWN_SHIPMENT)
+    .bind(PICKUP_OVERDUE)
     .fetch_all(db)
     .await
     .context("list attention shipments")?;
+    let orders_attention = sqlx::query_as::<_, OrderAttention>(
+        "SELECT o.id AS order_id, o.store_id, 'no_delivery_method' AS attention, o.paid_at \
+         FROM orders o WHERE o.status = 'paid' AND o.delivery_method IS NULL \
+         ORDER BY o.paid_at, o.id LIMIT $1",
+    )
+    .bind(MAX_LIMIT)
+    .fetch_all(db)
+    .await
+    .context("list orders without a delivery method")?;
     let wallet_alerts = sqlx::query_as::<_, WalletAlert>(
         "SELECT subject_id AS shipment_id, detail->>'event' AS event, at \
          FROM audit_log \
@@ -509,6 +546,7 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
         payout_amount_mismatches,
         blocked_payouts,
         shipments_attention,
+        orders_attention,
         wallet_alerts,
         limit: MAX_LIMIT,
     })
