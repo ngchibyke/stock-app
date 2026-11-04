@@ -16,6 +16,11 @@
 //!
 //! Each takes the order lock. Repeating a transition on an order already in
 //! its target state is a no-op; any other status is 409 `invalid_order_state`.
+//!
+//! These are the seller's steps: each appends its `delivery_events` row (`source
+//! = seller`) in the transition's transaction. A courier update walks the order
+//! through the same writes ([`picked_up_in`], [`out_for_delivery_in`],
+//! [`delivered_in`]) in its own transaction, with its own event.
 
 use anyhow::Context;
 use serde_json::json;
@@ -27,7 +32,7 @@ use crate::{
     audit,
     checkout::service::busy_err,
     crypto::FieldCipher,
-    delivery::{handover, shipments},
+    delivery::{events, handover, shipments},
     error::AppError,
 };
 
@@ -89,7 +94,22 @@ pub async fn mark_picked_up(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<(), AppError> {
-    transition(db, order_id, at, &["paid"], "picked_up").await
+    let mut tx = db.begin().await.context("begin")?;
+    if picked_up_in(&mut tx, order_id, at).await? {
+        events::record_seller_step(&mut tx, order_id, "picked_up", at).await?;
+    }
+    tx.commit().await.context("commit")?;
+    Ok(())
+}
+
+/// [`mark_picked_up`] with no event, in the caller's transaction. `true` when
+/// the order moved.
+pub(crate) async fn picked_up_in(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    at: OffsetDateTime,
+) -> Result<bool, AppError> {
+    transition(conn, order_id, at, &["paid"], "picked_up").await
 }
 
 /// `picked_up | out_for_delivery -> delivered` at `at`, snapshotting the
@@ -100,8 +120,23 @@ pub async fn mark_delivered(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<(), AppError> {
+    let mut tx = db.begin().await.context("begin")?;
+    if delivered_in(&mut tx, order_id, at).await? {
+        events::record_seller_step(&mut tx, order_id, "delivered", at).await?;
+    }
+    tx.commit().await.context("commit")?;
+    Ok(())
+}
+
+/// [`mark_delivered`] with no event, in the caller's transaction. `true` when
+/// the order moved.
+pub(crate) async fn delivered_in(
+    conn: &mut PgConnection,
+    order_id: Uuid,
+    at: OffsetDateTime,
+) -> Result<bool, AppError> {
     transition(
-        db,
+        conn,
         order_id,
         at,
         &["picked_up", "out_for_delivery"],
@@ -120,9 +155,22 @@ pub async fn mark_out_for_delivery(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<(), AppError> {
+    if out_for_delivery_in(conn, cipher, order_id, at).await? {
+        events::record_seller_step(conn, order_id, "out_for_delivery", at).await?;
+    }
+    Ok(())
+}
+
+/// [`mark_out_for_delivery`] with no event. `true` when the order moved.
+pub(crate) async fn out_for_delivery_in(
+    conn: &mut PgConnection,
+    cipher: &FieldCipher,
+    order_id: Uuid,
+    at: OffsetDateTime,
+) -> Result<bool, AppError> {
     let order = lock_order(conn, order_id).await?;
     if order.status == "out_for_delivery" {
-        return Ok(());
+        return Ok(false);
     }
     if order.status != "picked_up" {
         return Err(AppError::Conflict("invalid_order_state"));
@@ -149,7 +197,8 @@ pub async fn mark_out_for_delivery(
         Some(order_id),
         json!({}),
     )
-    .await
+    .await?;
+    Ok(true)
 }
 
 /// What [`deliver_with_code`] did.
@@ -207,6 +256,7 @@ pub async fn deliver_with_code(
         json!({ "via": "handover_code" }),
     )
     .await?;
+    events::record_seller_step(&mut tx, order_id, "delivered", at).await?;
     tx.commit().await.context("commit")?;
     Ok(Handover::Delivered)
 }
@@ -243,27 +293,28 @@ pub async fn mark_ready(
             json!({}),
         )
         .await?;
+        events::record_seller_step(&mut tx, order_id, "ready", at).await?;
     }
     shipments::ensure_pending(&mut tx, order_id).await?;
     tx.commit().await.context("commit")?;
     Ok(())
 }
 
+/// `true` when the order moved.
 async fn transition(
-    db: &PgPool,
+    conn: &mut PgConnection,
     order_id: Uuid,
     at: OffsetDateTime,
     from: &[&str],
     to: &'static str,
-) -> Result<(), AppError> {
-    let mut tx = db.begin().await.context("begin")?;
-    let order = lock_order(&mut tx, order_id).await?;
+) -> Result<bool, AppError> {
+    let order = lock_order(conn, order_id).await?;
     // Guarded here, under the lock: a self-delivery order needs its code.
     if to == "delivered" && order.self_delivery {
         return Err(AppError::Conflict("invalid_order_state"));
     }
     if order.status == to {
-        return Ok(());
+        return Ok(false);
     }
     if !from.contains(&order.status.as_str()) {
         return Err(AppError::Conflict("invalid_order_state"));
@@ -272,14 +323,14 @@ async fn transition(
         sqlx::query("UPDATE orders SET status = 'picked_up', picked_up_at = $2 WHERE id = $1")
             .bind(order_id)
             .bind(at)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .context("mark picked up")?;
     } else {
-        set_delivered(&mut tx, order_id, at).await?;
+        set_delivered(conn, order_id, at).await?;
     }
     audit::record(
-        &mut tx,
+        conn,
         None,
         &format!("order.{to}"),
         "order",
@@ -287,6 +338,5 @@ async fn transition(
         json!({}),
     )
     .await?;
-    tx.commit().await.context("commit")?;
-    Ok(())
+    Ok(true)
 }

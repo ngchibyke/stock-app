@@ -8,6 +8,7 @@
 
 pub mod fake;
 pub mod shipbubble;
+pub mod webhooks;
 
 use std::fmt;
 
@@ -150,6 +151,18 @@ pub enum ShipmentState {
 }
 
 impl ShipmentState {
+    /// The provider's status name, as `delivery_events.status` stores it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShipmentState::Pending => "pending",
+            ShipmentState::Confirmed => "confirmed",
+            ShipmentState::PickedUp => "picked_up",
+            ShipmentState::InTransit => "in_transit",
+            ShipmentState::Completed => "completed",
+            ShipmentState::Cancelled => "cancelled",
+        }
+    }
+
     /// Forward order of progress; a later rank wins. `Cancelled` is 0: it is
     /// handled separately (only valid before pickup).
     pub fn rank(self) -> u8 {
@@ -181,6 +194,19 @@ impl fmt::Debug for CourierUpdate {
             .field("occurred_at", &self.occurred_at)
             .finish_non_exhaustive()
     }
+}
+
+/// What a verified webhook means.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CourierEvent {
+    /// A shipment's status changed.
+    Update(CourierUpdate),
+    /// A warning about the platform's prepaid wallet. `event` is a name from
+    /// the adapter's own list, never provider text.
+    WalletAlert { event: String },
+    /// Nothing we act on.
+    Ignored,
 }
 
 /// A courier's failure. `Display`/`Debug` print only the kind, never the inner
@@ -275,12 +301,9 @@ pub trait CourierProvider: Send + Sync {
 
     async fn status(&self, provider_order_id: &str) -> Result<CourierUpdate, CourierError>;
 
-    /// Verifies and parses a webhook. `None` means an ignored event.
-    fn parse_webhook(
-        &self,
-        headers: &HeaderMap,
-        body: &[u8],
-    ) -> Result<Option<CourierUpdate>, CourierError>;
+    /// Verifies and parses a webhook.
+    fn parse_webhook(&self, headers: &HeaderMap, body: &[u8])
+    -> Result<CourierEvent, CourierError>;
 }
 
 #[cfg(test)]

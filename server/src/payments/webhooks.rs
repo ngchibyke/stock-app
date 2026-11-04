@@ -71,7 +71,7 @@ pub fn router() -> Router<AppState> {
 
 /// The limit layer answers an over-long declared length itself, in plain text;
 /// give it the JSON error envelope.
-async fn envelope_413(res: Response) -> Response {
+pub(crate) async fn envelope_413(res: Response) -> Response {
     if res.status() == StatusCode::PAYLOAD_TOO_LARGE {
         AppError::PayloadTooLarge.into_response()
     } else {

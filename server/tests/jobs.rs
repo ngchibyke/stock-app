@@ -1329,6 +1329,7 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "cancel_shipments",
             "expire_checkouts",
             "payouts",
+            "poll_shipments",
             "refunds",
             "reverify_checkouts",
             "ship_deadline"

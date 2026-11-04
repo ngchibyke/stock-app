@@ -283,8 +283,9 @@ pub struct Reconciliation {
     /// `booking_failed` (while the order still needs delivering), `cancel_failed`,
     /// a `cancel_pending` older than [`CANCEL_STUCK_AFTER`], a booking still in
     /// flight on a refunded order, a booking with no charged amount, a booking
-    /// answer that arrived after its lease was lost, and bookings charged above
-    /// the quote in the last [`ALERT_WINDOW_DAYS`] days.
+    /// answer that arrived after its lease was lost, bookings charged above
+    /// the quote in the last [`ALERT_WINDOW_DAYS`] days, and any shipment with
+    /// an `attention` reason.
     pub shipments_attention: Vec<ShipmentAttention>,
     /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
     /// first.
@@ -341,6 +342,9 @@ pub struct ShipmentAttention {
     pub attempts: i32,
     /// Our own short code, never provider text.
     pub last_error: Option<String>,
+    /// Why a courier update needs a person: `courier_cancelled`, `cancel_lost`,
+    /// `after_refund`, `en_route_on_refund` or `not_courier_order`.
+    pub attention: Option<String>,
     pub price_above_quote: bool,
     /// A label the provider made after the booking's lease was lost: paid for,
     /// and on no shipment row.
@@ -354,7 +358,8 @@ pub struct ShipmentAttention {
 pub struct WalletAlert {
     pub shipment_id: Option<Uuid>,
     /// `possible_low_balance`: a booking refused with a 400, which is what an
-    /// empty wallet returns, though other refusals look the same.
+    /// empty wallet returns, though other refusals look the same. Otherwise a
+    /// wallet event name from the courier's webhook, with no shipment.
     pub event: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
@@ -433,13 +438,14 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
              ORDER BY subject_id, at DESC, id DESC) \
          SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
                 o.status::text AS order_status, s.provider_order_id, s.quoted_kobo, \
-                s.charged_kobo, s.attempts, s.last_error, \
+                s.charged_kobo, s.attempts, s.last_error, s.attention, \
                 above.subject_id IS NOT NULL AS price_above_quote, \
                 late.label AS late_provider_order_id, s.updated_at \
          FROM shipments s JOIN orders o ON o.id = s.order_id \
               LEFT JOIN above ON above.subject_id = s.id \
               LEFT JOIN late ON late.subject_id = s.id \
          WHERE s.status IN ('booking_unknown', 'cancel_failed') \
+            OR s.attention IS NOT NULL \
             OR (s.status = 'booking_failed' \
                 AND o.status NOT IN ('refund_pending', 'refunded', 'cancelled')) \
             OR (s.status = 'booking' AND o.status IN ('refund_pending', 'refunded')) \

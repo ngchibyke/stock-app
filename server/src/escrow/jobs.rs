@@ -39,6 +39,10 @@
 //!    slow call cannot run out the lease of a row behind it.
 //! 9. `cancel_shipments`: the refunds' `cancel_pending` outbox, due by
 //!    `next_attempt_at` -> [`cancel_one`].
+//! 10. `poll_shipments`: the lost-webhook check. `booked` through `in_transit`
+//!     shipments with no event and no poll for [`POLL_AFTER`] -> [`poll_one`]:
+//!     `status` outside any transaction, and the answer goes through the same
+//!     path as a webhook.
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -84,7 +88,10 @@ use super::{
 use crate::{
     AppState, audit,
     checkout::{SettleOutcome, service::expire_and_restore, settle_payment},
-    delivery::shipments::{self, book_one, cancel_one},
+    delivery::{
+        events::{POLL_AFTER, POLLED_STATUSES, poll_one},
+        shipments::{self, book_one, cancel_one},
+    },
     error::AppError,
     settings,
 };
@@ -110,6 +117,7 @@ const PAYOUTS: &str = "payouts";
 const REFUNDS: &str = "refunds";
 const BOOK_SHIPMENTS: &str = "book_shipments";
 const CANCEL_SHIPMENTS: &str = "cancel_shipments";
+const POLL_SHIPMENTS: &str = "poll_shipments";
 /// The refund sweeper leaves a refund this long after its last send.
 const REFUND_GRACE: &str = "1 minute";
 /// Expired checkouts are re-verified for this long after expiry.
@@ -133,6 +141,7 @@ pub struct JobReport {
     pub refunds_retried: u32,
     pub shipments_booked: u32,
     pub shipments_cancelled: u32,
+    pub shipments_polled: u32,
     pub failed: u32,
 }
 
@@ -160,7 +169,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 9] = [
+    let jobs: [(&str, Job); 10] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -170,6 +179,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (REFUNDS, Job::Refunds),
         (BOOK_SHIPMENTS, Job::BookShipments),
         (CANCEL_SHIPMENTS, Job::CancelShipments),
+        (POLL_SHIPMENTS, Job::PollShipments),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -194,6 +204,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::Refunds => &mut report.refunds_retried,
             Job::BookShipments => &mut report.shipments_booked,
             Job::CancelShipments => &mut report.shipments_cancelled,
+            Job::PollShipments => &mut report.shipments_polled,
         };
         *slot += stats.done;
     }
@@ -222,6 +233,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 refunds = r.refunds_retried,
                 shipments_booked = r.shipments_booked,
                 shipments_cancelled = r.shipments_cancelled,
+                shipments_polled = r.shipments_polled,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -266,6 +278,7 @@ enum Job {
     Refunds,
     BookShipments,
     CancelShipments,
+    PollShipments,
 }
 
 impl Job {
@@ -280,6 +293,7 @@ impl Job {
             Job::Refunds => refunds(state, cancel).await,
             Job::BookShipments => book_shipments(state, cancel).await,
             Job::CancelShipments => cancel_shipments(state, cancel).await,
+            Job::PollShipments => poll_shipments(state, cancel).await,
         }
     }
 }
@@ -869,6 +883,33 @@ async fn cancel_shipments(state: &AppState, cancel: &CancellationToken) -> Resul
         }
         let result = cancel_one(state, courier, id).await;
         tally(state, &mut stats, CANCEL_SHIPMENTS, id, result).await;
+    }
+    Ok(stats)
+}
+
+// ------------------------------------------------------------ 10. poll shipments
+
+async fn poll_shipments(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
+    let Some(courier) = state.courier.as_deref() else {
+        return Ok(Stats::default());
+    };
+    let quiet_since = "GREATEST(s.updated_at, s.last_event_at, s.last_polled_at)";
+    let sql = format!(
+        "SELECT s.id FROM shipments s \
+         WHERE s.status IN ({POLLED_STATUSES}) AND s.provider = '{provider}' \
+           AND {quiet_since} < now() - interval '{POLL_AFTER}' AND {pushed} \
+         ORDER BY {quiet_since}, s.id LIMIT $1 FOR UPDATE OF s SKIP LOCKED",
+        provider = courier.name(),
+        pushed = not_pushed_back(POLL_SHIPMENTS, "s.id"),
+    );
+    let ids = claim(state, &sql, PROVIDER_CALLS_PER_TICK).await?;
+    let mut stats = Stats::default();
+    for id in ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let result = poll_one(state, courier, id).await;
+        tally(state, &mut stats, POLL_SHIPMENTS, id, result).await;
     }
     Ok(stats)
 }

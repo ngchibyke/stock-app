@@ -32,8 +32,8 @@ use sha2::Sha512;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
-    Booking, ContactAddress, CourierError, CourierProvider, CourierUpdate, Parcel, Rate, RateQuote,
-    ShipmentState,
+    Booking, ContactAddress, CourierError, CourierEvent, CourierProvider, CourierUpdate, Parcel,
+    Rate, RateQuote, ShipmentState,
 };
 use crate::delivery::area::AreaCouncil;
 pub use crate::payments::mono::{AmountUnit, Secret};
@@ -659,7 +659,7 @@ impl CourierProvider for ShipbubbleCourier {
         &self,
         headers: &HeaderMap,
         body: &[u8],
-    ) -> Result<Option<CourierUpdate>, CourierError> {
+    ) -> Result<CourierEvent, CourierError> {
         // Signature first, over the raw bytes, constant time (`verify_slice`).
         let given = headers
             .get(SIGNATURE_HEADER)
@@ -684,15 +684,14 @@ impl CourierProvider for ShipbubbleCourier {
         match event {
             "shipment.status.changed" | "shipment.cancelled" => {}
             e if e.starts_with("wallet.") => {
-                tracing::warn!(
-                    provider = SHIPBUBBLE_NAME,
-                    event = loggable_wallet_event(e),
-                    "wallet_alert"
-                );
-                return Ok(None);
+                let event = loggable_wallet_event(e);
+                tracing::warn!(provider = SHIPBUBBLE_NAME, event, "wallet_alert");
+                return Ok(CourierEvent::WalletAlert {
+                    event: event.to_string(),
+                });
             }
             // label.created, sla.updated, cod/waybill events and anything new.
-            _ => return Ok(None),
+            _ => return Ok(CourierEvent::Ignored),
         }
         let Some(provider_order_id) = text_at(&payload, "order_id") else {
             tracing::warn!(
@@ -700,7 +699,7 @@ impl CourierProvider for ShipbubbleCourier {
                 cause = "missing_order_id",
                 "shipbubble webhook ignored"
             );
-            return Ok(None);
+            return Ok(CourierEvent::Ignored);
         };
         let state = match str_at(&payload, "status") {
             Some(raw) => match state_of(raw) {
@@ -711,7 +710,7 @@ impl CourierProvider for ShipbubbleCourier {
                         cause = "unknown_status",
                         "shipbubble webhook ignored"
                     );
-                    return Ok(None);
+                    return Ok(CourierEvent::Ignored);
                 }
             },
             None if event == "shipment.cancelled" => ShipmentState::Cancelled,
@@ -721,10 +720,10 @@ impl CourierProvider for ShipbubbleCourier {
                     cause = "missing_status",
                     "shipbubble webhook ignored"
                 );
-                return Ok(None);
+                return Ok(CourierEvent::Ignored);
             }
         };
-        Ok(Some(CourierUpdate {
+        Ok(CourierEvent::Update(CourierUpdate {
             provider_order_id,
             state,
             occurred_at: str_at(&payload, "date")

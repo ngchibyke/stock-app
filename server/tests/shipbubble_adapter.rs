@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use server::{
     config::Config,
     couriers::{
-        ContactAddress, CourierError, CourierProvider, Parcel, ParcelItem, ShipmentState,
+        ContactAddress, CourierError, CourierEvent, CourierProvider, CourierUpdate, Parcel,
+        ParcelItem, ShipmentState,
         shipbubble::{
             AmountUnit, SIGNATURE_HEADER, Secret, ShipbubbleConfig, ShipbubbleCourier,
             from_sb_amount, to_sb_amount,
@@ -90,6 +91,13 @@ fn signed(body: &Value) -> (HeaderMap, Vec<u8>) {
         HeaderValue::from_str(&sign(&raw)).unwrap(),
     );
     (headers, raw)
+}
+
+fn update(c: &ShipbubbleCourier, h: &HeaderMap, body: &[u8]) -> CourierUpdate {
+    match c.parse_webhook(h, body).unwrap() {
+        CourierEvent::Update(u) => u,
+        other => panic!("not an update: {other:?}"),
+    }
 }
 
 fn validate_response(state: &str, state_code: &str) -> Value {
@@ -633,7 +641,7 @@ fn webhook_status_changed_maps_state() {
         ("cancelled", ShipmentState::Cancelled),
     ] {
         let (h, body) = signed(&status_event("shipment.status.changed", raw));
-        let u = c.parse_webhook(&h, &body).unwrap().expect("an update");
+        let u = update(&c, &h, &body);
         assert_eq!(u.state, want, "{raw}");
         assert_eq!(u.provider_order_id, "SB-2CF48224272");
         assert_eq!(u.courier_phone.as_deref(), Some("010000038198"));
@@ -643,12 +651,12 @@ fn webhook_status_changed_maps_state() {
     let mut cancelled = status_event("shipment.cancelled", "cancelled");
     cancelled.as_object_mut().unwrap().remove("status");
     let (h, body) = signed(&cancelled);
-    let u = c.parse_webhook(&h, &body).unwrap().unwrap();
+    let u = update(&c, &h, &body);
     assert_eq!(u.state, ShipmentState::Cancelled);
     // A minimal payload: only event, order_id and status; numeric order id.
     let (h, body) =
         signed(&json!({"event": "shipment.status.changed", "order_id": 77, "status": "completed"}));
-    let u = c.parse_webhook(&h, &body).unwrap().unwrap();
+    let u = update(&c, &h, &body);
     assert_eq!(
         (u.provider_order_id.as_str(), u.courier_phone),
         ("77", None)
@@ -666,13 +674,18 @@ fn webhook_logs_wallet_alert_and_unknown_status_cause_without_values() {
         "ref_code": "REF-SECRET-42"
     });
     let (h, body) = signed(&wallet);
-    assert_eq!(c.parse_webhook(&h, &body).unwrap(), None);
+    assert_eq!(
+        c.parse_webhook(&h, &body).unwrap(),
+        CourierEvent::WalletAlert {
+            event: "wallet.auto_topup.succeeded".into()
+        }
+    );
     assert!(logs_contain("wallet_alert"));
     assert!(logs_contain("wallet.auto_topup.succeeded"));
     assert!(!logs_contain("987654"));
     assert!(!logs_contain("REF-SECRET-42"));
     let (h, body) = signed(&status_event("shipment.status.changed", "teleported"));
-    assert_eq!(c.parse_webhook(&h, &body).unwrap(), None);
+    assert_eq!(c.parse_webhook(&h, &body).unwrap(), CourierEvent::Ignored);
     assert!(logs_contain("unknown_status"));
     assert!(!logs_contain("teleported"));
 }
@@ -685,16 +698,42 @@ fn webhook_unknown_event_is_ignored() {
         status_event("shipment.sla.updated", "in_transit"),
         status_event("shipment.cod.remitted", "completed"),
         status_event("shipment.something.new", "completed"),
-        json!({"event": "wallet.auto_topup.succeeded", "amount": 1000, "currency": "NGN", "ref_code": "r1"}),
-        json!({"event": "wallet.auto_topup.failed", "reason": "charge_failed", "failure_count": 2}),
-        json!({"event": "wallet.threshold.alert"}),
         // Unknown status string and missing order id: ignored, not an error.
         status_event("shipment.status.changed", "returned"),
         json!({"event": "shipment.status.changed", "status": "completed"}),
     ];
     for payload in ignored {
         let (h, body) = signed(&payload);
-        assert_eq!(c.parse_webhook(&h, &body).unwrap(), None, "{payload}");
+        assert_eq!(
+            c.parse_webhook(&h, &body).unwrap(),
+            CourierEvent::Ignored,
+            "{payload}"
+        );
+    }
+    // Wallet events carry only a name from the adapter's list.
+    for (payload, event) in [
+        (
+            json!({"event": "wallet.auto_topup.succeeded", "amount": 1000, "currency": "NGN", "ref_code": "r1"}),
+            "wallet.auto_topup.succeeded",
+        ),
+        (
+            json!({"event": "wallet.auto_topup.failed", "reason": "charge_failed", "failure_count": 2}),
+            "wallet.auto_topup.failed",
+        ),
+        (
+            json!({"event": "wallet.threshold.alert"}),
+            "wallet.threshold.alert",
+        ),
+        (json!({"event": "wallet.something.new"}), "wallet.other"),
+    ] {
+        let (h, body) = signed(&payload);
+        assert_eq!(
+            c.parse_webhook(&h, &body).unwrap(),
+            CourierEvent::WalletAlert {
+                event: event.into()
+            },
+            "{payload}"
+        );
     }
     // A signed body that is not JSON cannot settle anything.
     let raw = b"not json".to_vec();

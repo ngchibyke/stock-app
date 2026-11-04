@@ -42,6 +42,8 @@
 //! - `booking`/`booking_unknown`: left alone, with an audit row, and listed for
 //!   the owner: a shipment may be live on a refunded order. If a booking in flight
 //!   then lands, its outcome write sees the refund and goes to `cancel_pending`.
+//! - `picked_up`/`in_transit`: left alone, with an audit row and an attention
+//!   item: the courier is en route and there is nothing left to cancel.
 //!
 //! Lock order: orders, then shipments. Data protection: the courier's phone is
 //! stored only encrypted with `FieldCipher`, and neither logs nor audit rows
@@ -191,7 +193,7 @@ pub async fn on_refund(conn: &mut PgConnection, order_id: Uuid) -> Result<(), Ap
             "shipment.cancelled",
             json!({ "reason": "refund_before_booking" }),
         ),
-        "booking" | "booking_unknown" => (
+        "booking" | "booking_unknown" | "picked_up" | "in_transit" => (
             None,
             "shipment.live_on_refund",
             json!({ "order_id": order_id, "status": status }),
@@ -211,6 +213,16 @@ pub async fn on_refund(conn: &mut PgConnection, order_id: Uuid) -> Result<(), Ap
         .execute(&mut *conn)
         .await
         .context("move shipment on refund")?;
+    }
+    if matches!(status.as_str(), "picked_up" | "in_transit") {
+        sqlx::query(
+            "UPDATE shipments SET attention = 'en_route_on_refund', updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+        .context("flag shipment on refund")?;
     }
     audit::record(conn, None, action, SUBJECT, Some(id), detail).await
 }

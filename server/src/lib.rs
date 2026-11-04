@@ -104,6 +104,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())
+        .merge(couriers::webhooks::router())
         .merge(admin::routes::router())
         // Must follow every route: it applies to the method routers registered so far.
         .method_not_allowed_fallback(method_not_allowed)

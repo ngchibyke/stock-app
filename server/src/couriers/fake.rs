@@ -21,8 +21,8 @@ use serde::Deserialize;
 use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::{
-    Booking, ContactAddress, CourierError, CourierProvider, CourierUpdate, Parcel, Rate, RateQuote,
-    ShipmentState,
+    Booking, ContactAddress, CourierError, CourierEvent, CourierProvider, CourierUpdate, Parcel,
+    Rate, RateQuote, ShipmentState,
 };
 
 pub const FAKE_COURIER_NAME: &str = "fake";
@@ -163,9 +163,13 @@ impl FakeCourier {
 
 #[derive(Deserialize)]
 struct FakeWebhook {
-    provider_order_id: String,
-    state: String,
+    /// `wallet.*` makes it a wallet alert; the other fields are then unused.
+    event: Option<String>,
+    provider_order_id: Option<String>,
+    state: Option<String>,
     occurred_at: Option<String>,
+    courier_phone: Option<String>,
+    tracking_url: Option<String>,
 }
 
 fn parse_state(s: &str) -> Option<ShipmentState> {
@@ -267,7 +271,7 @@ impl CourierProvider for FakeCourier {
         &self,
         headers: &HeaderMap,
         body: &[u8],
-    ) -> Result<Option<CourierUpdate>, CourierError> {
+    ) -> Result<CourierEvent, CourierError> {
         let ok = headers
             .get(FAKE_SIGNATURE_HEADER)
             .and_then(|v| v.to_str().ok())
@@ -277,18 +281,24 @@ impl CourierProvider for FakeCourier {
         }
         let w: FakeWebhook =
             serde_json::from_slice(body).map_err(|_| CourierError::Inconclusive)?;
-        let Some(state) = parse_state(&w.state) else {
-            return Ok(None);
+        if let Some(event) = w.event.filter(|e| e.starts_with("wallet.")) {
+            return Ok(CourierEvent::WalletAlert { event });
+        }
+        let (Some(provider_order_id), Some(state)) = (w.provider_order_id, w.state) else {
+            return Err(CourierError::Inconclusive);
+        };
+        let Some(state) = parse_state(&state) else {
+            return Ok(CourierEvent::Ignored);
         };
         let occurred_at = w
             .occurred_at
             .and_then(|s| OffsetDateTime::parse(&s, &Rfc3339).ok());
-        Ok(Some(CourierUpdate {
-            provider_order_id: w.provider_order_id,
+        Ok(CourierEvent::Update(CourierUpdate {
+            provider_order_id,
             state,
             occurred_at,
-            courier_phone: None,
-            tracking_url: None,
+            courier_phone: w.courier_phone,
+            tracking_url: w.tracking_url,
         }))
     }
 }
@@ -368,7 +378,18 @@ mod tests {
         ));
         let mut h = HeaderMap::new();
         h.insert(FAKE_SIGNATURE_HEADER, "ok".parse().unwrap());
-        let u = f.parse_webhook(&h, body).unwrap().unwrap();
+        let CourierEvent::Update(u) = f.parse_webhook(&h, body).unwrap() else {
+            panic!("an update");
+        };
         assert_eq!(u.state, ShipmentState::Completed);
+        let unknown = br#"{"provider_order_id":"fake-1","state":"returned"}"#;
+        assert_eq!(f.parse_webhook(&h, unknown).unwrap(), CourierEvent::Ignored);
+        assert_eq!(
+            f.parse_webhook(&h, br#"{"event":"wallet.threshold.alert"}"#)
+                .unwrap(),
+            CourierEvent::WalletAlert {
+                event: "wallet.threshold.alert".into()
+            }
+        );
     }
 }
