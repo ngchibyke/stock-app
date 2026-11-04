@@ -5,7 +5,9 @@ pub mod auth;
 pub mod cart;
 pub mod checkout;
 pub mod config;
+pub mod couriers;
 pub mod crypto;
+pub mod delivery;
 pub mod error;
 pub mod escrow;
 pub mod extract;
@@ -43,6 +45,10 @@ pub struct AppState {
     pub payment_redirect_url: String,
     /// Cooldown and concurrency cap on outbound payment verify calls.
     pub verify_gate: Arc<payments::VerifyGate>,
+    /// Postcode check for delivery addresses (`ManualPostcode` until a NIPOST adapter exists).
+    pub postcodes: Arc<dyn delivery::postcode::PostcodeProvider>,
+    /// Courier provider (Shipbubble); `None` when no key is configured.
+    pub courier: Option<Arc<dyn couriers::CourierProvider>>,
 }
 
 async fn health() -> Json<Value> {
@@ -95,7 +101,10 @@ pub fn build_app(state: AppState) -> Router {
         .merge(cart::routes::router())
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
+        .merge(delivery::addresses::router())
+        .merge(delivery::options::router())
         .merge(payments::webhooks::router())
+        .merge(couriers::webhooks::router())
         .merge(admin::routes::router())
         // Must follow every route: it applies to the method routers registered so far.
         .method_not_allowed_fallback(method_not_allowed)

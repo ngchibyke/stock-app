@@ -8,12 +8,23 @@
 //!    concurrency cap and per-checkout cooldown). Each claim pushes the
 //!    checkout's own `next_reverify_at` back (5 min doubling, capped at 6h).
 //! 3. `ship_deadline`: `paid` orders past their stored `ship_by`, not held,
-//!    payment not `provider_flagged` ->
+//!    payment not `provider_flagged`, where the seller did not act: a
+//!    self-delivery order not yet picked up, or a courier order the seller
+//!    never marked ready (`ready_at IS NULL`) ->
 //!    a full refund (stock back on hand) plus a `seller_strikes` row, in one
 //!    transaction, then the refund is sent. Capped per tick, and switched off
-//!    by `platform_settings.jobs_ship_deadline_enabled` (owner kill switch).
-//!    It ships OFF (migration 0019): until plan 3 adds a pickup route nothing
-//!    can move an order out of `paid`, so it would refund every paid order.
+//!    by `platform_settings.jobs_ship_deadline_enabled` (owner kill switch;
+//!    on since migration 0030).
+//!    Never refunded or struck: an order paid before
+//!    `platform_settings.ship_deadline_enforce_from` (so turning the job on
+//!    never reaches over a backlog), an order with no `delivery_method`
+//!    (listed for the owner as `no_delivery_method`), and a courier order the
+//!    seller marked ready, whatever became of its shipment (`booking_unknown`,
+//!    `booking_failed`, `pickup_moved`, a courier cancel): those are ours or
+//!    the courier's problem, not the seller's. `ship_by` is calendar hours;
+//!    holidays do not pause it. A ready courier order still unpicked 24h after
+//!    `ship_by` gets one `shipment.pickup_overdue` audit row (the owner's
+//!    attention list), and nothing else.
 //! 4. `auto_release`: `delivered` orders past their stored `release_at`, not
 //!    held, whose checkout is not `provider_flagged` ->
 //!    [`release_order`]`(AutoAfterDelivery)`.
@@ -30,6 +41,19 @@
 //!    `next_attempt_at` -> [`send_refund`] with the same RF reference. After
 //!    [`MAX_REFUND_ATTEMPTS`] sends the refund goes to `manual` with an audit
 //!    row (the order stays `refund_pending`).
+//! 8. `book_shipments`: `booking` rows past their lease go to `booking_unknown`
+//!    and are never reclaimed; ready courier orders with no shipment get one;
+//!    then `booking_pending` shipments due by `next_attempt_at`, for orders not
+//!    held and payments not flagged -> [`book_one`]. See
+//!    [`delivery::shipments`](crate::delivery::shipments): a wrong retry books
+//!    and pays twice. Each row takes its own lease just before its call, so one
+//!    slow call cannot run out the lease of a row behind it.
+//! 9. `cancel_shipments`: the refunds' `cancel_pending` outbox, due by
+//!    `next_attempt_at` -> [`cancel_one`].
+//! 10. `poll_shipments`: the lost-webhook check. `booked` through `in_transit`
+//!     shipments with no event and no poll for [`POLL_AFTER`] -> [`poll_one`]:
+//!     `status` outside any transaction, and the answer goes through the same
+//!     path as a webhook.
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -75,6 +99,10 @@ use super::{
 use crate::{
     AppState, audit,
     checkout::{SettleOutcome, service::expire_and_restore, settle_payment},
+    delivery::{
+        events::{POLL_AFTER, POLLED_STATUSES, poll_one},
+        shipments::{self, book_one, cancel_one},
+    },
     error::AppError,
     settings,
 };
@@ -85,6 +113,18 @@ pub const TICK: Duration = Duration::from_secs(60);
 pub const BATCH: i64 = 100;
 /// Rows a provider-calling job handles per tick (one call or so each).
 pub const PROVIDER_CALLS_PER_TICK: i64 = 20;
+/// A ready courier order still `paid` this long after `ship_by` is flagged.
+const PICKUP_OVERDUE_AFTER: &str = "24 hours";
+/// Audit action written once per order whose courier pickup is overdue.
+pub const PICKUP_OVERDUE: &str = "shipment.pickup_overdue";
+/// SQL condition (over `orders o`): the order is inside the job's reach (the
+/// seller did not act, and it was paid after the enforcement date). Used by
+/// the claim and again under the order lock by the re-check, so the two
+/// cannot drift apart.
+const SHIP_DEADLINE_SCOPE: &str = "o.delivery_method IS NOT NULL \
+     AND (o.delivery_method = 'self' \
+          OR (o.delivery_method = 'courier' AND o.ready_at IS NULL)) \
+     AND o.paid_at >= (SELECT ship_deadline_enforce_from FROM platform_settings WHERE id)";
 /// Ship-deadline refunds per tick: a guard against a mass refund from one bad
 /// condition (a wrong deadline backfill, say); the rest wait for later ticks.
 pub const SHIP_DEADLINE_PER_TICK: i64 = 20;
@@ -98,6 +138,9 @@ const SHIP_DEADLINE: &str = "ship_deadline";
 const AUTO_RELEASE: &str = "auto_release";
 const PAYOUTS: &str = "payouts";
 const REFUNDS: &str = "refunds";
+const BOOK_SHIPMENTS: &str = "book_shipments";
+const CANCEL_SHIPMENTS: &str = "cancel_shipments";
+const POLL_SHIPMENTS: &str = "poll_shipments";
 /// The refund sweeper leaves a refund this long after its last send.
 const REFUND_GRACE: &str = "1 minute";
 /// Expired checkouts are re-verified for this long after expiry.
@@ -105,7 +148,7 @@ const REVERIFY_WINDOW: &str = "48 hours";
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
 /// Job backoff in SQL from an attempt count `a`: 5 minutes doubling, capped at
 /// 6h, plus up to 20% jitter (also capped).
-const BACKOFF_SQL: &str = "LEAST(300 * power(2, LEAST(GREATEST(a - 1, 0), 10)) \
+pub(crate) const BACKOFF_SQL: &str = "LEAST(300 * power(2, LEAST(GREATEST(a - 1, 0), 10)) \
                            * (1 + random() * 0.2), 21600)";
 
 /// What one tick did. `failed` counts rows whose engine call returned an error
@@ -119,6 +162,9 @@ pub struct JobReport {
     pub flagged: u32,
     pub payouts_processed: u32,
     pub refunds_retried: u32,
+    pub shipments_booked: u32,
+    pub shipments_cancelled: u32,
+    pub shipments_polled: u32,
     pub failed: u32,
 }
 
@@ -146,7 +192,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 7] = [
+    let jobs: [(&str, Job); 10] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -154,6 +200,9 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         ("backstop", Job::Backstop),
         (PAYOUTS, Job::Payouts),
         (REFUNDS, Job::Refunds),
+        (BOOK_SHIPMENTS, Job::BookShipments),
+        (CANCEL_SHIPMENTS, Job::CancelShipments),
+        (POLL_SHIPMENTS, Job::PollShipments),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -176,6 +225,9 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::Backstop => &mut report.flagged,
             Job::Payouts => &mut report.payouts_processed,
             Job::Refunds => &mut report.refunds_retried,
+            Job::BookShipments => &mut report.shipments_booked,
+            Job::CancelShipments => &mut report.shipments_cancelled,
+            Job::PollShipments => &mut report.shipments_polled,
         };
         *slot += stats.done;
     }
@@ -202,6 +254,9 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 flagged = r.flagged,
                 payouts = r.payouts_processed,
                 refunds = r.refunds_retried,
+                shipments_booked = r.shipments_booked,
+                shipments_cancelled = r.shipments_cancelled,
+                shipments_polled = r.shipments_polled,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -244,6 +299,9 @@ enum Job {
     Backstop,
     Payouts,
     Refunds,
+    BookShipments,
+    CancelShipments,
+    PollShipments,
 }
 
 impl Job {
@@ -256,6 +314,9 @@ impl Job {
             Job::Backstop => backstop(state).await,
             Job::Payouts => payouts(state, cancel).await,
             Job::Refunds => refunds(state, cancel).await,
+            Job::BookShipments => book_shipments(state, cancel).await,
+            Job::CancelShipments => cancel_shipments(state, cancel).await,
+            Job::PollShipments => poll_shipments(state, cancel).await,
         }
     }
 }
@@ -447,32 +508,81 @@ async fn reverify_checkouts(
 // ------------------------------------------------------------ 3. ship deadline
 
 async fn ship_deadline(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
-    if !settings::load(&state.db).await?.jobs_ship_deadline_enabled {
-        return Ok(Stats::default());
-    }
-    let sql = format!(
-        "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
-         WHERE o.status = 'paid' AND o.ship_by < now() AND o.held_at IS NULL \
-           AND NOT c.provider_flagged AND {} \
-         ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
-        not_pushed_back(SHIP_DEADLINE, "o.id")
-    );
-    let ids = claim(state, &sql, SHIP_DEADLINE_PER_TICK).await?;
     let mut stats = Stats::default();
-    for id in ids {
-        if cancel.is_cancelled() {
-            break;
+    if settings::load(&state.db).await?.jobs_ship_deadline_enabled {
+        let sql = format!(
+            "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
+             WHERE o.status = 'paid' AND o.ship_by < now() AND o.held_at IS NULL \
+               AND NOT c.provider_flagged AND {SHIP_DEADLINE_SCOPE} AND {} \
+             ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
+            not_pushed_back(SHIP_DEADLINE, "o.id")
+        );
+        let ids = claim(state, &sql, SHIP_DEADLINE_PER_TICK).await?;
+        for id in ids {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let result = refund_missed_ship_deadline(state, id).await;
+            tally(state, &mut stats, SHIP_DEADLINE, id, result).await;
         }
-        let result = refund_missed_ship_deadline(state, id).await;
-        tally(state, &mut stats, SHIP_DEADLINE, id, result).await;
+    }
+    // Flags only: they change no order, so they run with the kill switch off
+    // too, and are not counted as refunds.
+    if let Err(e) = flag_pickup_overdue(state).await {
+        stats.failed += 1;
+        tracing::warn!(job = SHIP_DEADLINE, error = %e, "pickup flags failed; retried next tick");
     }
     Ok(stats)
+}
+
+/// Writes `shipment.pickup_overdue` once per ready courier order that is still
+/// `paid` [`PICKUP_OVERDUE_AFTER`] after `ship_by`. The order lock (SKIP LOCKED)
+/// and the audit row written in the same transaction keep two instances, and
+/// two ticks, from writing it twice. No order, refund or strike changes.
+async fn flag_pickup_overdue(state: &AppState) -> Result<u32, AppError> {
+    let mut tx = state.db.begin().await.context("begin")?;
+    sqlx::query(LOCK_TIMEOUT)
+        .execute(&mut *tx)
+        .await
+        .context("set lock_timeout")?;
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT o.id, o.store_id FROM orders o \
+         WHERE o.status = 'paid' AND o.delivery_method = 'courier' \
+           AND o.ready_at IS NOT NULL \
+           AND o.ship_by + interval '{PICKUP_OVERDUE_AFTER}' < now() \
+           AND NOT EXISTS (SELECT 1 FROM audit_log a \
+                           WHERE a.action = '{PICKUP_OVERDUE}' AND a.subject_type = 'order' AND a.subject_id = o.id) \
+         ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED"
+    ))
+    .bind(BATCH)
+    .fetch_all(&mut *tx)
+    .await
+    .context("find overdue pickups")?;
+    for (order_id, store_id) in &rows {
+        audit::record(
+            &mut tx,
+            None,
+            PICKUP_OVERDUE,
+            "order",
+            Some(*order_id),
+            json!({ "store_id": store_id }),
+        )
+        .await?;
+    }
+    tx.commit().await.context("commit pickup flags")?;
+    let n = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    if n > 0 {
+        tracing::warn!(count = n, "courier pickups overdue; flagged for the owner");
+    }
+    Ok(n)
 }
 
 /// The ship-deadline action for one order (the job calls it per claimed id):
 /// refund + strike in one transaction, then the provider call. `Ok(false)`,
 /// with nothing changed, when the order is no longer due: shipped, held, its
-/// payment flagged, or already refunded for another reason.
+/// payment flagged, already refunded for another reason, or outside the job's
+/// reach (paid before `ship_deadline_enforce_from`, no delivery method, or a
+/// courier order the seller marked ready).
 pub async fn refund_missed_ship_deadline(
     state: &AppState,
     order_id: Uuid,
@@ -496,12 +606,13 @@ pub async fn refund_missed_ship_deadline(
     // and the lock (a buyer cancel makes it refund_pending, and begin_refund
     // then returns that existing refund) fails the reason / created_at check
     // and gets no strike.
-    let (due, store_id): (bool, Uuid) = sqlx::query_as(
+    let (due, store_id): (bool, Uuid) = sqlx::query_as(&format!(
         "SELECT o.held_at IS NULL AND o.ship_by < now() AND NOT c.provider_flagged \
+                AND {SHIP_DEADLINE_SCOPE} \
                 AND r.reason = $2 AND r.created_at = now(), o.store_id \
          FROM orders o JOIN refunds r ON r.order_id = o.id \
-              JOIN checkouts c ON c.id = o.checkout_id WHERE o.id = $1",
-    )
+              JOIN checkouts c ON c.id = o.checkout_id WHERE o.id = $1"
+    ))
     .bind(order_id)
     .bind(REASON)
     .fetch_one(&mut *tx)
@@ -784,6 +895,96 @@ async fn escalate_exhausted_refunds(state: &AppState) -> Result<(), AppError> {
         );
     }
     Ok(())
+}
+
+// ------------------------------------------------------------ 8. book shipments
+
+async fn book_shipments(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
+    let mut stats = Stats::default();
+    // Runs with or without a provider: a stale lease must never wait.
+    if let Err(e) = shipments::reap_stale_leases(&state.db, BATCH).await {
+        stats.failed += 1;
+        tracing::warn!(job = BOOK_SHIPMENTS, error = %e, "lease reaper failed; retried next tick");
+    }
+    if let Err(e) = shipments::create_missing(&state.db, BATCH).await {
+        stats.failed += 1;
+        tracing::warn!(job = BOOK_SHIPMENTS, error = %e, "missing shipments not created");
+    }
+    let Some(courier) = state.courier.as_deref() else {
+        return Ok(stats);
+    };
+    // Read before any call: nothing may fail between a POST and its outcome.
+    let tolerance = settings::load(&state.db).await?.courier_price_tolerance_bps;
+    let sql = format!(
+        "SELECT s.id FROM shipments s JOIN orders o ON o.id = s.order_id \
+             JOIN checkouts c ON c.id = o.checkout_id \
+         WHERE s.status = 'booking_pending' AND s.next_attempt_at <= now() \
+           AND o.status = 'paid' AND o.held_at IS NULL AND NOT c.provider_flagged \
+           AND {} \
+         ORDER BY s.created_at, s.id LIMIT $1 FOR UPDATE OF s SKIP LOCKED",
+        not_pushed_back(BOOK_SHIPMENTS, "s.id")
+    );
+    let ids = claim(state, &sql, PROVIDER_CALLS_PER_TICK).await?;
+    for id in ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let result = book_one(state, courier, id, tolerance).await;
+        tally(state, &mut stats, BOOK_SHIPMENTS, id, result).await;
+    }
+    Ok(stats)
+}
+
+// ---------------------------------------------------------- 9. cancel shipments
+
+async fn cancel_shipments(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
+    let Some(courier) = state.courier.as_deref() else {
+        return Ok(Stats::default());
+    };
+    let sql = format!(
+        "SELECT s.id FROM shipments s \
+         WHERE s.status = 'cancel_pending' AND s.next_attempt_at <= now() \
+           AND (s.sending_until IS NULL OR s.sending_until < now()) AND {} \
+         ORDER BY s.updated_at, s.id LIMIT $1 FOR UPDATE OF s SKIP LOCKED",
+        not_pushed_back(CANCEL_SHIPMENTS, "s.id")
+    );
+    let ids = claim(state, &sql, PROVIDER_CALLS_PER_TICK).await?;
+    let mut stats = Stats::default();
+    for id in ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let result = cancel_one(state, courier, id).await;
+        tally(state, &mut stats, CANCEL_SHIPMENTS, id, result).await;
+    }
+    Ok(stats)
+}
+
+// ------------------------------------------------------------ 10. poll shipments
+
+async fn poll_shipments(state: &AppState, cancel: &CancellationToken) -> Result<Stats, AppError> {
+    let Some(courier) = state.courier.as_deref() else {
+        return Ok(Stats::default());
+    };
+    let quiet_since = "GREATEST(s.updated_at, s.last_event_at, s.last_polled_at)";
+    let sql = format!(
+        "SELECT s.id FROM shipments s \
+         WHERE s.status IN ({POLLED_STATUSES}) AND s.provider = '{provider}' \
+           AND {quiet_since} < now() - interval '{POLL_AFTER}' AND {pushed} \
+         ORDER BY {quiet_since}, s.id LIMIT $1 FOR UPDATE OF s SKIP LOCKED",
+        provider = courier.name(),
+        pushed = not_pushed_back(POLL_SHIPMENTS, "s.id"),
+    );
+    let ids = claim(state, &sql, PROVIDER_CALLS_PER_TICK).await?;
+    let mut stats = Stats::default();
+    for id in ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let result = poll_one(state, courier, id).await;
+        tally(state, &mut stats, POLL_SHIPMENTS, id, result).await;
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

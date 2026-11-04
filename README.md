@@ -18,10 +18,21 @@ Payments and escrow (part 2):
 
 - **Paying:** a cart becomes one checkout paid through Mono DirectPay (behind a provider layer that can be switched), split into one order per store. Stock is reserved while the buyer pays.
 - **Held funds and ledger:** every money movement is a balanced entry in an append-only, double-entry ledger, and the platform takes a 5% cut.
-- **Payouts:** sellers register a payout account, which is verified and stored encrypted. Funds are released to the seller through Mono Disburse after the buyer confirms, or 3 days after delivery. The pickup and delivery steps arrive in part 3, so until then orders stay at `paid` and nothing is released automatically.
+- **Payouts:** sellers register a payout account, which is verified and stored encrypted. Funds are released to the seller through Mono Disburse after the buyer confirms, or 3 days after delivery.
 - **Refunds and cancellations:** refunds are retried by a background sweeper.
 - **Background jobs:** expiry, lost-webhook re-verification, auto-release, the 30-day backstop queue and payout polling.
 - **Owner admin:** release, refund and hold orders; mark payouts paid or refunds refunded by hand; re-queue reversed payouts. A reconciliation list shows everything that needs attention. Every staff read and override is audited.
+
+Delivery and tracking (part 3):
+
+- **Addresses and coverage:** buyers save delivery addresses and pick one of the six FCT area councils; checkout works only inside the FCT ("Coming to your city soon" elsewhere). The NIPOST postcode is optional and format-checked when given until the NIPOST adapter exists.
+- **Delivery options:** at checkout each store offers its own delivery at a flat fee and/or up to three Shipbubble courier rates. Quotes are held on the server, single-use, bound to the cart and address, and expire after 30 minutes. The courier fee goes to the platform (which pays Shipbubble); a self-delivery fee goes to the seller. The 5% cut is on items only.
+- **Next-day promise:** a 6pm (owner-configurable) cut-off, skipping Sundays and bank holidays, fixed at payment.
+- **Self-delivery:** the seller marks picked up, then out for delivery. The buyer sees a 6-digit handover code only then; the seller sees the buyer's phone and address only then, and each reveal is audited. The seller marks delivered with the code, which counts as the buyer's confirmation and releases the money. Five wrong codes lock entry for an hour.
+- **Courier delivery:** the seller marks the order ready and a job books the courier. Signed courier webhooks (with a polling fallback) move the order forward only. A `completed` webhook starts the 3-day release window, counted from when we received it, and never releases money itself. A refund after booking still goes ahead and cancels the shipment afterwards.
+- **Tracking timeline:** one endpoint gives the buyer and seller the steps, promised date, courier or store contact and tracking link, with delay notes.
+- **Ship deadline:** the 48-hour rule is now enforced for orders paid after `ship_deadline_enforce_from`, and overdue pickups are flagged for the owner.
+- **Owner view:** the reconciliation list shows bookings that failed or are unknown, courier cancels after pickup, overdue pickups and paid orders without a delivery method.
 
 ## Roadmap
 
@@ -29,7 +40,7 @@ Payments and escrow (part 2):
 |---|---|
 | 1 | Server foundation (done) |
 | 2 | Payments and escrow (Mono first, behind a switchable provider layer): cart, orders, held funds, release, refunds, 5% platform cut (done) |
-| 3 | Delivery and tracking: NIPOST postcodes, Shipbubble couriers, self-delivery, handover codes |
+| 3 | Delivery and tracking: FCT addresses, Shipbubble couriers, self-delivery, handover codes, tracking timeline (done) |
 | 4 | Moderated chat and reviews |
 | 5 | Disputes and notifications |
 | 6 | Owner web dashboard |
@@ -83,6 +94,14 @@ These are tracked in the roadmap:
 - Rate limits per network address on sign-up and sign-in.
 - A restricted production database role.
 - Legal review of the escrow setup, and data-protection (DPO) review.
-- The ship-deadline job (`platform_settings.jobs_ship_deadline_enabled`) stays **off** until plan 3 ships a pickup route. Until then nothing can move an order out of `paid`, so the job would refund every paid order and strike its seller.
+- The ship-deadline job is on (migration 0030) and only refunds or strikes orders paid at or after `platform_settings.ship_deadline_enforce_from`, which that migration sets to the moment it ran. After deploying, check the owner's reconciliation view: `orders_attention` lists paid orders with no delivery method (the job never touches them), and `shipments_attention` lists ready courier orders whose pickup is overdue.
 - Confirm with Mono which unit (kobo or naira) each product's `amount` fields use (`MONO_DIRECTPAY_AMOUNT_UNIT`, `MONO_DISBURSE_AMOUNT_UNIT`), then run a sandbox smoke test of a payment, a payout and a webhook before switching to live keys.
 - DPO review of whether the Owner should keep seeing buyer display names on order reads. Support already does not, and every staff read is audited.
+- Do not switch courier delivery on for real stores until an owner re-book path exists (plan 6). Today an empty Shipbubble wallet can fail ready orders for good: they stay paid with the buyer's money held until someone acts.
+- Run a Shipbubble sandbox smoke test before live keys: the amount unit (`SHIPBUBBLE_AMOUNT_UNIT`, naira or kobo), the webhook signing key per environment and the exact bytes signed, address validation, the status field on `shipment.cancelled`, whether a used `request_token` can book again, what a 429 means, and what an insufficient wallet returns (it may look like any other 400).
+- Two more sandbox checks are a gate on courier go-live: book a token whose `pickup_date` passed 1 and 2 days ago (the seller has 48 hours to mark ready, and booking replays the token from the quote; if it is refused, quote again at booking or quote for the end of the ready window), and find out whether a cancelled label credits the wallet. The ledger books every courier charge to `courier_costs` and posts no credit on a cancel until this answer is in; if the wallet is credited, post the reverse under `("courier_refund", shipment_id)`.
+- Set `SHIPBUBBLE_CONTACT_EMAIL` (a platform operations address, sent when a contact has no email) and fund the Shipbubble wallet. The server refuses an `sb_prod` key outside production and a production start without the amount unit.
+- The NIPOST postcode adapter waits on API access; until then the postcode is only format-checked.
+- Accountant: is delivery vatable at 7.5%, and who is merchant of record for courier delivery.
+- DPO and legal review: the Shipbubble processor agreement and data location; a privacy notice that names couriers; the seller seeing the buyer's address while out for delivery; retention of `orders.delivery_address_enc` (the buyer's delivery contact, kept today on every order, including never-paid and refunded ones), `courier_phone_enc`, `delivery_events`, soft-deleted addresses and audit rows; the old business phone that can appear on labels for orders quoted before a phone change; the buyer's name, phone and address going to Shipbubble when options are requested, before the buyer chooses courier or pays; plaintext `buyer_addresses.postcode`, which may locate a single property; and plaintext tracking URLs, which may be bearer links showing the address.
+- Owner decisions: whether a handover code should release after a delay or have a no-code fallback, and whether the 48-hour ship deadline should pause on holidays and Sundays.

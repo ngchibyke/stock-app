@@ -7,7 +7,9 @@
 //!    with a fresh `RF` reference (status `requested`), ledger `escrow -T`,
 //!    `refunds +T` (key `("refund", id)`), and the absorbed collection fee
 //!    `provider_fees +share`, `platform_revenue -share` (key
-//!    `("refund_fee", id)`, none when the share is 0).
+//!    `("refund_fee", id)`, none when the share is 0). A courier shipment is
+//!    moved in the same transaction ([`shipments::on_refund`]): a booked one goes
+//!    to the cancel outbox, so the refund never depends on the courier.
 //! 2. [`send_refund`] (after commit): claims the row, calls `provider.refund`
 //!    with the same reference every time, and records the answer:
 //!    - Ok: refund `processing` (the buyer gets the money within about 10
@@ -33,6 +35,7 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     checkout::service::busy_err,
+    delivery::shipments,
     error::AppError,
     ledger::{self, Account, Entry},
     limits::MAX_STOCK,
@@ -61,9 +64,10 @@ fn db_err(ctx: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
 }
 
 /// The owner's refund from the admin route, audited with `actor` and `note`.
-/// Beyond what [`refund_order`] accepts, it refunds a **held** `picked_up` or
-/// `delivered` order (a complaint the owner decided for the buyer), without
-/// restoring stock: the goods may be with the buyer (returns are plan 5). An
+/// Beyond what [`refund_order`] accepts, it refunds a **held** `picked_up`,
+/// `out_for_delivery` or `delivered` order (a complaint the owner decided for
+/// the buyer), without restoring stock: the goods may be with the buyer
+/// (returns are plan 5). An
 /// unheld shipped order is 409 `order_not_held` (hold it first, which stops
 /// its release). Not a no-op on retry: an order already `refund_pending` or
 /// `refunded` (or in any other state) is 409 `invalid_order_state` naming it;
@@ -198,7 +202,8 @@ async fn begin(
         bool,
     ) = sqlx::query_as(
         "SELECT o.status::text, o.items_total_kobo, o.delivery_fee_kobo, \
-                    o.collection_fee_share_kobo, o.checkout_id, c.provider, \
+                    o.collection_fee_share_kobo + o.collection_fee_courier_kobo, \
+                    o.checkout_id, c.provider, \
                     o.held_at IS NOT NULL \
              FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
              WHERE o.id = $1 FOR UPDATE OF o",
@@ -212,8 +217,10 @@ async fn begin(
         || AppError::ConflictDetail("invalid_order_state", format!("order is {status}"));
     match status.as_str() {
         "paid" => {}
-        "picked_up" | "delivered" if owner && held => {}
-        "picked_up" | "delivered" if owner => return Err(AppError::Conflict("order_not_held")),
+        "picked_up" | "out_for_delivery" | "delivered" if owner && held => {}
+        "picked_up" | "out_for_delivery" | "delivered" if owner => {
+            return Err(AppError::Conflict("order_not_held"));
+        }
         "refund_pending" | "refunded" if owner => return Err(state_err()),
         "refund_pending" | "refunded" => {
             let id: Uuid = sqlx::query_scalar("SELECT id FROM refunds WHERE order_id = $1")
@@ -237,11 +244,15 @@ async fn begin(
         .checked_add(delivery_fee)
         .ok_or_else(|| anyhow::anyhow!("refund amount overflow"))?;
 
-    sqlx::query("UPDATE orders SET status = 'refund_pending' WHERE id = $1")
-        .bind(order_id)
-        .execute(&mut *conn)
-        .await
-        .context("mark refund pending")?;
+    // A handover code still on the order can no longer be used.
+    sqlx::query(
+        "UPDATE orders SET status = 'refund_pending', handover_code_enc = NULL WHERE id = $1",
+    )
+    .bind(order_id)
+    .execute(&mut *conn)
+    .await
+    .context("mark refund pending")?;
+    shipments::on_refund(conn, order_id).await?;
     // Units back on hand, clamped at the stock cap (the seller may have
     // restocked meanwhile); the clamped units are recorded in the audit row.
     let mut clamped_units: i64 = 0;

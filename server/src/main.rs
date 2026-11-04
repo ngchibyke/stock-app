@@ -10,6 +10,7 @@ use server::{
     },
     build_app,
     config::Config,
+    couriers::shipbubble::ShipbubbleCourier,
     crypto::FieldCipher,
     escrow::jobs,
     payments::{ProviderRegistry, mono::MonoProvider},
@@ -75,6 +76,20 @@ async fn main() -> anyhow::Result<()> {
         None => tracing::warn!("MONO_SECRET_KEY not set: no payment provider is configured"),
     }
 
+    let courier: Option<Arc<dyn server::couriers::CourierProvider>> =
+        match config.shipbubble.clone() {
+            Some(sb_cfg) => {
+                let live = sb_cfg.live;
+                let courier = ShipbubbleCourier::new(sb_cfg)?;
+                tracing::info!(live, "shipbubble courier provider registered");
+                Some(Arc::new(courier))
+            }
+            None => {
+                tracing::warn!("SHIPBUBBLE_API_KEY not set: courier delivery is unavailable");
+                None
+            }
+        };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -85,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
         providers: Arc::new(providers),
         payment_redirect_url: config.public_redirect_url.clone(),
         verify_gate: Arc::new(server::payments::VerifyGate::default()),
+        // REVISIT(nipost): swap in a real adapter once NIPOST's API is documented.
+        postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
+        courier,
     };
 
     match command {

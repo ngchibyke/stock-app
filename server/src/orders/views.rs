@@ -168,6 +168,7 @@ struct Row {
     status: String,
     items_total_kobo: i64,
     delivery_fee_kobo: i64,
+    self_delivery: bool,
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
     held: bool,
@@ -213,10 +214,17 @@ impl Row {
         }
         let snapshot = self.fee_snapshot();
         let schedule = snapshot.as_ref().or(live)?;
+        // A self-delivery fee is paid to the seller; a courier fee is not.
+        let seller_delivery = if self.self_delivery {
+            self.delivery_fee_kobo
+        } else {
+            0
+        };
         let before_fee = self
             .items_total_kobo
             .saturating_sub(self.platform_cut_kobo)
-            .saturating_sub(self.collection_fee_share_kobo);
+            .saturating_sub(self.collection_fee_share_kobo)
+            .saturating_add(seller_delivery);
         Some(
             before_fee
                 .saturating_sub(money::payout_fee_kobo(before_fee, schedule))
@@ -227,7 +235,8 @@ impl Row {
 
 const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_owner_id, \
         o.status::text AS status, \
-        o.items_total_kobo, o.delivery_fee_kobo, o.platform_cut_kobo, \
+        o.items_total_kobo, o.delivery_fee_kobo, COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
+        o.platform_cut_kobo, \
         o.collection_fee_share_kobo, (o.held_at IS NOT NULL) AS held, \
         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ship_by, o.delivered_at, o.release_at, \
         o.created_at, u.display_name AS buyer_display_name, \

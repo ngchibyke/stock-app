@@ -1,12 +1,13 @@
 use axum::{
     Json, Router,
     extract::{FromRequestParts, Path, State},
-    http::{StatusCode, request::Parts},
+    http::{StatusCode, header, request::Parts},
+    response::IntoResponse,
     routing::get,
 };
 use uuid::Uuid;
 
-use super::service::{self, NewStore, OwnerStore, PublicStore, StorePatch};
+use super::service::{self, NewStore, PublicStore, StorePatch};
 use crate::{
     AppState,
     auth::{AuthUser, extractor::bearer_token},
@@ -54,24 +55,27 @@ async fn create(
     State(state): State<AppState>,
     user: AuthUser,
     AppJson(body): AppJson<NewStore>,
-) -> Result<(StatusCode, Json<OwnerStore>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
     let store = service::create_store(&state.db, &state.cipher, user.id, body).await?;
-    Ok((StatusCode::CREATED, Json(store.owner_view(&state.cipher)?)))
+    Ok((
+        StatusCode::CREATED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(store.owner_view(&state.cipher)?),
+    ))
 }
 
 async fn mine(
     State(state): State<AppState>,
     user: AuthUser,
-) -> Result<Json<Vec<OwnerStore>>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
     let stores = service::list_mine(&state.db, user.id).await?;
-    Ok(Json(
-        stores
-            .iter()
-            .map(|s| s.owner_view(&state.cipher))
-            .collect::<Result<_, _>>()?,
-    ))
+    let views = stores
+        .iter()
+        .map(|s| s.owner_view(&state.cipher))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
 
 async fn show(
@@ -88,11 +92,14 @@ async fn update(
     user: AuthUser,
     Path(key): Path<String>,
     AppJson(patch): AppJson<StorePatch>,
-) -> Result<Json<OwnerStore>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
     let store =
         service::update_store(&state.db, &state.cipher, user.id, parse_id(&key)?, patch).await?;
-    Ok(Json(store.owner_view(&state.cipher)?))
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(store.owner_view(&state.cipher)?),
+    ))
 }
 
 async fn remove(

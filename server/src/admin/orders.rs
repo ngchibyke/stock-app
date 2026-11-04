@@ -16,7 +16,13 @@ use crate::{audit, checkout::service::busy_err, error::AppError};
 
 /// Statuses a hold makes sense on: money still in escrow, or a payout that
 /// may not have gone yet.
-const HOLDABLE: &[&str] = &["paid", "picked_up", "delivered", "completed"];
+const HOLDABLE: &[&str] = &[
+    "paid",
+    "picked_up",
+    "out_for_delivery",
+    "delivered",
+    "completed",
+];
 
 /// Locks the order; returns (status, held, hold_reason).
 async fn lock_order(

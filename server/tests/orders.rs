@@ -7,7 +7,7 @@ use common::TestApp;
 use serde_json::{Value, json};
 use server::{
     checkout::{SettleOutcome, settle_payment},
-    orders::service::{mark_delivered, mark_picked_up},
+    orders::service::mark_picked_up,
     payments::PaymentStatus,
 };
 use sqlx::PgPool;
@@ -323,7 +323,7 @@ async fn received_from_delivered_works(pool: PgPool) {
     let f = paid_order(&app).await;
     let now = OffsetDateTime::now_utc();
     mark_picked_up(&app.pool, f.order_id, now).await.unwrap();
-    mark_delivered(&app.pool, f.order_id, now).await.unwrap();
+    app.mark_delivered(f.order_id, now).await.unwrap();
     assert_eq!(received(&app, f.order_id, &f.buyer).await.status, 200);
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 1);
 }
@@ -399,7 +399,8 @@ async fn invalid_transition_rejected(pool: PgPool) {
     assert_eq!(res.status, 409);
     assert_eq!(res.json["error"]["code"], "invalid_order_state");
     // The service refuses skipping a step, with the same code.
-    let err = mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    let err = app
+        .mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap_err();
     assert!(matches!(

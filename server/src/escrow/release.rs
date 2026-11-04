@@ -3,8 +3,9 @@
 //! Three steps, and no provider call ever runs inside a DB transaction:
 //!
 //! 1. [`release_order`] (one transaction, under the order lock): an order
-//!    `picked_up`/`delivered` with no payout row is booked out of escrow,
-//!    marked `completed`, and gets a payout row `scheduled` (or `manual` with
+//!    `picked_up`/`out_for_delivery`/`delivered` with no payout row is booked
+//!    out of escrow, marked `completed` (a handover code still on it is
+//!    cleared: nothing can use it any more), and gets a payout row `scheduled` (or `manual` with
 //!    amount 0 when the payout would be ≤ 0). It enforces the release rules
 //!    itself (defence in depth): a held order is 409 `order_held` unless the
 //!    owner decides; `AutoAfterDelivery` needs `delivered_at` and a passed
@@ -13,8 +14,14 @@
 //!    `provider_fees +collection_fee_share`, `platform_revenue +payout_fee`,
 //!    `seller_payable +payout`. A payout ≤ 0 books `seller_payable` 0 and the
 //!    shortfall comes off `platform_revenue` (cut + delivery − shortfall), so
-//!    the seller never owes the platform. Delivery money sits in `platform_revenue`
-//!    until plan 3 routes it to the courier or the self-delivering seller.
+//!    the seller never owes the platform. The delivery fee of a self-delivery
+//!    order (`delivery_method = 'self'`) is part of the seller's payout (the
+//!    payout fee and stamp duty are computed on it) and not of
+//!    `platform_revenue`; a courier fee, or none (part-2 orders), stays in
+//!    `platform_revenue`, which pays the courier: the charge left it for
+//!    `courier_costs` at booking. The cut is on items only. The part of the
+//!    collection fee charged on a courier fee is the platform's too: it goes to
+//!    `provider_fees` out of `platform_revenue`, and never touches the payout.
 //!    The payout fee is fixed here, from the fee schedule snapshotted on the
 //!    order when it was paid (orders paid before that snapshot existed use the
 //!    schedule at release). An owner decision ([`release_by_owner`]) also
@@ -214,8 +221,10 @@ struct ReleaseRow {
     status: String,
     items_total_kobo: i64,
     delivery_fee_kobo: i64,
+    self_delivery: bool,
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
+    collection_fee_courier_kobo: i64,
     checkout_id: Uuid,
     paid_at: Option<OffsetDateTime>,
     has_payout: bool,
@@ -256,7 +265,8 @@ enum Released {
 }
 
 /// Step 1 (see the module docs). Idempotent: an order that is not
-/// `picked_up`/`delivered`, or already has a payout, is left as it is (Ok).
+/// `picked_up`/`out_for_delivery`/`delivered`, or already has a payout, is
+/// left as it is (Ok).
 /// Unknown order -> 404. A held order -> 409 `order_held` unless the reason is
 /// `OwnerDecision` (the owner resolves complaints). `AutoAfterDelivery` on an
 /// order not delivered, or before its stored `release_at`, is a no-op (Ok), so
@@ -272,8 +282,8 @@ pub async fn release_order(
 
 /// The owner's release (`OwnerDecision`) from the admin route: also clears
 /// the order's hold in the same transaction and audits the owner and `note`.
-/// Not a no-op on retry: an order that is not `picked_up`/`delivered` (e.g.
-/// already released) is 409 `invalid_order_state` naming its status.
+/// Not a no-op on retry: an order that is not `picked_up`/`out_for_delivery`/
+/// `delivered` (e.g. already released) is 409 `invalid_order_state` naming its status.
 pub async fn release_by_owner(
     state: &AppState,
     order_id: Uuid,
@@ -305,7 +315,9 @@ async fn release(
         .map_err(db_err("set lock_timeout"))?;
     let row: ReleaseRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.delivery_fee_kobo, \
-                o.platform_cut_kobo, o.collection_fee_share_kobo, o.checkout_id, c.paid_at, \
+                COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
+                o.platform_cut_kobo, o.collection_fee_share_kobo, \
+                o.collection_fee_courier_kobo, o.checkout_id, c.paid_at, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
                 o.held_at IS NOT NULL AS held, o.delivered_at IS NOT NULL AS delivered, \
                 COALESCE(o.release_at <= now(), false) AS release_due, \
@@ -319,7 +331,11 @@ async fn release(
     .await
     .map_err(db_err("lock order"))?
     .ok_or(AppError::NotFound)?;
-    if !matches!(row.status.as_str(), "picked_up" | "delivered") || row.has_payout {
+    if !matches!(
+        row.status.as_str(),
+        "picked_up" | "out_for_delivery" | "delivered"
+    ) || row.has_payout
+    {
         return Ok(Released::Unchanged(row.status));
     }
     // The release rules, enforced here as well as by the callers.
@@ -334,9 +350,19 @@ async fn release(
     let delivery = row.delivery_fee_kobo;
     let cut = row.platform_cut_kobo;
     let share = row.collection_fee_share_kobo;
+    let courier_share = row.collection_fee_courier_kobo;
+    // A self-delivery fee belongs to the seller; a courier fee (or none, on
+    // part-2 orders) stays with the platform, which pays the courier. The
+    // platform cut applies to items only.
+    let (seller_delivery, platform_delivery) = if row.self_delivery {
+        (delivery, 0)
+    } else {
+        (0, delivery)
+    };
     let before_fee = items
         .checked_sub(cut)
         .and_then(|x| x.checked_sub(share))
+        .and_then(|x| x.checked_add(seller_delivery))
         .ok_or_else(too_large)?;
     // The fee tier and the stamp-duty threshold are compared against the
     // payout BEFORE the fee (Task 1 ruling): a payout just over ₦10,000 pays
@@ -352,9 +378,11 @@ async fn release(
     let shortfall = payout - computed;
     let gross = items.checked_add(delivery).ok_or_else(too_large)?;
     let cut_and_delivery = cut
-        .checked_add(delivery)
+        .checked_add(platform_delivery)
         .and_then(|x| x.checked_sub(shortfall))
+        .and_then(|x| x.checked_sub(courier_share))
         .ok_or_else(too_large)?;
+    let provider_fee = share.checked_add(courier_share).ok_or_else(too_large)?;
 
     let now = OffsetDateTime::now_utc();
     let paid_at = row.paid_at.unwrap_or(now);
@@ -382,7 +410,7 @@ async fn release(
         &[
             entry(Account::Escrow, -gross),
             entry(Account::PlatformRevenue, cut_and_delivery),
-            entry(Account::ProviderFees, share),
+            entry(Account::ProviderFees, provider_fee),
             // The payout fee charged to the seller is platform revenue; the
             // provider's real fee is booked when settle_payout learns it.
             entry(Account::PlatformRevenue, payout_fee),
@@ -407,11 +435,15 @@ async fn release(
     .fetch_one(&mut *tx)
     .await
     .context("insert payout")?;
-    sqlx::query("UPDATE orders SET status = 'completed', completed_at = now() WHERE id = $1")
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await
-        .context("complete order")?;
+    sqlx::query(
+        "UPDATE orders SET status = 'completed', completed_at = now(), \
+                handover_code_enc = NULL \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await
+    .context("complete order")?;
     audit::record(
         &mut tx,
         None,
@@ -422,6 +454,7 @@ async fn release(
             "payout_id": payout_id,
             "reason": reason.as_str(),
             "payout_kobo": payout,
+            "self_delivery_fee_kobo": seller_delivery,
             "shortfall_kobo": shortfall,
             "payout_fee_kobo": payout_fee,
             "payout_status": status,

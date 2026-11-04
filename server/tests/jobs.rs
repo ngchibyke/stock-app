@@ -16,7 +16,7 @@ use server::{
         JobReport, MAX_REFUND_ATTEMPTS, SHIP_DEADLINE_PER_TICK, refund_missed_ship_deadline,
         run_due_jobs, run_loop_every,
     },
-    orders::service::{mark_delivered, mark_picked_up},
+    orders::service::mark_picked_up,
     payments::{PaymentStatus, PayoutState, ProviderError},
 };
 use sqlx::PgPool;
@@ -72,8 +72,8 @@ async fn tick(app: &TestApp) -> JobReport {
     run_due_jobs(&app.state).await
 }
 
-/// The ship-deadline job ships switched off (no pickup route before plan 3);
-/// tests of the job itself switch it on.
+/// The ship-deadline job is on by default (migration 0030); tests that hinge
+/// on it say so explicitly.
 async fn ship_deadline_on(app: &TestApp) {
     exec(
         app,
@@ -151,7 +151,7 @@ async fn delivered_order(app: &TestApp) -> Fixture {
     let f = paid_order(app).await;
     let now = OffsetDateTime::now_utc();
     mark_picked_up(&app.pool, f.order_id, now).await.unwrap();
-    mark_delivered(&app.pool, f.order_id, now).await.unwrap();
+    app.mark_delivered(f.order_id, now).await.unwrap();
     f
 }
 
@@ -270,11 +270,38 @@ async fn lost_webhook_reverify_backs_off_and_stops_after_48h(pool: PgPool) {
 
 // ---------------------------------------------------------------- ship deadline
 
-/// I1: with no pickup route yet, the job would refund every paid order and
-/// strike its seller, so a fresh database ships with it off.
+/// Migration 0030 turns the job on: a fresh database refunds and strikes a
+/// paid self-delivery order that is past `ship_by` with nobody acting, and
+/// the enforcement date the migration set does not reach it (paid after it).
 #[sqlx::test]
-async fn ship_deadline_is_off_on_a_fresh_database(pool: PgPool) {
+async fn ship_deadline_on_by_default_after_migration(pool: PgPool) {
     let app = TestApp::new(pool).await;
+    let default: String = text(
+        &app,
+        "SELECT column_default FROM information_schema.columns \
+         WHERE table_name = 'platform_settings' AND column_name = 'jobs_ship_deadline_enabled'",
+    )
+    .await;
+    assert_eq!(default, "true");
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM platform_settings WHERE jobs_ship_deadline_enabled"
+        )
+        .await,
+        1
+    );
+    // Set by the migration to its own run time: in the past, not null.
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM platform_settings WHERE ship_deadline_enforce_from <= now()"
+        )
+        .await,
+        1
+    );
+
+    app.fake.set_refund_supported(true);
     let f = paid_order(&app).await;
     exec(
         &app,
@@ -282,19 +309,454 @@ async fn ship_deadline_is_off_on_a_fresh_database(pool: PgPool) {
     )
     .await;
     let r = tick(&app).await;
-    assert_eq!(r.auto_cancelled, 0);
+    assert_eq!(r.auto_cancelled, 1);
+    assert_eq!(order_status(&app, f.order_id).await, "refunded");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 1);
+}
+
+#[sqlx::test]
+async fn ship_deadline_refunds_unready_self_order(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    assert_eq!(
+        text(&app, "SELECT delivery_method::text FROM orders").await,
+        "self"
+    );
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '1 hour'",
+    )
+    .await;
+    assert_eq!(tick(&app).await.auto_cancelled, 1);
+    assert_eq!(order_status(&app, f.order_id).await, "refunded");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 1);
+    // Re-run: no second refund and no second strike.
+    assert_eq!(tick(&app).await.auto_cancelled, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 1);
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 1);
+}
+
+/// A courier order the seller never marked ready is the seller's miss.
+#[sqlx::test]
+async fn ship_deadline_refunds_unready_courier_order(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    make_courier(&app, f.order_id, false).await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '1 hour'",
+    )
+    .await;
+    assert_eq!(tick(&app).await.auto_cancelled, 1);
+    assert_eq!(order_status(&app, f.order_id).await, "refunded");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 1);
+}
+
+/// Turns the paid order into a courier order, marked ready 3 days ago or not.
+async fn make_courier(app: &TestApp, order_id: Uuid, ready: bool) {
+    sqlx::query(
+        "UPDATE orders SET delivery_method = 'courier', courier_request_token = 'tok', \
+             courier_id = '1', service_code = 'svc', courier_quote_kobo = 0, \
+             courier_sender_code = 1, \
+             ready_at = CASE WHEN $2 THEN now() - interval '3 days' END \
+         WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(ready)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+}
+
+async fn add_shipment(
+    app: &TestApp,
+    order_id: Uuid,
+    status: &str,
+    provider_order_id: Option<&str>,
+    last_error: Option<&str>,
+    attention: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO shipments (order_id, provider, status, provider_order_id, quoted_kobo, \
+                                charged_kobo, last_error, attention) \
+         VALUES ($1, 'fake', $2::shipment_status, $3, 0, 0, $4, $5)",
+    )
+    .bind(order_id)
+    .bind(status)
+    .bind(provider_order_id)
+    .bind(last_error)
+    .bind(attention)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+}
+
+/// The owner's reconciliation view.
+async fn reconciliation(app: &TestApp) -> serde_json::Value {
+    let owner = app.owner_token().await;
+    let res = app
+        .request(Method::GET, "/admin/reconciliation", None, Some(&owner))
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    res.json
+}
+
+/// A ready courier order, long past `ship_by`, is never refunded or struck,
+/// whatever its shipment says: the tick and a direct call both leave it.
+async fn ready_courier_order_is_never_struck(
+    pool: PgPool,
+    status: &str,
+    provider_order_id: Option<&str>,
+    last_error: Option<&str>,
+    attention: Option<&str>,
+) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    make_courier(&app, f.order_id, true).await;
+    add_shipment(
+        &app,
+        f.order_id,
+        status,
+        provider_order_id,
+        last_error,
+        attention,
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '5 days'",
+    )
+    .await;
+
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert!(
+        !refund_missed_ship_deadline(&app.state, f.order_id)
+            .await
+            .unwrap()
+    );
     assert_eq!(order_status(&app, f.order_id).await, "paid");
     assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
     assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
-    let default: String = text(
-        &app,
-        "SELECT column_default FROM information_schema.columns \
-         WHERE table_name = 'platform_settings' AND column_name = 'jobs_ship_deadline_enabled'",
-    )
-    .await;
-    assert_eq!(default, "false");
+    assert_eq!(app.fake.calls("refund"), 0);
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM audit_log WHERE action = 'order.ship_deadline_missed'"
+        )
+        .await,
+        0
+    );
 }
 
+#[sqlx::test]
+async fn courier_ready_before_deadline_not_struck(pool: PgPool) {
+    // Booked and waiting for the courier: the common case.
+    ready_courier_order_is_never_struck(pool, "booked", Some("fake-1"), None, None).await;
+}
+
+#[sqlx::test]
+async fn courier_booking_unknown_not_struck(pool: PgPool) {
+    ready_courier_order_is_never_struck(pool, "booking_unknown", None, Some("timeout"), None).await;
+}
+
+#[sqlx::test]
+async fn courier_booking_failed_not_struck(pool: PgPool) {
+    ready_courier_order_is_never_struck(pool, "booking_failed", None, Some("http_400"), None).await;
+}
+
+#[sqlx::test]
+async fn courier_cancelled_by_courier_not_struck(pool: PgPool) {
+    ready_courier_order_is_never_struck(
+        pool,
+        "cancelled",
+        Some("fake-1"),
+        None,
+        Some("courier_cancelled"),
+    )
+    .await;
+}
+
+#[sqlx::test]
+async fn courier_pickup_moved_not_struck(pool: PgPool) {
+    ready_courier_order_is_never_struck(pool, "booking_failed", None, Some("pickup_moved"), None)
+        .await;
+}
+
+/// The kill switch stops refunds. A flag changes no order, so it still runs.
+#[sqlx::test]
+async fn kill_switch_leaves_pickup_flags_on(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app).await;
+    make_courier(&app, f.order_id, true).await;
+    add_shipment(&app, f.order_id, "booked", Some("fake-1"), None, None).await;
+    exec(
+        &app,
+        "UPDATE platform_settings SET jobs_ship_deadline_enabled = false",
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '25 hours'",
+    )
+    .await;
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM audit_log WHERE action = 'shipment.pickup_overdue'",
+        )
+        .await,
+        1
+    );
+}
+
+/// A ready courier order still unpicked 24h after `ship_by`: one audit row and
+/// one attention entry, no refund, no strike, however many ticks run.
+#[sqlx::test]
+async fn courier_pickup_overdue_flagged_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    make_courier(&app, f.order_id, true).await;
+    add_shipment(&app, f.order_id, "booked", Some("fake-1"), None, None).await;
+    let flags = || {
+        count(
+            &app,
+            "SELECT count(*) FROM audit_log WHERE action = 'shipment.pickup_overdue'",
+        )
+    };
+
+    // 23h past ship_by: not yet.
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '23 hours'",
+    )
+    .await;
+    tick(&app).await;
+    assert_eq!(flags().await, 0);
+    assert!(
+        reconciliation(&app).await["shipments_attention"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // 25h past ship_by: flagged, once.
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '25 hours'",
+    )
+    .await;
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert_eq!(flags().await, 1);
+    tick(&app).await;
+    tick(&app).await;
+    assert_eq!(flags().await, 1, "never flagged twice");
+
+    let json = reconciliation(&app).await;
+    let items = json["shipments_attention"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{json}");
+    assert_eq!(items[0]["attention"], "pickup_overdue");
+    assert_eq!(items[0]["order_id"], f.order_id.to_string());
+    assert_eq!(items[0]["status"], "booked");
+
+    // Nothing else happened to the order.
+    assert_eq!(order_status(&app, f.order_id).await, "paid");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
+
+    // Picked up: the entry leaves the list.
+    mark_picked_up(&app.pool, f.order_id, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    assert!(
+        reconciliation(&app).await["shipments_attention"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Only orders paid at or after `ship_deadline_enforce_from` can be refunded
+/// or struck: switching the job on never reaches over a backlog.
+#[sqlx::test]
+async fn ship_deadline_leaves_orders_paid_before_enforce_from(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '1 hour'",
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE platform_settings SET ship_deadline_enforce_from = now() + interval '1 hour'",
+    )
+    .await;
+
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert!(
+        !refund_missed_ship_deadline(&app.state, f.order_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(order_status(&app, f.order_id).await, "paid");
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
+    assert_eq!(app.fake.calls("refund"), 0);
+
+    // The owner moves the date back before the payment: now it applies.
+    exec(
+        &app,
+        "UPDATE platform_settings SET ship_deadline_enforce_from = now() - interval '1 hour'",
+    )
+    .await;
+    assert_eq!(tick(&app).await.auto_cancelled, 1);
+    assert_eq!(order_status(&app, f.order_id).await, "refunded");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 1);
+}
+
+/// A paid order with no delivery method (from before delivery existed) is
+/// neither refunded nor struck, and the owner is told about it.
+#[sqlx::test]
+async fn paid_order_without_delivery_method_is_excluded_and_listed(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    exec(&app, "UPDATE orders SET delivery_method = NULL").await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '5 days'",
+    )
+    .await;
+
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert!(
+        !refund_missed_ship_deadline(&app.state, f.order_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(order_status(&app, f.order_id).await, "paid");
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
+    assert_eq!(app.fake.calls("refund"), 0);
+
+    let json = reconciliation(&app).await;
+    let items = json["orders_attention"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{json}");
+    assert_eq!(items[0]["order_id"], f.order_id.to_string());
+    assert_eq!(items[0]["store_id"], f.store_id.to_string());
+    assert_eq!(items[0]["attention"], "no_delivery_method");
+}
+
+/// The owner can move the enforcement date later, never earlier, and not
+/// more than 30 days ahead.
+#[sqlx::test]
+async fn enforce_from_setting_is_validated_and_audited(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.owner_token().await;
+    let patch = |value: String| {
+        let (app, owner) = (&app, &owner);
+        async move {
+            let version = app
+                .request(Method::GET, "/admin/settings", None, Some(owner))
+                .await
+                .json["updated_at"]
+                .clone();
+            app.request(
+                Method::PATCH,
+                "/admin/settings",
+                Some(
+                    json!({ "ship_deadline_enforce_from": value, "expected_updated_at": version }),
+                ),
+                Some(owner),
+            )
+            .await
+        }
+    };
+    let rfc = |d: time::Duration| {
+        (OffsetDateTime::now_utc() + d)
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let res = patch(rfc(time::Duration::days(31))).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    let res = patch(rfc(time::Duration::days(29))).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert!(res.json["ship_deadline_enforce_from"].is_string());
+    // Forward-only: an earlier date is refused, and nothing is stored.
+    let stored = "SELECT ship_deadline_enforce_from::text FROM platform_settings";
+    let before = text(&app, stored).await;
+    let res = patch(rfc(time::Duration::days(-3))).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(text(&app, stored).await, before);
+    let res = patch(rfc(time::Duration::days(30))).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(
+        count(
+            &app,
+            "SELECT count(*) FROM audit_log WHERE action = 'settings.updated' \
+             AND detail ? 'ship_deadline_enforce_from'"
+        )
+        .await,
+        2
+    );
+    let get = app
+        .request(Method::GET, "/admin/settings", None, Some(&owner))
+        .await;
+    assert!(get.json["ship_deadline_enforce_from"].is_string());
+}
+
+/// A PATCH cannot pull a backlog into the job: with the date ahead of an
+/// order's payment, moving it back is refused and the order is left alone.
+#[sqlx::test]
+async fn enforce_from_patch_cannot_pull_in_a_backlog(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '1 hour'",
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE platform_settings SET ship_deadline_enforce_from = now() + interval '1 hour'",
+    )
+    .await;
+    let owner = app.owner_token().await;
+    let version = app
+        .request(Method::GET, "/admin/settings", None, Some(&owner))
+        .await
+        .json["updated_at"]
+        .clone();
+    let back = (OffsetDateTime::now_utc() - time::Duration::days(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            "/admin/settings",
+            Some(json!({ "ship_deadline_enforce_from": back, "expected_updated_at": version })),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert_eq!(order_status(&app, f.order_id).await, "paid");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
+}
 #[sqlx::test]
 async fn ship_deadline_48h_refunds_and_strikes(pool: PgPool) {
     let app = TestApp::new(pool).await;
@@ -659,7 +1121,7 @@ async fn no_release_without_delivered_at(pool: PgPool) {
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
 
     // Positive control: once delivered and due, it releases.
-    mark_delivered(&app.pool, f.order_id, OffsetDateTime::now_utc())
+    app.mark_delivered(f.order_id, OffsetDateTime::now_utc())
         .await
         .unwrap();
     exec(
@@ -1325,8 +1787,11 @@ async fn job_runs_record_last_success(pool: PgPool) {
         [
             "auto_release",
             "backstop",
+            "book_shipments",
+            "cancel_shipments",
             "expire_checkouts",
             "payouts",
+            "poll_shipments",
             "refunds",
             "reverify_checkouts",
             "ship_deadline"

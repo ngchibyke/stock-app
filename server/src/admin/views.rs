@@ -12,7 +12,16 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{audit, error::AppError};
+use crate::{
+    audit,
+    delivery::{
+        events::UNKNOWN_SHIPMENT,
+        options::QUOTE_REUSED,
+        shipments::{LATE_OUTCOME, PRICE_ABOVE_QUOTE, WALLET_ALERT},
+    },
+    error::AppError,
+    escrow::jobs::PICKUP_OVERDUE,
+};
 
 /// Rows per list (each reconciliation section too).
 pub const MAX_LIMIT: i64 = 100;
@@ -275,9 +284,32 @@ pub struct Reconciliation {
     /// on the payment, or a payout account that is missing or not verified
     /// (M9). Oldest first.
     pub blocked_payouts: Vec<PayoutView>,
+    /// Shipments waiting on a person, oldest change first: `booking_unknown`,
+    /// `booking_failed` (while the order still needs delivering), `cancel_failed`,
+    /// a `cancel_pending` older than [`CANCEL_STUCK_AFTER`], a booking still in
+    /// flight on a refunded order, a booking with no charged amount, a booking
+    /// answer that arrived after its lease was lost, bookings charged above
+    /// the quote in the last [`ALERT_WINDOW_DAYS`] days, any shipment with an
+    /// `attention` reason, ready courier orders still not picked up 24 hours
+    /// after `ship_by` (`attention = pickup_overdue`, while the order is `paid`;
+    /// `status` is the shipment's, or `no_shipment` before one exists), and labels from signed webhooks that no shipment has
+    /// (`attention = unknown_label`, last [`ALERT_WINDOW_DAYS`] days, one row per
+    /// label), which may be the label of a `booking_unknown` shipment.
+    pub shipments_attention: Vec<ShipmentAttention>,
+    /// Paid orders with no `delivery_method` (part-2 orders, from before
+    /// delivery existed). The ship-deadline job never refunds or strikes them,
+    /// and nothing else moves them either, so a person must decide. Oldest
+    /// payment first.
+    pub orders_attention: Vec<OrderAttention>,
+    /// Courier wallet warnings from the last [`ALERT_WINDOW_DAYS`] days, newest
+    /// first.
+    pub wallet_alerts: Vec<WalletAlert>,
     /// Rows per section; a full section has more behind it.
     pub limit: i64,
 }
+
+/// How long a shipment may wait in `cancel_pending` before it is listed.
+pub const CANCEL_STUCK_AFTER: &str = "1 hour";
 
 /// How far back the audit-log alert sections of [`Reconciliation`] look.
 /// The alerts have no acknowledgement: they age out instead.
@@ -305,6 +337,62 @@ pub struct PayoutAmountMismatch {
     pub payout_id: Option<Uuid>,
     pub expected_kobo: Option<i64>,
     pub reported_kobo: Option<i64>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// A shipment on the attention list. No courier name or phone, for anyone.
+/// An unknown label matches no shipment, so its row has no `id`, `order_id`,
+/// `store_id`, `order_status` or `quoted_kobo`, and its `status` is
+/// `unknown_label`.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ShipmentAttention {
+    pub id: Option<Uuid>,
+    pub order_id: Option<Uuid>,
+    pub store_id: Option<Uuid>,
+    pub status: String,
+    /// A live shipment on a refunded order shows here.
+    pub order_status: Option<String>,
+    pub provider_order_id: Option<String>,
+    /// The last state the courier sent for an unknown label.
+    pub courier_state: Option<String>,
+    pub quoted_kobo: Option<i64>,
+    pub charged_kobo: Option<i64>,
+    pub attempts: i32,
+    /// Our own short code, never provider text.
+    pub last_error: Option<String>,
+    /// Why a courier update needs a person: `courier_cancelled`,
+    /// `cancelled_after_pickup`, `cancel_lost`, `after_refund`,
+    /// `en_route_on_refund`, `not_courier_order` or `unknown_label`.
+    pub attention: Option<String>,
+    pub price_above_quote: bool,
+    /// A label the provider made after the booking's lease was lost: paid for,
+    /// and on no shipment row.
+    pub late_provider_order_id: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// A paid order that needs a person. `attention` is `no_delivery_method` (the
+/// ship-deadline job cannot judge it) or `quote_reused` (a late payment revived
+/// it, and another order holds the same courier quote, so one token may book twice).
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct OrderAttention {
+    pub order_id: Uuid,
+    pub store_id: Uuid,
+    pub attention: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub paid_at: OffsetDateTime,
+}
+
+/// A `courier.wallet_alert` audit row.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct WalletAlert {
+    pub shipment_id: Option<Uuid>,
+    /// `possible_low_balance`: a booking refused with a 400, which is what an
+    /// empty wallet returns, though other refusals look the same. Otherwise a
+    /// wallet event name from the courier's webhook, with no shipment.
+    pub event: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
 }
@@ -371,6 +459,91 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .fetch_all(db)
     .await
     .context("list payout amount mismatches")?;
+    let shipments_attention = sqlx::query_as::<_, ShipmentAttention>(&format!(
+        "WITH above AS ( \
+             SELECT DISTINCT subject_id FROM audit_log \
+             WHERE action = $3 AND at > now() - make_interval(days => $2)), \
+         late AS ( \
+             SELECT DISTINCT ON (subject_id) subject_id, detail->>'provider_order_id' AS label \
+             FROM audit_log \
+             WHERE action = $4 AND detail->>'provider_order_id' IS NOT NULL \
+             ORDER BY subject_id, at DESC, id DESC), \
+         unknown AS ( \
+             SELECT DISTINCT ON (detail->>'provider_order_id') \
+                    detail->>'provider_order_id' AS label, detail->>'state' AS state, at \
+             FROM audit_log \
+             WHERE action = $5 AND at > now() - make_interval(days => $2) \
+             ORDER BY detail->>'provider_order_id', at DESC, id DESC) \
+         SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
+                o.status::text AS order_status, s.provider_order_id, \
+                NULL::text AS courier_state, s.quoted_kobo, \
+                s.charged_kobo, s.attempts, s.last_error, s.attention, \
+                above.subject_id IS NOT NULL AS price_above_quote, \
+                late.label AS late_provider_order_id, s.updated_at \
+         FROM shipments s JOIN orders o ON o.id = s.order_id \
+              LEFT JOIN above ON above.subject_id = s.id \
+              LEFT JOIN late ON late.subject_id = s.id \
+         WHERE s.status IN ('booking_unknown', 'cancel_failed') \
+            OR s.attention IS NOT NULL \
+            OR (s.status = 'booking_failed' \
+                AND o.status NOT IN ('refund_pending', 'refunded', 'cancelled')) \
+            OR (s.status = 'booking' AND o.status IN ('refund_pending', 'refunded')) \
+            OR (s.status = 'cancel_pending' \
+                AND s.cancel_requested_at < now() - interval '{CANCEL_STUCK_AFTER}') \
+            OR (s.provider_order_id IS NOT NULL AND s.charged_kobo IS NULL) \
+            OR above.subject_id IS NOT NULL \
+            OR late.subject_id IS NOT NULL \
+         UNION ALL \
+         SELECT s.id, o.id, o.store_id, COALESCE(s.status::text, 'no_shipment'), \
+                o.status::text, s.provider_order_id, NULL, \
+                COALESCE(s.quoted_kobo, o.courier_quote_kobo), s.charged_kobo, \
+                COALESCE(s.attempts, 0), s.last_error, 'pickup_overdue', false, NULL, a.at \
+         FROM audit_log a JOIN orders o ON o.id = a.subject_id AND a.subject_type = 'order' \
+              LEFT JOIN shipments s ON s.order_id = o.id \
+         WHERE a.action = $6 AND o.status = 'paid' \
+         UNION ALL \
+         SELECT NULL, NULL, NULL, 'unknown_label', NULL, u.label, u.state, NULL, NULL, 0, \
+                NULL, 'unknown_label', false, NULL, u.at \
+         FROM unknown u \
+         WHERE NOT EXISTS (SELECT 1 FROM shipments s WHERE s.provider_order_id = u.label) \
+         ORDER BY updated_at, id LIMIT $1"
+    ))
+    .bind(MAX_LIMIT)
+    .bind(ALERT_WINDOW_DAYS)
+    .bind(PRICE_ABOVE_QUOTE)
+    .bind(LATE_OUTCOME)
+    .bind(UNKNOWN_SHIPMENT)
+    .bind(PICKUP_OVERDUE)
+    .fetch_all(db)
+    .await
+    .context("list attention shipments")?;
+    let orders_attention = sqlx::query_as::<_, OrderAttention>(
+        "SELECT o.id AS order_id, o.store_id, 'no_delivery_method' AS attention, o.paid_at \
+         FROM orders o WHERE o.status = 'paid' AND o.delivery_method IS NULL \
+         UNION ALL \
+         SELECT o.id, o.store_id, 'quote_reused', o.paid_at \
+         FROM orders o WHERE o.status = 'paid' AND EXISTS ( \
+             SELECT 1 FROM audit_log a WHERE a.action = $2 AND a.subject_type = 'order' \
+                AND a.subject_id = o.id) \
+         ORDER BY paid_at, order_id LIMIT $1",
+    )
+    .bind(MAX_LIMIT)
+    .bind(QUOTE_REUSED)
+    .fetch_all(db)
+    .await
+    .context("list orders without a delivery method")?;
+    let wallet_alerts = sqlx::query_as::<_, WalletAlert>(
+        "SELECT subject_id AS shipment_id, detail->>'event' AS event, at \
+         FROM audit_log \
+         WHERE action = $3 AND at > now() - make_interval(days => $2) \
+         ORDER BY at DESC, id DESC LIMIT $1",
+    )
+    .bind(MAX_LIMIT)
+    .bind(ALERT_WINDOW_DAYS)
+    .bind(WALLET_ALERT)
+    .fetch_all(db)
+    .await
+    .context("list wallet alerts")?;
     Ok(Reconciliation {
         payouts,
         refunds,
@@ -379,6 +552,9 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
         late_provider_outcomes,
         payout_amount_mismatches,
         blocked_payouts,
+        shipments_attention,
+        orders_attention,
+        wallet_alerts,
         limit: MAX_LIMIT,
     })
 }
