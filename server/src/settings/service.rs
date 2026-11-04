@@ -175,8 +175,7 @@ impl SettingsPatch {
             5000,
         )?;
         in_range("courier_category_id", self.courier_category_id, 1, i64::MAX)?;
-        // Moving it earlier is the owner's call; far into the future would
-        // quietly switch the job's refunds off.
+        // Far into the future would quietly switch the job's refunds off.
         if let Some(from) = self.ship_deadline_enforce_from
             && from > OffsetDateTime::now_utc() + time::Duration::days(MAX_ENFORCE_FROM_AHEAD_DAYS)
         {
@@ -239,6 +238,16 @@ pub async fn update(db: &PgPool, actor: Uuid, patch: SettingsPatch) -> Result<Se
         .context("lock platform_settings")?;
     if old.updated_at != expected {
         return Err(AppError::Conflict("stale_settings"));
+    }
+    // Forward-only: moving the start date back would pull a backlog of orders
+    // (whose sellers could not act) into the job's refunds and strikes. Checked
+    // against the locked row. A wider window takes a deliberate SQL change.
+    if let Some(from) = patch.ship_deadline_enforce_from
+        && from < old.ship_deadline_enforce_from
+    {
+        return Err(AppError::Validation(
+            "ship_deadline_enforce_from cannot move earlier".into(),
+        ));
     }
     let backstop = patch.backstop_days.unwrap_or(old.backstop_days);
     let release = patch.release_after_hours.unwrap_or(old.release_after_hours);

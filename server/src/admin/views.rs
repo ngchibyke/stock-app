@@ -497,7 +497,7 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
                 o.status::text, s.provider_order_id, NULL, \
                 COALESCE(s.quoted_kobo, o.courier_quote_kobo), s.charged_kobo, \
                 COALESCE(s.attempts, 0), s.last_error, 'pickup_overdue', false, NULL, a.at \
-         FROM audit_log a JOIN orders o ON o.id = a.subject_id \
+         FROM audit_log a JOIN orders o ON o.id = a.subject_id AND a.subject_type = 'order' \
               LEFT JOIN shipments s ON s.order_id = o.id \
          WHERE a.action = $6 AND o.status = 'paid' \
          UNION ALL \

@@ -551,7 +551,7 @@ async fn flag_pickup_overdue(state: &AppState) -> Result<u32, AppError> {
            AND o.ready_at IS NOT NULL \
            AND o.ship_by + interval '{PICKUP_OVERDUE_AFTER}' < now() \
            AND NOT EXISTS (SELECT 1 FROM audit_log a \
-                           WHERE a.action = '{PICKUP_OVERDUE}' AND a.subject_id = o.id) \
+                           WHERE a.action = '{PICKUP_OVERDUE}' AND a.subject_type = 'order' AND a.subject_id = o.id) \
          ORDER BY o.ship_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED"
     ))
     .bind(BATCH)

@@ -629,7 +629,8 @@ async fn paid_order_without_delivery_method_is_excluded_and_listed(pool: PgPool)
     assert_eq!(items[0]["attention"], "no_delivery_method");
 }
 
-/// The owner can move the enforcement date, but not far into the future.
+/// The owner can move the enforcement date later, never earlier, and not
+/// more than 30 days ahead.
 #[sqlx::test]
 async fn enforce_from_setting_is_validated_and_audited(pool: PgPool) {
     let app = TestApp::new(pool).await;
@@ -663,7 +664,13 @@ async fn enforce_from_setting_is_validated_and_audited(pool: PgPool) {
     let res = patch(rfc(time::Duration::days(29))).await;
     assert_eq!(res.status, 200, "{}", res.json);
     assert!(res.json["ship_deadline_enforce_from"].is_string());
+    // Forward-only: an earlier date is refused, and nothing is stored.
+    let stored = "SELECT ship_deadline_enforce_from::text FROM platform_settings";
+    let before = text(&app, stored).await;
     let res = patch(rfc(time::Duration::days(-3))).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(text(&app, stored).await, before);
+    let res = patch(rfc(time::Duration::days(30))).await;
     assert_eq!(res.status, 200, "{}", res.json);
     assert_eq!(
         count(
@@ -678,6 +685,48 @@ async fn enforce_from_setting_is_validated_and_audited(pool: PgPool) {
         .request(Method::GET, "/admin/settings", None, Some(&owner))
         .await;
     assert!(get.json["ship_deadline_enforce_from"].is_string());
+}
+
+/// A PATCH cannot pull a backlog into the job: with the date ahead of an
+/// order's payment, moving it back is refused and the order is left alone.
+#[sqlx::test]
+async fn enforce_from_patch_cannot_pull_in_a_backlog(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    app.fake.set_refund_supported(true);
+    let f = paid_order(&app).await;
+    exec(
+        &app,
+        "UPDATE orders SET ship_by = now() - interval '1 hour'",
+    )
+    .await;
+    exec(
+        &app,
+        "UPDATE platform_settings SET ship_deadline_enforce_from = now() + interval '1 hour'",
+    )
+    .await;
+    let owner = app.owner_token().await;
+    let version = app
+        .request(Method::GET, "/admin/settings", None, Some(&owner))
+        .await
+        .json["updated_at"]
+        .clone();
+    let back = (OffsetDateTime::now_utc() - time::Duration::days(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let res = app
+        .request(
+            Method::PATCH,
+            "/admin/settings",
+            Some(json!({ "ship_deadline_enforce_from": back, "expected_updated_at": version })),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    let r = tick(&app).await;
+    assert_eq!((r.auto_cancelled, r.failed), (0, 0));
+    assert_eq!(order_status(&app, f.order_id).await, "paid");
+    assert_eq!(count(&app, "SELECT count(*) FROM seller_strikes").await, 0);
+    assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 0);
 }
 #[sqlx::test]
 async fn ship_deadline_48h_refunds_and_strikes(pool: PgPool) {
