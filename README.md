@@ -25,7 +25,7 @@ Payments and escrow (part 2):
 
 Delivery and tracking (part 3):
 
-- **Addresses and coverage:** buyers save delivery addresses and pick one of the six FCT area councils; checkout works only inside the FCT ("Coming to your city soon" elsewhere). The NIPOST postcode is optional and checked when given.
+- **Addresses and coverage:** buyers save delivery addresses and pick one of the six FCT area councils; checkout works only inside the FCT ("Coming to your city soon" elsewhere). The NIPOST postcode is optional and format-checked when given until the NIPOST adapter exists.
 - **Delivery options:** at checkout each store offers its own delivery at a flat fee and/or up to three Shipbubble courier rates. Quotes are held on the server, single-use, bound to the cart and address, and expire after 30 minutes. The courier fee goes to the platform (which pays Shipbubble); a self-delivery fee goes to the seller. The 5% cut is on items only.
 - **Next-day promise:** a 6pm (owner-configurable) cut-off, skipping Sundays and bank holidays, fixed at payment.
 - **Self-delivery:** the seller marks picked up, then out for delivery. The buyer sees a 6-digit handover code only then; the seller sees the buyer's phone and address only then, and each reveal is audited. The seller marks delivered with the code, which counts as the buyer's confirmation and releases the money. Five wrong codes lock entry for an hour.
@@ -94,14 +94,11 @@ These are tracked in the roadmap:
 - Rate limits per network address on sign-up and sign-in.
 - A restricted production database role.
 - Legal review of the escrow setup, and data-protection (DPO) review.
-- The ship-deadline job is on (migration 0030) and only refunds or strikes orders paid after `platform_settings.ship_deadline_enforce_from`, which that migration sets to the moment it ran. After deploying, check the owner's reconciliation view: `orders_attention` lists paid orders with no delivery method (the job never touches them), and `shipments_attention` lists ready courier orders whose pickup is overdue.
+- The ship-deadline job is on (migration 0030) and only refunds or strikes orders paid at or after `platform_settings.ship_deadline_enforce_from`, which that migration sets to the moment it ran. After deploying, check the owner's reconciliation view: `orders_attention` lists paid orders with no delivery method (the job never touches them), and `shipments_attention` lists ready courier orders whose pickup is overdue.
 - Confirm with Mono which unit (kobo or naira) each product's `amount` fields use (`MONO_DIRECTPAY_AMOUNT_UNIT`, `MONO_DISBURSE_AMOUNT_UNIT`), then run a sandbox smoke test of a payment, a payout and a webhook before switching to live keys.
 - DPO review of whether the Owner should keep seeing buyer display names on order reads. Support already does not, and every staff read is audited.
-
-Delivery (part 3), also in the roadmap:
-
 - Do not switch courier delivery on for real stores until an owner re-book path exists (plan 6). Today an empty Shipbubble wallet can fail ready orders for good: they stay paid with the buyer's money held until someone acts.
-- Run a Shipbubble sandbox smoke test before live keys: the amount unit (`SHIPBUBBLE_AMOUNT_UNIT`, naira or kobo), the webhook signing key per environment and the exact bytes signed, address validation, the status field on `shipment.cancelled`, whether a used `request_token` can book again, and what a 429 means.
+- Run a Shipbubble sandbox smoke test before live keys: the amount unit (`SHIPBUBBLE_AMOUNT_UNIT`, naira or kobo), the webhook signing key per environment and the exact bytes signed, address validation, the status field on `shipment.cancelled`, whether a used `request_token` can book again, what a 429 means, and what an insufficient wallet returns (it may look like any other 400).
 - Set `SHIPBUBBLE_CONTACT_EMAIL` (a platform operations address, sent when a contact has no email) and fund the Shipbubble wallet. The server refuses an `sb_prod` key outside production and a production start without the amount unit.
 - The NIPOST postcode adapter waits on API access; until then the postcode is only format-checked.
 - Accountant: is delivery vatable at 7.5%, and who is merchant of record for courier delivery.
