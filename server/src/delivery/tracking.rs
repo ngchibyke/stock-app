@@ -1,15 +1,17 @@
 //! `GET /orders/{id}/tracking`: a fixed timeline, who to call, and (for the
 //! buyer) the handover code. Mostly a question of who sees what, and when.
 //!
-//! - **Audience.** The order's buyer, or the owner of its store (never for a
-//!   `pending_payment` order). Everyone else, staff included, and any foreign or
-//!   malformed id, gets 404.
+//! - **Audience.** The order's buyer, or the owner of its store (only once the
+//!   order has been paid, so never for a `pending_payment` order or one cancelled
+//!   unpaid). Everyone else, staff included, and any foreign or malformed id,
+//!   gets 404.
 //! - **Every gate is read from the database on each request** (status, delivery
 //!   method, who is asking). Nothing is cached; the route sets `no-store`.
 //! - **Buyer** sees the courier's name and phone (courier orders) or the store's
 //!   name and business phone (self-delivery, once `out_for_delivery`), never
-//!   after delivery; the courier's tracking link when it is https; the handover
-//!   code only while `out_for_delivery`.
+//!   after delivery; the courier's tracking link when it is https, also not
+//!   after delivery, since the courier's page may show the rider's details; the
+//!   handover code only while `out_for_delivery`.
 //! - **Seller** sees `delivery_area` only, except on a self-delivery order that
 //!   is `out_for_delivery`: then the buyer's recipient name, phone, address line
 //!   and landmark, decrypted from the order's address snapshot. A courier order
@@ -31,7 +33,7 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{addresses::DeliveryAddress, area::AreaCouncil, promise};
-use crate::{AppState, audit, crypto::FieldCipher, error::AppError, stores::service};
+use crate::{AppState, audit, crypto::FieldCipher, error::AppError};
 
 /// Audit action for a contact reveal.
 pub const CONTACT_REVEALED: &str = "order.contact_revealed";
@@ -183,7 +185,7 @@ pub async fn get(state: &AppState, viewer: Uuid, order_id: Uuid) -> Result<Track
          JOIN checkouts c ON c.id = o.checkout_id \
          JOIN stores s ON s.id = o.store_id \
          WHERE o.id = $1 AND (o.buyer_id = $2 \
-               OR (s.owner_id = $2 AND o.status <> 'pending_payment'))",
+               OR (s.owner_id = $2 AND COALESCE(o.paid_at, c.paid_at) IS NOT NULL))",
     )
     .bind(order_id)
     .bind(viewer)
@@ -295,12 +297,9 @@ fn handover_code_visible(f: &Facts) -> bool {
     f.is_self() && f.status == "out_for_delivery"
 }
 
-/// https only, and only for a buyer whose order is still live.
+/// https only, and only until delivery, like the courier's contact.
 fn tracking_url(f: &Facts, shipment: Option<&ShipmentFacts>) -> Option<String> {
-    if matches!(
-        f.status.as_str(),
-        "cancelled" | "refund_pending" | "refunded"
-    ) {
+    if !courier_on_the_way(f) {
         return None;
     }
     let s = shipment.filter(|s| s.is_live())?;
@@ -308,6 +307,10 @@ fn tracking_url(f: &Facts, shipment: Option<&ShipmentFacts>) -> Option<String> {
         .as_deref()
         .filter(|u| u.starts_with("https://"))
         .map(str::to_owned)
+}
+
+fn courier_on_the_way(f: &Facts) -> bool {
+    matches!(f.status.as_str(), "paid" | "picked_up" | "out_for_delivery")
 }
 
 async fn load_shipment(db: &PgPool, order_id: Uuid) -> Result<Option<ShipmentFacts>, AppError> {
@@ -333,7 +336,7 @@ pub(crate) async fn reveal_delivery_contact(
     shipment: Option<&ShipmentFacts>,
 ) -> Result<Option<DeliveryContact>, AppError> {
     if f.is_courier() {
-        if !matches!(f.status.as_str(), "paid" | "picked_up" | "out_for_delivery") {
+        if !courier_on_the_way(f) {
             return Ok(None);
         }
         let Some(s) = shipment.filter(|s| s.is_live()) else {
@@ -353,12 +356,7 @@ pub(crate) async fn reveal_delivery_contact(
         }));
     }
     if f.is_self() && f.status == "out_for_delivery" {
-        let phone = match service::delivery_profile(db, cipher, f.store_id).await {
-            Ok(p) => p.business_phone,
-            // A deleted store: nothing to call.
-            Err(AppError::NotFound) => None,
-            Err(e) => return Err(e),
-        };
+        let phone = store_phone(db, cipher, f.store_id).await?;
         if phone.is_none() {
             return Ok(None);
         }
@@ -368,6 +366,23 @@ pub(crate) async fn reveal_delivery_contact(
         }));
     }
     Ok(None)
+}
+
+/// The store's business phone and nothing else of its profile. A deleted store
+/// has nothing to call.
+async fn store_phone(
+    db: &PgPool,
+    cipher: &FieldCipher,
+    store_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let enc: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT business_phone_enc FROM stores WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(store_id)
+    .fetch_optional(db)
+    .await
+    .context("load store phone")?;
+    enc.flatten().map(|b| cipher.decrypt(&b)).transpose()
 }
 
 /// The one place the buyer's contact reaches a seller. Only a self-delivery

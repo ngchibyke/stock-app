@@ -419,7 +419,13 @@ async fn contact_hidden_after_delivery(pool: PgPool) {
         track(&app, f.order_id, &f.buyer).await.json["contact"].is_object(),
         "visible while out for delivery"
     );
-    for status in ["delivered", "completed", "cancelled", "refunded"] {
+    for status in [
+        "delivered",
+        "completed",
+        "cancelled",
+        "refund_pending",
+        "refunded",
+    ] {
         set_status(&app, f.order_id, status).await;
         let buyer = track(&app, f.order_id, &f.buyer).await;
         assert!(buyer.json.get("contact").is_none(), "{status}");
@@ -434,6 +440,102 @@ async fn contact_hidden_after_delivery(pool: PgPool) {
     assert!(track(&app, g.order_id, &g.buyer).await.json["contact"].is_object());
     set_status(&app, g.order_id, "delivered").await;
     let res = track(&app, g.order_id, &g.buyer).await;
+    assert!(res.json.get("contact").is_none(), "{}", res.json);
+}
+
+/// The courier's hosted page may show the rider: the link goes when the contact does.
+#[sqlx::test]
+async fn tracking_url_hidden_from_delivery_on(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app, "courier").await;
+    book(&app, f.order_id, Some("https://track.example/abc")).await;
+    for status in ["paid", "picked_up", "out_for_delivery"] {
+        set_status(&app, f.order_id, status).await;
+        let res = track(&app, f.order_id, &f.buyer).await;
+        assert!(res.json["tracking_url"].is_string(), "{status}");
+    }
+    for status in [
+        "delivered",
+        "completed",
+        "cancelled",
+        "refund_pending",
+        "refunded",
+    ] {
+        set_status(&app, f.order_id, status).await;
+        let res = track(&app, f.order_id, &f.buyer).await;
+        assert!(res.json.get("tracking_url").is_none(), "{status}");
+    }
+}
+
+/// A shipment that is not live shows nothing, though the order is still `paid`.
+#[sqlx::test]
+async fn nothing_shown_for_a_shipment_that_is_not_live(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app, "courier").await;
+    book(&app, f.order_id, Some("https://track.example/abc")).await;
+    for status in ["booking_unknown", "cancel_pending", "cancelled"] {
+        sqlx::query("UPDATE shipments SET status = $1::shipment_status")
+            .bind(status)
+            .execute(&app.pool)
+            .await
+            .unwrap();
+        let res = track(&app, f.order_id, &f.buyer).await;
+        assert!(res.json.get("contact").is_none(), "{status}");
+        assert!(res.json.get("tracking_url").is_none(), "{status}");
+    }
+}
+
+#[sqlx::test]
+async fn seller_gets_404_until_the_order_is_paid(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let listing = app
+        .make_active_store_with_product(SELLER, "Mama Put", 10_000, 5)
+        .await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    app.set_cart(&buyer, listing.variant_id, 1).await;
+    let res = app.checkout(&buyer, METHOD).await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id = res.json["orders"][0]["order_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(track(&app, &id, &listing.seller_token).await.status, 404);
+    assert_eq!(track(&app, &id, &buyer).await.status, 200);
+
+    // Cancelled without ever being paid, as an expired checkout leaves it.
+    let checkout: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    assert!(
+        server::checkout::expire_and_restore(&mut tx, checkout)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(track(&app, &id, &listing.seller_token).await.status, 404);
+    assert_eq!(track(&app, &id, &buyer).await.status, 200);
+}
+
+/// A corrupt pickup address is no reason to fail the buyer's tracking: only the
+/// phone is read. A deleted store simply has nothing to call.
+#[sqlx::test]
+async fn store_contact_reads_only_the_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = out_for_delivery(&app).await;
+    sqlx::query("UPDATE stores SET pickup_address_enc = '\\x00'::bytea")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let res = track(&app, f.order_id, &f.buyer).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(res.json["contact"]["phone"], STORE_PHONE_E164);
+    assert!(res.json["handover_code"].is_string());
+
+    sqlx::query("UPDATE stores SET deleted_at = now()")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let res = track(&app, f.order_id, &f.buyer).await;
+    assert_eq!(res.status, 200, "{}", res.json);
     assert!(res.json.get("contact").is_none(), "{}", res.json);
 }
 
@@ -538,6 +640,37 @@ async fn held_flag_is_for_the_seller_only(pool: PgPool) {
             .get("held")
             .is_none()
     );
+}
+
+/// A hold does not gate the contact: a held order may still be delivered.
+#[sqlx::test]
+async fn held_order_out_for_delivery_keeps_its_contacts(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = out_for_delivery(&app).await;
+    sqlx::query("UPDATE orders SET held_at = now(), hold_reason = 'test'")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let seller = track(&app, f.order_id, &f.seller).await;
+    assert_eq!(seller.json["held"], true);
+    assert_eq!(seller.json["buyer_contact"]["phone"], BUYER_PHONE);
+    let buyer = track(&app, f.order_id, &f.buyer).await;
+    assert!(buyer.json.get("held").is_none());
+    assert_eq!(buyer.json["contact"]["phone"], STORE_PHONE_E164);
+    assert!(buyer.json["handover_code"].is_string());
+}
+
+/// The reason for the advisory lock: first views at once write one row.
+#[sqlx::test]
+async fn concurrent_first_views_audit_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = out_for_delivery(&app).await;
+    let view = || track(&app, f.order_id, &f.buyer);
+    let (a, b, c, d) = tokio::join!(view(), view(), view(), view());
+    for res in [a, b, c, d] {
+        assert_eq!(res.status, 200, "{}", res.json);
+    }
+    assert_eq!(reveal_rows(&app, f.order_id).await.len(), 1);
 }
 
 #[sqlx::test]
