@@ -29,6 +29,18 @@ impl Category {
             Category::Unreviewable => "unreviewable",
         }
     }
+
+    /// Reads back a stored `as_str` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "off_platform" => Category::OffPlatform,
+            "scam" => Category::Scam,
+            "abuse" => Category::Abuse,
+            "rude" => Category::Rude,
+            "unreviewable" => Category::Unreviewable,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

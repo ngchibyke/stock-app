@@ -139,15 +139,15 @@ pub struct Page<T> {
 }
 
 /// Keyset cursor `(created_at, id)`, opaque to clients.
-struct Cursor(OffsetDateTime, Uuid);
+pub(crate) struct Cursor(pub(crate) OffsetDateTime, pub(crate) Uuid);
 
 impl Cursor {
-    fn encode(&self) -> Result<String, AppError> {
+    pub(crate) fn encode(&self) -> Result<String, AppError> {
         let ts = self.0.format(&Rfc3339).context("format cursor")?;
         Ok(URL_SAFE_NO_PAD.encode(format!("{ts}|{}", self.1)))
     }
 
-    fn decode(s: &str) -> Result<Self, AppError> {
+    pub(crate) fn decode(s: &str) -> Result<Self, AppError> {
         let bad = || AppError::Validation("before is not a valid cursor".into());
         let raw = URL_SAFE_NO_PAD.decode(s).map_err(|_| bad())?;
         let raw = String::from_utf8(raw).map_err(|_| bad())?;

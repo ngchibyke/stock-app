@@ -3,6 +3,7 @@ pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod cart;
+pub mod chat;
 pub mod checkout;
 pub mod config;
 pub mod couriers;
@@ -104,6 +105,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(cart::routes::router())
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
+        .merge(chat::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())
