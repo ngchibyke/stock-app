@@ -37,6 +37,9 @@ pub enum AppError {
     /// 403 `phone_unverified`, carrying the verification id to use with the code sent by SMS.
     #[error("phone unverified")]
     PhoneUnverified(Redacted),
+    /// 403 `muted`, carrying when the mute ends.
+    #[error("muted")]
+    Muted(time::OffsetDateTime),
     #[error("not found")]
     NotFound,
     #[error("method not allowed")]
@@ -101,6 +104,15 @@ impl IntoResponse for AppError {
             AppError::PhoneUnverified(Redacted(verification_id)) => {
                 let mut payload = body("phone_unverified", "Verify your phone number to continue");
                 payload["verification_id"] = json!(verification_id);
+                (StatusCode::FORBIDDEN, payload)
+            }
+            AppError::Muted(until) => {
+                let mut payload = body("muted", "You can't post right now");
+                payload["muted_until"] = json!(
+                    until
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default()
+                );
                 (StatusCode::FORBIDDEN, payload)
             }
             AppError::NotFound => (StatusCode::NOT_FOUND, body("not_found", "Not found")),

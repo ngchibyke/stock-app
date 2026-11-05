@@ -8,5 +8,7 @@
 pub mod claude;
 pub mod fake;
 pub mod filter;
+pub mod pipeline;
+pub mod strikes;
 pub mod tone;
 pub mod words;
