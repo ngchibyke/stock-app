@@ -50,6 +50,8 @@ pub struct AppState {
     pub postcodes: Arc<dyn delivery::postcode::PostcodeProvider>,
     /// Courier provider (Shipbubble); `None` when no key is configured.
     pub courier: Option<Arc<dyn couriers::CourierProvider>>,
+    /// Tone check for chat and reviews. Production always has a real one.
+    pub tone: Arc<dyn moderation::tone::ToneChecker>,
 }
 
 async fn health() -> Json<Value> {

@@ -90,6 +90,8 @@ pub struct TestApp {
     pub fake: Arc<FakeProvider>,
     /// The installed courier provider (always a fake).
     pub courier: Arc<server::couriers::fake::FakeCourier>,
+    /// The installed tone check (always a fake; answers clean by default).
+    pub tone: Arc<server::moderation::fake::FakeTone>,
 }
 
 impl TestApp {
@@ -105,6 +107,7 @@ impl TestApp {
         let mut providers = ProviderRegistry::new();
         providers.register(fake.clone());
         let courier = Arc::new(server::couriers::fake::FakeCourier::new());
+        let tone = Arc::new(server::moderation::fake::FakeTone::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -115,6 +118,7 @@ impl TestApp {
             verify_gate: Arc::new(gate),
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
             courier: Some(courier.clone()),
+            tone: tone.clone(),
         };
         Self {
             router: build_app(state.clone()),
@@ -123,6 +127,7 @@ impl TestApp {
             otp,
             fake,
             courier,
+            tone,
         }
     }
 

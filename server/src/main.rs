@@ -13,6 +13,10 @@ use server::{
     couriers::shipbubble::ShipbubbleCourier,
     crypto::FieldCipher,
     escrow::jobs,
+    moderation::{
+        claude::ClaudeTone,
+        tone::{NoTone, ToneChecker},
+    },
     payments::{ProviderRegistry, mono::MonoProvider},
     phone::normalize_ng_phone,
     pool_options,
@@ -62,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     // provider would fail every checkout. Admin commands still run.
     if matches!(command, Command::Serve) {
         require_payment_provider(&config.app_env, config.mono.is_some())?;
+        require_moderation(&config.app_env, config.claude.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -90,6 +95,14 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    let tone: Arc<dyn ToneChecker> = match config.claude.clone() {
+        Some(cfg) => Arc::new(ClaudeTone::new(cfg)?),
+        None => {
+            tracing::warn!("ANTHROPIC_API_KEY not set: tone checks pass everything");
+            Arc::new(NoTone)
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -103,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         // REVISIT(nipost): swap in a real adapter once NIPOST's API is documented.
         postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
         courier,
+        tone,
     };
 
     match command {
@@ -188,6 +202,15 @@ fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Res
     Ok(())
 }
 
+/// Production refuses to start without a tone check: chat would deliver
+/// messages nobody checked.
+fn require_moderation(app_env: &str, claude_configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !claude_configured {
+        bail!("APP_ENV is production but no tone check is configured (set ANTHROPIC_API_KEY)");
+    }
+    Ok(())
+}
+
 fn flag(args: &[String], name: &str) -> anyhow::Result<String> {
     let pos = args
         .iter()
@@ -250,6 +273,14 @@ mod tests {
         for env in ["development", "test", "staging"] {
             assert!(require_payment_provider(env, false).is_ok(), "{env}");
         }
+    }
+
+    #[test]
+    fn production_requires_anthropic_key() {
+        let err = require_moderation("production", false).unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+        assert!(require_moderation("production", true).is_ok());
+        assert!(require_moderation("development", false).is_ok());
     }
 
     #[test]

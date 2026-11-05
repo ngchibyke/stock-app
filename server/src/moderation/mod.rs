@@ -5,5 +5,8 @@
 //! checks ([`filter`]) run first so that a phone or account number is stopped
 //! before anything reaches a third party.
 
+pub mod claude;
+pub mod fake;
 pub mod filter;
+pub mod tone;
 pub mod words;
