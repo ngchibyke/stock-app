@@ -1744,6 +1744,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "unicode-normalization",
  "uuid",
  "wiremock",
 ]

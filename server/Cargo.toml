@@ -23,6 +23,7 @@ thiserror = "2"
 time = { version = "0.3", features = ["parsing", "formatting", "serde-well-known"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
 tokio-util = "0.7"
+unicode-normalization = "0.1"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

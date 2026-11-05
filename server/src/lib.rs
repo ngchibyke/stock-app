@@ -13,6 +13,7 @@ pub mod escrow;
 pub mod extract;
 pub mod ledger;
 pub mod limits;
+pub mod moderation;
 pub mod money;
 pub mod orders;
 pub mod payments;
