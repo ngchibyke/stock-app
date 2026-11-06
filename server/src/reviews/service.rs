@@ -150,7 +150,7 @@ async fn moderate(
     }))
 }
 
-async fn begin(db: &PgPool) -> Result<Transaction<'static, Postgres>, AppError> {
+pub(crate) async fn begin(db: &PgPool) -> Result<Transaction<'static, Postgres>, AppError> {
     let mut tx = db.begin().await.context("begin")?;
     sqlx::query(LOCK_TIMEOUT)
         .execute(&mut *tx)

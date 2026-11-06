@@ -10,7 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Owner, Staff, holidays, money, note, orders, parse_id, provider_reference,
+    Owner, Staff, holidays, moderation, money, note, orders, parse_id, provider_reference,
     views::{self, AdminOrderView, CheckoutView, Items, PayoutView, Reconciliation, RefundView},
 };
 use crate::{
@@ -44,6 +44,7 @@ pub fn router() -> Router<AppState> {
             "/admin/bank-holidays/{day}",
             put(set_holiday).delete(remove_holiday),
         )
+        .merge(moderation::router())
 }
 
 #[derive(Deserialize)]

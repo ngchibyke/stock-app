@@ -272,3 +272,22 @@ pub async fn active_strikes(conn: &mut PgConnection, user: Uuid) -> Result<i64, 
     .context("count strikes")?;
     Ok(count)
 }
+
+/// After a strike is voided: lifts a mute, or the owner-review mark, that the
+/// remaining strikes no longer earn. The caller holds the user lock.
+pub async fn recalculate_mute(conn: &mut PgConnection, user: Uuid) -> Result<(), AppError> {
+    let active = active_strikes(conn, user).await?;
+    sqlx::query(
+        "UPDATE user_moderation m SET \
+             muted_until = CASE WHEN $2 < p.mute_after_strikes THEN NULL ELSE m.muted_until END, \
+             owner_review_at = CASE WHEN $2 < p.owner_review_after_strikes THEN NULL \
+                                    ELSE m.owner_review_at END \
+         FROM platform_settings p WHERE p.id AND m.user_id = $1",
+    )
+    .bind(user)
+    .bind(active)
+    .execute(&mut *conn)
+    .await
+    .context("recalculate mute")?;
+    Ok(())
+}
