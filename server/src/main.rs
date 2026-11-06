@@ -9,6 +9,7 @@ use server::{
         routes::{create_owner_account, validate_display_name},
     },
     build_app,
+    chat::hub::ChatHub,
     config::Config,
     couriers::shipbubble::ShipbubbleCourier,
     crypto::FieldCipher,
@@ -95,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    let chat_hub = Arc::new(ChatHub::new());
     let tone: Arc<dyn ToneChecker> = match config.claude.clone() {
         Some(cfg) => Arc::new(ClaudeTone::new(cfg)?),
         None => {
@@ -117,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
         courier,
         tone,
+        chat_hub: chat_hub.clone(),
     };
 
     match command {
@@ -139,6 +142,7 @@ async fn serve(state: AppState, config: &Config) -> anyhow::Result<()> {
         shutdown_signal().await;
         tracing::info!("shutdown signal received, draining connections");
         cancel_jobs.cancel();
+        chat_hub.stop();
         let _ = signalled_tx.send(());
     });
     // Idle keep-alive connections can stall the drain forever, so bound it once the signal fires.

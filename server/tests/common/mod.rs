@@ -119,6 +119,7 @@ impl TestApp {
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
             courier: Some(courier.clone()),
             tone: tone.clone(),
+            chat_hub: Arc::new(server::chat::hub::ChatHub::new()),
         };
         Self {
             router: build_app(state.clone()),

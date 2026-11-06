@@ -53,6 +53,8 @@ pub struct AppState {
     pub courier: Option<Arc<dyn couriers::CourierProvider>>,
     /// Tone check for chat and reviews. Production always has a real one.
     pub tone: Arc<dyn moderation::tone::ToneChecker>,
+    /// Live pushes to open sockets.
+    pub chat_hub: Arc<chat::hub::ChatHub>,
 }
 
 async fn health() -> Json<Value> {
