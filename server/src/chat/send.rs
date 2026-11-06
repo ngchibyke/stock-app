@@ -23,7 +23,7 @@ use crate::{
     limits::{CHAT_SENDS_PER_DAY, CHAT_SENDS_PER_MINUTE, MAX_CHAT_CHARS},
     moderation::{
         filter::Category,
-        pipeline::{FlagSeverity, Verdict, judge, offline_block, reason_copy},
+        pipeline::{FlagSeverity, Source, Verdict, judge, offline_block, reason_copy},
         strikes::{self, NewFlag, Surface, ensure_can_post, record_flag},
     },
 };
@@ -146,7 +146,12 @@ pub async fn send_suggested(
         return Err(AppError::NotFound);
     };
     if used {
-        return Err(AppError::Conflict("suggestion_used"));
+        // A retry that raced the first send answers with what that send did.
+        tx.rollback().await.context("rollback")?;
+        return match stored(state, &access, user, client_message_id).await? {
+            Some(first) => Ok(first),
+            None => Err(AppError::Conflict("suggestion_used")),
+        };
     }
     if expired {
         return Err(AppError::Conflict("suggestion_expired"));
@@ -394,6 +399,9 @@ pub(crate) async fn apply_in(
     })
 }
 
+/// Stored as the flag's original when a held body cannot be decrypted.
+const UNREADABLE: &str = "[unreadable]";
+
 /// Applies a late verdict to a held message, and tells both sides after commit.
 /// The status is re-checked under the row lock: a row that moved on answers
 /// with what already happened, and is not touched or announced again.
@@ -417,7 +425,24 @@ pub async fn apply_verdict(
         tx.rollback().await.context("rollback")?;
         return first_outcome(state, &access, sender_id, client_message_id).await;
     };
-    let text = state.cipher.decrypt(&encrypted)?;
+    let text = match state.cipher.decrypt(&encrypted) {
+        Ok(text) => text,
+        // Giving up must not depend on the body, or the row would stay held
+        // and hold back everything this sender writes after it.
+        Err(_)
+            if matches!(
+                verdict,
+                Verdict::Block {
+                    source: Source::System,
+                    ..
+                }
+            ) =>
+        {
+            tracing::warn!(%message_id, "held message body unreadable; withholding it");
+            UNREADABLE.to_string()
+        }
+        Err(e) => return Err(e),
+    };
     let pending = Pending {
         id: message_id,
         conversation_id,

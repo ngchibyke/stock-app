@@ -80,6 +80,7 @@ pub fn scan(text: &str) -> Scan {
     let norm = normalise(text);
     let chunks = digit_chunks(&norm);
     if has_phone(&chunks)
+        || has_phone(&digit_chunks(&phone_form(&norm)))
         || has_account(&chunks, &norm)
         || has_phrase(&norm, OFF_PLATFORM_PHRASES)
         || LINK_MARKERS.iter().any(|m| norm.contains(m))
@@ -99,26 +100,37 @@ pub fn scan(text: &str) -> Scan {
     Scan::Clean
 }
 
-/// A phone number spread over the sender's recent short messages (`recent` is
-/// oldest first). Only a trailing run of digit-only messages counts, so an
-/// ordinary word between two numbers breaks it. Phones only: ten-digit runs
-/// are too easily two prices.
+/// A phone number spread over the sender's recent messages (`recent` is oldest
+/// first). The digits must touch across each message edge: the end of one
+/// message and the start of the next. A word at either edge breaks the run.
+/// Phones only: ten-digit runs are too easily two prices.
 pub fn scan_split_digits(recent: &[&str], text: &str) -> Scan {
-    let last = normalise(text);
-    if !is_digits_only(&last) {
+    let last = phone_form(&normalise(text));
+    let head: Vec<&str> = last.split(' ').take_while(|t| is_digits_only(t)).collect();
+    if head.is_empty() {
         return Scan::Clean;
     }
-    let mut parts: Vec<String> = recent
-        .iter()
-        .rev()
-        .map(|m| normalise(m))
-        .take_while(|m| is_digits_only(m))
-        .collect();
+    let mut parts = Vec::new();
+    for message in recent.iter().rev() {
+        let message = phone_form(&normalise(message));
+        let tokens: Vec<&str> = message.split(' ').collect();
+        let tail: Vec<&str> = tokens
+            .iter()
+            .rev()
+            .take_while(|t| is_digits_only(t))
+            .copied()
+            .collect();
+        let whole = tail.len() == tokens.len();
+        parts.extend(tail.into_iter().map(str::to_string));
+        if !whole {
+            break;
+        }
+    }
     if parts.is_empty() {
         return Scan::Clean;
     }
     parts.reverse();
-    parts.push(last);
+    parts.extend(head.into_iter().map(str::to_string));
     if has_phone(&digit_chunks(&parts.join(" "))) {
         OFF_PLATFORM
     } else {
@@ -126,8 +138,67 @@ pub fn scan_split_digits(recent: &[&str], text: &str) -> Scan {
     }
 }
 
-/// NFKC (full-width and styled digits become plain ones), lower-case, no
-/// zero-width characters, runs of white space become one space.
+/// The text as a phone check should read it: look-alike letters in a token
+/// that already holds a digit become digits, and "double 4" becomes "4 4".
+/// Only for phone checks, which need an exact prefix and length, so a stray
+/// fold cannot turn a price into a hit.
+fn phone_form(norm: &str) -> String {
+    let tokens: Vec<&str> = norm.split(' ').collect();
+    let mut out = Vec::with_capacity(tokens.len());
+    let mut repeat = 1;
+    for (i, token) in tokens.iter().enumerate() {
+        let times = match *token {
+            "double" => 2,
+            "triple" => 3,
+            _ => 1,
+        };
+        let next_is_digit = tokens.get(i + 1).is_some_and(|t| is_digits_only(t));
+        if times > 1 && next_is_digit {
+            repeat = times;
+            continue;
+        }
+        let folded = fold_look_alikes(token);
+        for _ in 0..repeat {
+            out.push(folded.clone());
+        }
+        repeat = 1;
+    }
+    out.join(" ")
+}
+
+fn fold_look_alikes(token: &str) -> String {
+    let look_alike = |c: char| matches!(c, 'o' | 'l' | 'i');
+    let fits = token.chars().any(|c| c.is_ascii_digit())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_digit() || look_alike(c) || is_digit_separator(c));
+    if !fits {
+        return token.to_string();
+    }
+    token
+        .chars()
+        .map(|c| match c {
+            'o' => '0',
+            'l' | 'i' => '1',
+            c => c,
+        })
+        .collect()
+}
+
+/// Decimal digits NFKC leaves alone, in the scripts a dodge is likeliest to use.
+fn plain_digit(c: char) -> char {
+    let zero = match c {
+        '\u{660}'..='\u{669}' => 0x660,
+        '\u{6f0}'..='\u{6f9}' => 0x6f0,
+        '\u{966}'..='\u{96f}' => 0x966,
+        _ => return c,
+    };
+    char::from_digit(c as u32 - zero, 10).unwrap_or(c)
+}
+
+/// NFKC (full-width and styled digits become plain ones), other decimal digits
+/// folded, lower-case, no zero-width characters, runs of white space become one
+/// space.
 fn normalise(text: &str) -> String {
     let folded: String = text
         .nfkc()
@@ -137,6 +208,7 @@ fn normalise(text: &str) -> String {
                 '\u{200b}'..='\u{200f}' | '\u{2060}' | '\u{feff}' | '\u{ad}'
             )
         })
+        .map(plain_digit)
         .flat_map(char::to_lowercase)
         .collect();
     folded.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -379,6 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn disguised_digits_are_caught() {
+        for text in [
+            "O8O3 123 4567",
+            "0803l234567",
+            "o8o3-l23-4567",
+            "\u{660}\u{668}\u{660}\u{663}\u{661}\u{662}\u{663}\u{664}\u{665}\u{666}\u{667}",
+            "zero eight zero three one two three double four five six",
+            "0 8 0 3 triple one 4 5 6 7",
+        ] {
+            assert_eq!(scan(text), OFF, "{text}");
+        }
+    }
+
+    #[test]
+    fn look_alike_folding_leaves_words_alone() {
+        for text in [
+            "lol i will take it",
+            "oil 5000 litres 1000",
+            "double 5000 is too much",
+            "size 10 or 11",
+            "l2 and o3 are fine",
+        ] {
+            assert_eq!(scan(text), Scan::Clean, "{text}");
+        }
+    }
+
+    #[test]
     fn account_numbers_are_caught() {
         assert_eq!(scan("0123456789"), OFF);
         assert_eq!(scan("0123-456-789"), OFF);
@@ -475,6 +574,21 @@ mod tests {
         assert_eq!(scan_split_digits(&["5000", "7000"], "8000"), Scan::Clean);
         assert_eq!(scan_split_digits(&["0803", "123"], "okay"), Scan::Clean);
         assert_eq!(scan_split_digits(&[], "4567"), Scan::Clean);
+    }
+
+    #[test]
+    fn split_digits_with_words_around_them() {
+        assert_eq!(scan_split_digits(&["call 0803 123"], "4567"), OFF);
+        assert_eq!(scan_split_digits(&["my line is 0803"], "1234567 ok"), OFF);
+        assert_eq!(scan_split_digits(&["call 0803", "123"], "4567 today"), OFF);
+        assert_eq!(scan_split_digits(&["O8O3"], "l234567"), OFF);
+        // Digits that do not touch across the message edge stay apart.
+        assert_eq!(scan_split_digits(&["0803 please"], "1234567"), Scan::Clean);
+        assert_eq!(scan_split_digits(&["0803 123"], "for 4567"), Scan::Clean);
+        assert_eq!(
+            scan_split_digits(&["I paid 8000"], "1000 more"),
+            Scan::Clean
+        );
     }
 
     #[test]

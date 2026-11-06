@@ -1052,3 +1052,68 @@ async fn full_path_from_question_to_review(pool: PgPool) {
     .unwrap();
     assert_eq!(audited, 1);
 }
+
+#[sqlx::test]
+async fn number_split_after_words_is_blocked(pool: PgPool) {
+    let c = chat(pool).await;
+    assert_eq!(c.send("call 0803 123").await.json["outcome"], "delivered");
+    assert_eq!(c.send("4567").await.json["outcome"], "blocked");
+    assert_eq!(c.strikes().await, 1);
+}
+
+#[sqlx::test]
+async fn concurrent_suggestion_retry_gets_the_first_outcome(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app
+        .tone
+        .set_next(Ok(ToneVerdict::mild("Please check this.")));
+    let flag = c.send("sort this out now").await.json["flag_id"].clone();
+    let body = json!({ "client_message_id": Uuid::new_v4() });
+    let (a, b) = tokio::join!(
+        c.use_suggestion(&c.buyer, &flag, body.clone()),
+        c.use_suggestion(&c.buyer, &flag, body.clone())
+    );
+    assert_eq!((a.status, b.status), (200, 200), "{} {}", a.json, b.json);
+    assert_eq!(a.json["message"]["id"], b.json["message"]["id"]);
+    let sent = c
+        .count("SELECT count(*) FROM chat_messages WHERE status = 'delivered'")
+        .await;
+    assert_eq!(sent, 1);
+    let other = json!({ "client_message_id": Uuid::new_v4() });
+    let res = c.use_suggestion(&c.buyer, &flag, other).await;
+    assert_eq!(res.json["error"]["code"], "suggestion_used");
+}
+
+#[sqlx::test]
+async fn a_poisoned_row_leaves_at_six_hours_and_frees_the_sender(pool: PgPool) {
+    let c = chat(pool).await;
+    sqlx::query(
+        "INSERT INTO chat_messages (conversation_id, sender_id, client_message_id, status, \
+                body_enc, next_attempt_at, created_at) \
+         VALUES ($1, $2, gen_random_uuid(), 'held', $3, now() - interval '1 hour', \
+                 now() - interval '7 hours')",
+    )
+    .bind(c.id)
+    .bind(c.buyer_id)
+    .bind(vec![1u8, 2, 3])
+    .execute(&c.app.pool)
+    .await
+    .unwrap();
+    assert_eq!(c.send("stuck behind it").await.json["outcome"], "held");
+
+    run_job(&c).await;
+    let (status, flagged): (String, bool) = sqlx::query_as(
+        "SELECT status, flag_id IS NOT NULL FROM chat_messages ORDER BY created_at LIMIT 1",
+    )
+    .fetch_one(&c.app.pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), flagged), ("withheld", true));
+    assert_eq!(c.strikes().await, 0);
+
+    run_job(&c).await;
+    assert_eq!(
+        bodies(&c.list(&c.shop.seller_token).await),
+        vec!["stuck behind it"]
+    );
+}

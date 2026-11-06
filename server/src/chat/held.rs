@@ -87,6 +87,12 @@ pub async fn run(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
 
 /// Gives the row its verdict. False when the tone check is still down.
 async fn settle(state: &AppState, row: &Claimed) -> Result<bool, AppError> {
+    // First, and needing nothing from the body: this is what ends a row that
+    // keeps failing, and frees the messages queued behind it.
+    if row.expired {
+        apply_verdict(state, row.id, &give_up()).await?;
+        return Ok(true);
+    }
     let access = service::access(&state.db, row.sender_id, row.conversation_id).await?;
     let mut conn = state.db.acquire().await.context("acquire")?;
     let barred = match ensure_can_post(&mut conn, row.sender_id).await {
@@ -94,7 +100,7 @@ async fn settle(state: &AppState, row: &Claimed) -> Result<bool, AppError> {
         Err(AppError::Muted(_) | AppError::Forbidden(_)) => true,
         Err(e) => return Err(e),
     };
-    if row.expired || barred || !access.writable {
+    if barred || !access.writable {
         drop(conn);
         apply_verdict(state, row.id, &give_up()).await?;
         return Ok(true);
