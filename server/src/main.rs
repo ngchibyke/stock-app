@@ -9,10 +9,15 @@ use server::{
         routes::{create_owner_account, validate_display_name},
     },
     build_app,
+    chat::hub::ChatHub,
     config::Config,
     couriers::shipbubble::ShipbubbleCourier,
     crypto::FieldCipher,
     escrow::jobs,
+    moderation::{
+        claude::ClaudeTone,
+        tone::{NoTone, ToneChecker},
+    },
     payments::{ProviderRegistry, mono::MonoProvider},
     phone::normalize_ng_phone,
     pool_options,
@@ -62,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     // provider would fail every checkout. Admin commands still run.
     if matches!(command, Command::Serve) {
         require_payment_provider(&config.app_env, config.mono.is_some())?;
+        require_moderation(&config.app_env, config.claude.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -90,6 +96,15 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    let chat_hub = Arc::new(ChatHub::new());
+    let tone: Arc<dyn ToneChecker> = match config.claude.clone() {
+        Some(cfg) => Arc::new(ClaudeTone::new(cfg)?),
+        None => {
+            tracing::warn!("ANTHROPIC_API_KEY not set: tone checks pass everything");
+            Arc::new(NoTone)
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -103,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
         // REVISIT(nipost): swap in a real adapter once NIPOST's API is documented.
         postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
         courier,
+        tone,
+        chat_hub: chat_hub.clone(),
     };
 
     match command {
@@ -121,10 +138,12 @@ async fn serve(state: AppState, config: &Config) -> anyhow::Result<()> {
     let jobs_loop = tokio::spawn(jobs::run_loop(state.clone(), stop_jobs.clone()));
     let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel::<()>();
     let cancel_jobs = stop_jobs.clone();
+    let chat_hub = state.chat_hub.clone();
     let server = axum::serve(listener, build_app(state)).with_graceful_shutdown(async move {
         shutdown_signal().await;
         tracing::info!("shutdown signal received, draining connections");
         cancel_jobs.cancel();
+        chat_hub.stop();
         let _ = signalled_tx.send(());
     });
     // Idle keep-alive connections can stall the drain forever, so bound it once the signal fires.
@@ -184,6 +203,15 @@ async fn shutdown_signal() {
 fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Result<()> {
     if app_env == "production" && !mono_configured {
         bail!("APP_ENV is production but no payment provider is configured (set MONO_SECRET_KEY)");
+    }
+    Ok(())
+}
+
+/// Production refuses to start without a tone check: chat would deliver
+/// messages nobody checked.
+fn require_moderation(app_env: &str, claude_configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !claude_configured {
+        bail!("APP_ENV is production but no tone check is configured (set ANTHROPIC_API_KEY)");
     }
     Ok(())
 }
@@ -250,6 +278,14 @@ mod tests {
         for env in ["development", "test", "staging"] {
             assert!(require_payment_provider(env, false).is_ok(), "{env}");
         }
+    }
+
+    #[test]
+    fn production_requires_anthropic_key() {
+        let err = require_moderation("production", false).unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+        assert!(require_moderation("production", true).is_ok());
+        assert!(require_moderation("development", false).is_ok());
     }
 
     #[test]

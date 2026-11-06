@@ -39,6 +39,13 @@ pub struct Settings {
     pub courier_quote_ttl_minutes: i32,
     pub courier_price_tolerance_bps: i32,
     pub courier_category_id: i64,
+    /// Strikes older than this no longer count.
+    pub strike_window_days: i32,
+    /// Active strikes at which a user is muted.
+    pub mute_after_strikes: i32,
+    pub mute_hours: i32,
+    /// Active strikes at which the owner is asked to review a ban.
+    pub owner_review_after_strikes: i32,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -60,7 +67,8 @@ const SELECT: &str = "SELECT platform_cut_bps, fee_small_kobo, fee_large_kobo, \
     payout_provider, checkout_ttl_minutes, ship_deadline_hours, release_after_hours, \
     backstop_days, payout_settlement_buffer_hours, jobs_ship_deadline_enabled, \
     ship_deadline_enforce_from, delivery_cutoff_minutes, courier_quote_ttl_minutes, \
-    courier_price_tolerance_bps, courier_category_id, updated_at \
+    courier_price_tolerance_bps, courier_category_id, strike_window_days, \
+    mute_after_strikes, mute_hours, owner_review_after_strikes, updated_at \
     FROM platform_settings WHERE id";
 
 pub async fn load(db: &PgPool) -> Result<Settings, AppError> {
@@ -94,6 +102,10 @@ pub struct SettingsPatch {
     pub courier_quote_ttl_minutes: Option<i32>,
     pub courier_price_tolerance_bps: Option<i32>,
     pub courier_category_id: Option<i64>,
+    pub strike_window_days: Option<i32>,
+    pub mute_after_strikes: Option<i32>,
+    pub mute_hours: Option<i32>,
+    pub owner_review_after_strikes: Option<i32>,
     /// Required: the `updated_at` the owner last read. A later edit by someone
     /// else makes this one stale (409 `stale_settings`), so two owners cannot
     /// silently overwrite each other's changes.
@@ -131,6 +143,10 @@ impl SettingsPatch {
             && self.courier_quote_ttl_minutes.is_none()
             && self.courier_price_tolerance_bps.is_none()
             && self.courier_category_id.is_none()
+            && self.strike_window_days.is_none()
+            && self.mute_after_strikes.is_none()
+            && self.mute_hours.is_none()
+            && self.owner_review_after_strikes.is_none()
     }
 
     fn validate(&self) -> Result<(), AppError> {
@@ -175,6 +191,15 @@ impl SettingsPatch {
             5000,
         )?;
         in_range("courier_category_id", self.courier_category_id, 1, i64::MAX)?;
+        in_range("strike_window_days", self.strike_window_days, 1, 365)?;
+        in_range("mute_after_strikes", self.mute_after_strikes, 1, 20)?;
+        in_range("mute_hours", self.mute_hours, 1, 720)?;
+        in_range(
+            "owner_review_after_strikes",
+            self.owner_review_after_strikes,
+            2,
+            50,
+        )?;
         // Far into the future would quietly switch the job's refunds off.
         if let Some(from) = self.ship_deadline_enforce_from
             && from > OffsetDateTime::now_utc() + time::Duration::days(MAX_ENFORCE_FROM_AHEAD_DAYS)
@@ -258,6 +283,17 @@ pub async fn update(db: &PgPool, actor: Uuid, patch: SettingsPatch) -> Result<Se
         ));
     }
 
+    let mute_after = patch.mute_after_strikes.unwrap_or(old.mute_after_strikes);
+    let review_after = patch
+        .owner_review_after_strikes
+        .unwrap_or(old.owner_review_after_strikes);
+    if review_after <= mute_after {
+        return Err(AppError::Unprocessable(
+            "invalid_settings",
+            "owner_review_after_strikes must exceed mute_after_strikes".into(),
+        ));
+    }
+
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE platform_settings SET ");
     let mut changed: Vec<&'static str> = Vec::new();
     {
@@ -290,6 +326,10 @@ pub async fn update(db: &PgPool, actor: Uuid, patch: SettingsPatch) -> Result<Se
             courier_quote_ttl_minutes,
             courier_price_tolerance_bps,
             courier_category_id,
+            strike_window_days,
+            mute_after_strikes,
+            mute_hours,
+            owner_review_after_strikes,
         );
     }
     if changed.is_empty() {

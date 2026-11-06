@@ -408,3 +408,39 @@ async fn delivery_settings_round_trip_and_validate(pool: PgPool) {
         assert_eq!(res.status, 422, "{bad}: {}", res.json);
     }
 }
+
+#[sqlx::test]
+async fn strike_settings_validate(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.make_owner().await;
+    let s = get(&app, &owner).await;
+    assert_eq!(s.json["strike_window_days"], 30);
+    assert_eq!(s.json["mute_after_strikes"], 3);
+    assert_eq!(s.json["mute_hours"], 24);
+    assert_eq!(s.json["owner_review_after_strikes"], 5);
+
+    let ok = patch(
+        &app,
+        &owner,
+        json!({ "mute_hours": 48, "strike_window_days": 60 }),
+    )
+    .await;
+    assert_eq!(ok.status, 200, "{:?}", ok.json);
+    assert_eq!(ok.json["mute_hours"], 48);
+
+    for bad in [
+        json!({ "mute_hours": 0 }),
+        json!({ "mute_hours": 721 }),
+        json!({ "strike_window_days": 366 }),
+        json!({ "mute_after_strikes": 21 }),
+        json!({ "owner_review_after_strikes": 1 }),
+    ] {
+        let res = patch(&app, &owner, bad.clone()).await;
+        assert_eq!(res.status, 422, "{bad}");
+    }
+    let res = patch(&app, &owner, json!({ "owner_review_after_strikes": 3 })).await;
+    assert_eq!(res.status, 422);
+    assert_eq!(res.json["error"]["code"], "invalid_settings");
+    let res = patch(&app, &owner, json!({ "mute_after_strikes": 5 })).await;
+    assert_eq!(res.status, 422);
+}

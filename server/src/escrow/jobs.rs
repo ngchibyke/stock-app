@@ -54,6 +54,9 @@
 //!     shipments with no event and no poll for [`POLL_AFTER`] -> [`poll_one`]:
 //!     `status` outside any transaction, and the answer goes through the same
 //!     path as a webhook.
+//! 11. `chat_held`: messages held while the tone check was down, oldest first
+//!     per sender and conversation -> [`held::run`]. See
+//!     [`chat::held`](crate::chat::held).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -98,6 +101,7 @@ use super::{
 };
 use crate::{
     AppState, audit,
+    chat::held,
     checkout::{SettleOutcome, service::expire_and_restore, settle_payment},
     delivery::{
         events::{POLL_AFTER, POLLED_STATUSES, poll_one},
@@ -165,14 +169,15 @@ pub struct JobReport {
     pub shipments_booked: u32,
     pub shipments_cancelled: u32,
     pub shipments_polled: u32,
+    pub chat_held: u32,
     pub failed: u32,
 }
 
 /// Rows a job handled in one tick, and how many of those failed.
 #[derive(Debug, Default, Clone, Copy)]
-struct Stats {
-    done: u32,
-    failed: u32,
+pub struct Stats {
+    pub done: u32,
+    pub failed: u32,
 }
 
 /// Runs every job once (see the module docs). Never fails: each job has its
@@ -192,7 +197,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 10] = [
+    let jobs: [(&str, Job); 11] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -203,6 +208,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (BOOK_SHIPMENTS, Job::BookShipments),
         (CANCEL_SHIPMENTS, Job::CancelShipments),
         (POLL_SHIPMENTS, Job::PollShipments),
+        (held::CHAT_HELD, Job::ChatHeld),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -228,6 +234,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::BookShipments => &mut report.shipments_booked,
             Job::CancelShipments => &mut report.shipments_cancelled,
             Job::PollShipments => &mut report.shipments_polled,
+            Job::ChatHeld => &mut report.chat_held,
         };
         *slot += stats.done;
     }
@@ -257,6 +264,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 shipments_booked = r.shipments_booked,
                 shipments_cancelled = r.shipments_cancelled,
                 shipments_polled = r.shipments_polled,
+                chat_held = r.chat_held,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -302,6 +310,7 @@ enum Job {
     BookShipments,
     CancelShipments,
     PollShipments,
+    ChatHeld,
 }
 
 impl Job {
@@ -317,6 +326,7 @@ impl Job {
             Job::BookShipments => book_shipments(state, cancel).await,
             Job::CancelShipments => cancel_shipments(state, cancel).await,
             Job::PollShipments => poll_shipments(state, cancel).await,
+            Job::ChatHeld => held::run(state, cancel).await,
         }
     }
 }

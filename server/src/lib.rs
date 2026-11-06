@@ -3,6 +3,7 @@ pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod cart;
+pub mod chat;
 pub mod checkout;
 pub mod config;
 pub mod couriers;
@@ -13,12 +14,14 @@ pub mod escrow;
 pub mod extract;
 pub mod ledger;
 pub mod limits;
+pub mod moderation;
 pub mod money;
 pub mod orders;
 pub mod payments;
 pub mod payout_accounts;
 pub mod phone;
 pub mod products;
+pub mod reviews;
 pub mod settings;
 pub mod stores;
 
@@ -49,6 +52,10 @@ pub struct AppState {
     pub postcodes: Arc<dyn delivery::postcode::PostcodeProvider>,
     /// Courier provider (Shipbubble); `None` when no key is configured.
     pub courier: Option<Arc<dyn couriers::CourierProvider>>,
+    /// Tone check for chat and reviews. Production always has a real one.
+    pub tone: Arc<dyn moderation::tone::ToneChecker>,
+    /// Live pushes to open sockets.
+    pub chat_hub: Arc<chat::hub::ChatHub>,
 }
 
 async fn health() -> Json<Value> {
@@ -101,6 +108,8 @@ pub fn build_app(state: AppState) -> Router {
         .merge(cart::routes::router())
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
+        .merge(chat::routes::router())
+        .merge(reviews::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())

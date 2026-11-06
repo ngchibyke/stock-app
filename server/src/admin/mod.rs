@@ -3,8 +3,10 @@
 //! re-queue after a reversal, clearing a provider flag, reconciliation lists
 //! and bank holidays.
 //!
-//! **Roles.** Every mutation is Owner-only; Support may read the backstop
-//! queue, the reconciliation list and the bank holidays. The role is checked
+//! **Roles.** Every money mutation is Owner-only; Support may read the backstop
+//! queue, the reconciliation list and the bank holidays. On the moderation desk
+//! ([`moderation`]) Support may list flags, resolve them and hide reviews, but
+//! only the Owner reads an original, unmutes or bans. The role is checked
 //! by the [`Owner`]/[`Staff`] extractors, before the body is parsed, so a
 //! non-owner gets 403 whatever it sends.
 //!
@@ -26,6 +28,7 @@
 //! the provider first (see [`money::mark_paid`]).
 
 pub mod holidays;
+pub mod moderation;
 pub mod money;
 pub mod orders;
 pub mod routes;

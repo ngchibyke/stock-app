@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::couriers::shipbubble::{self, ShipbubbleConfig};
+use crate::moderation::claude::{self, ClaudeConfig};
 use crate::payments::mono::{self, AmountUnit, MonoConfig, Secret};
 
 #[derive(Clone)]
@@ -21,6 +22,9 @@ pub struct Config {
     /// Shipbubble settings; `None` when `SHIPBUBBLE_API_KEY` is unset (courier
     /// delivery is then unavailable; the server still starts).
     pub shipbubble: Option<ShipbubbleConfig>,
+    /// Claude settings; `None` when `ANTHROPIC_API_KEY` is unset (production
+    /// then refuses to serve).
+    pub claude: Option<ClaudeConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -30,6 +34,7 @@ impl std::fmt::Debug for Config {
             .field("app_env", &self.app_env)
             .field("mono", &self.mono)
             .field("shipbubble", &self.shipbubble)
+            .field("claude", &self.claude)
             .finish_non_exhaustive()
     }
 }
@@ -206,6 +211,29 @@ fn shipbubble_config(
     }))
 }
 
+fn claude_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<ClaudeConfig>> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(api_key) = get("ANTHROPIC_API_KEY") else {
+        return Ok(None);
+    };
+    let base_url = get("ANTHROPIC_BASE_URL").unwrap_or_else(|| claude::DEFAULT_BASE_URL.into());
+    if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
+        bail!("ANTHROPIC_BASE_URL must be an https URL");
+    }
+    Ok(Some(ClaudeConfig {
+        api_key: Secret::new(&api_key),
+        base_url,
+        model: get("MODERATION_MODEL").unwrap_or_else(|| claude::DEFAULT_MODEL.into()),
+        connect_timeout: claude::CONNECT_TIMEOUT,
+        timeout: claude::REQUEST_TIMEOUT,
+        insecure_http_for_tests: false,
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -238,10 +266,12 @@ impl Config {
         )?;
         let mono = mono_config(&var, app_env == "production")?;
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
+        let claude = claude_config(&var)?;
         Ok(Self {
             public_redirect_url,
             mono,
             shipbubble,
+            claude,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,
@@ -288,6 +318,32 @@ mod tests {
         }
         // Echo off is fine anywhere.
         assert!(!load(&[("APP_ENV", "production")]).unwrap().otp_dev_echo);
+    }
+
+    #[test]
+    fn anthropic_base_url_must_be_https() {
+        let err = load(&[
+            ("ANTHROPIC_API_KEY", "sk-ant-x"),
+            ("ANTHROPIC_BASE_URL", "http://plain.example"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_BASE_URL"), "{err}");
+    }
+
+    #[test]
+    fn model_defaults_to_haiku() {
+        assert!(load(&[]).unwrap().claude.is_none());
+        let cfg = load(&[("ANTHROPIC_API_KEY", "sk-ant-x")])
+            .unwrap()
+            .claude
+            .unwrap();
+        assert_eq!(cfg.model, "claude-haiku-5-5");
+        assert_eq!(cfg.base_url, "https://api.anthropic.com");
+        let cfg = load(&[("ANTHROPIC_API_KEY", "k"), ("MODERATION_MODEL", "other")])
+            .unwrap()
+            .claude
+            .unwrap();
+        assert_eq!(cfg.model, "other");
     }
 
     #[test]
