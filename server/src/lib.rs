@@ -21,6 +21,7 @@ pub mod payments;
 pub mod payout_accounts;
 pub mod phone;
 pub mod products;
+pub mod reviews;
 pub mod settings;
 pub mod stores;
 
@@ -108,6 +109,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(checkout::routes::router())
         .merge(orders::routes::router())
         .merge(chat::routes::router())
+        .merge(reviews::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())

@@ -121,12 +121,14 @@ pub struct Store {
     pub pickup_courier_address_code: Option<i64>,
     pub business_phone_enc: Option<Vec<u8>>,
     pub self_delivery_fee_kobo: Option<i64>,
+    pub rating_count: i32,
+    pub rating_sum: i64,
 }
 
 const COLUMNS: &str = "id, owner_id, name, slug, description, pickup_address_enc, pickup_state, \
                        delivery_courier, delivery_self, status::text AS status, created_at, \
                        pickup_area_council, pickup_postcode, pickup_courier_address_code, \
-                       business_phone_enc, self_delivery_fee_kobo";
+                       business_phone_enc, self_delivery_fee_kobo, rating_count, rating_sum";
 
 /// The public shape: never carries the pickup address.
 #[derive(Debug, Serialize)]
@@ -141,6 +143,9 @@ pub struct PublicStore {
     pub delivery_self: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    pub rating_count: i32,
+    /// To one decimal place; null with no reviews.
+    pub rating_average: Option<f64>,
 }
 
 /// The owner-only shape: the public shape plus the decrypted pickup address and
@@ -216,6 +221,11 @@ impl Store {
             delivery_courier: self.delivery_courier,
             delivery_self: self.delivery_self,
             created_at: self.created_at,
+            rating_count: self.rating_count,
+            rating_average: (self.rating_count > 0).then(|| {
+                let average = self.rating_sum as f64 / f64::from(self.rating_count);
+                (average * 10.0).round() / 10.0
+            }),
         }
     }
 
