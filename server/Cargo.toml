@@ -8,7 +8,7 @@ aes-gcm = "0.10"
 anyhow = "1"
 argon2 = "0.5"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 dotenvy = "0.15"
 hmac = "0.12"
@@ -33,6 +33,8 @@ uuid = { version = "1", features = ["serde", "v4"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = "0.29"
 wiremock = "0.6"
 
 # Argon2 is deliberately slow; keep it fast enough in debug test builds.

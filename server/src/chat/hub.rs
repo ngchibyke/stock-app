@@ -10,6 +10,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use serde::Serialize;
@@ -80,9 +81,26 @@ impl Registry {
     }
 }
 
+/// How often each socket pings and re-checks its session.
+#[derive(Debug, Clone, Copy)]
+pub struct SocketTimings {
+    pub ping: Duration,
+    pub session_check: Duration,
+}
+
+impl Default for SocketTimings {
+    fn default() -> Self {
+        Self {
+            ping: Duration::from_secs(30),
+            session_check: Duration::from_secs(60),
+        }
+    }
+}
+
 pub struct ChatHub {
     registry: Arc<Registry>,
     stopped: CancellationToken,
+    timings: SocketTimings,
 }
 
 impl Default for ChatHub {
@@ -93,10 +111,19 @@ impl Default for ChatHub {
 
 impl ChatHub {
     pub fn new() -> Self {
+        Self::with_timings(SocketTimings::default())
+    }
+
+    pub fn with_timings(timings: SocketTimings) -> Self {
         Self {
             registry: Default::default(),
             stopped: CancellationToken::new(),
+            timings,
         }
+    }
+
+    pub fn timings(&self) -> SocketTimings {
+        self.timings
     }
 
     pub fn subscribe(&self, user: Uuid) -> Result<Subscription, TooManySockets> {

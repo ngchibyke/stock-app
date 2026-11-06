@@ -119,7 +119,12 @@ impl TestApp {
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
             courier: Some(courier.clone()),
             tone: tone.clone(),
-            chat_hub: Arc::new(server::chat::hub::ChatHub::new()),
+            chat_hub: Arc::new(server::chat::hub::ChatHub::with_timings(
+                server::chat::hub::SocketTimings {
+                    ping: std::time::Duration::from_secs(30),
+                    session_check: std::time::Duration::from_millis(200),
+                },
+            )),
         };
         Self {
             router: build_app(state.clone()),
@@ -130,6 +135,19 @@ impl TestApp {
             courier,
             tone,
         }
+    }
+
+    /// Serves the app on a real local port, for WebSocket tests.
+    pub async fn spawn_server(&self) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let router = self.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        addr
     }
 
     pub async fn request(

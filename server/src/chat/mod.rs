@@ -6,3 +6,4 @@ pub mod hub;
 pub mod routes;
 pub mod send;
 pub mod service;
+pub mod ws;

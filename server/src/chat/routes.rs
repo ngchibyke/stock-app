@@ -14,6 +14,7 @@ use super::{
     hub::SendOutcomeView,
     send,
     service::{self, ConversationPage, ConversationView, MessageView, OwnPendingView, Subject},
+    ws,
 };
 use crate::{
     AppState,
@@ -26,6 +27,7 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chats", post(open).get(list))
+        .route("/chats/ws", get(ws::connect))
         .route("/chats/{id}/messages", get(messages).post(send_message))
         .route(
             "/chats/{id}/suggestions/{flag_id}/send",
