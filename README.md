@@ -34,6 +34,15 @@ Delivery and tracking (part 3):
 - **Ship deadline:** the 48-hour rule is now enforced for orders paid after `ship_deadline_enforce_from`, and overdue pickups are flagged for the owner.
 - **Owner view:** the reconciliation list shows bookings that failed or are unknown, courier cancels after pickup, overdue pickups and paid orders without a delivery method.
 
+Chat, moderation and reviews (part 4):
+
+- **Chat:** a buyer and seller talk about a product or an order. Messages are sent over REST and pushed over a WebSocket; a client that missed a push reads from its last sequence number. Bodies are encrypted at rest.
+- **Moderation before delivery:** a word filter, scam and contact-detail patterns, then a Claude Haiku tone check. Serious text is blocked with a reason and a strike; mild text comes back with a suggested rewrite the sender can send in one tap. The original is never delivered.
+- **Outages:** if the tone check is down a message is held, then delivered in order once it recovers. After 6 hours it is withheld with no strike, and the sender is told. It is also withheld if the chat closed or the sender was muted or banned while it waited.
+- **Strikes:** a warning, then a mute after 3 strikes in 30 days, then owner review after 5. All are owner-configurable, and a mute never touches orders or money.
+- **Reviews:** one per completed delivery, with stars, optional text and photos, moderated like chat, and one seller reply. Store pages show the rating; the public list never shows who the buyer is.
+- **Moderation desk:** staff list flags as metadata, resolve them and hide reviews. Only the owner reads a flagged original, always audited, and only the owner unmutes or bans. A ban stops posting only.
+
 ## Roadmap
 
 | Part | What it adds |
@@ -41,7 +50,7 @@ Delivery and tracking (part 3):
 | 1 | Server foundation (done) |
 | 2 | Payments and escrow (Mono first, behind a switchable provider layer): cart, orders, held funds, release, refunds, 5% platform cut (done) |
 | 3 | Delivery and tracking: FCT addresses, Shipbubble couriers, self-delivery, handover codes, tracking timeline (done) |
-| 4 | Moderated chat and reviews |
+| 4 | Moderated chat and reviews (done) |
 | 5 | Disputes and notifications |
 | 6 | Owner web dashboard |
 | 7 | Flutter phone app (Android and iPhone) |
@@ -105,3 +114,9 @@ These are tracked in the roadmap:
 - Accountant: is delivery vatable at 7.5%, and who is merchant of record for courier delivery.
 - DPO and legal review: the Shipbubble processor agreement and data location; a privacy notice that names couriers; the seller seeing the buyer's address while out for delivery; retention of `orders.delivery_address_enc` (the buyer's delivery contact, kept today on every order, including never-paid and refunded ones), `courier_phone_enc`, `delivery_events`, soft-deleted addresses and audit rows; the old business phone that can appear on labels for orders quoted before a phone change; the buyer's name, phone and address going to Shipbubble when options are requested, before the buyer chooses courier or pays; plaintext `buyer_addresses.postcode`, which may locate a single property; and plaintext tracking URLs, which may be bearer links showing the address.
 - Owner decisions: whether a handover code should release after a delay or have a no-code fallback, and whether the 48-hour ship deadline should pause on holidays and Sundays.
+- Anthropic's data terms: confirm in writing that chat text sent to `claude-haiku-5-5` is not used for training, and arrange zero data retention, which spec section 7 requires. That is an account arrangement, not a code setting.
+- DPO and legal: Anthropic as a processor, the cross-border transfer under the NDPA, and the privacy notice covering automated checks on chats.
+- DPO: strikes and mutes are automated decisions about a person. The server gives a reason and a human route (dismiss, unmute), but whether that is sufficient under the NDPA needs review.
+- Native-speaker review of the word lists and the eval fixture, and a run of the language eval (`server/tests/tone_eval.rs`), with the owner choosing the accuracy bar before launch.
+- Photos in reviews are not checked and can carry phone numbers. Decide before launch. The upload plan must also check that a key belongs to the uploader.
+- Owner decisions: whether users can report a message that got through (not in the spec, so not built); whether chat should close some time after an order ends; whether sellers may see buyer names.

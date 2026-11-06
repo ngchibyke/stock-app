@@ -161,6 +161,13 @@ Based on Baymard order-tracking research and established delivery-app patterns:
 
 **Data protection:** chat is personal data processed by a third party (AI provider, possibly outside Nigeria). Requires: disclosure in the privacy notice, provider configured not to retain/train on data, only message text sent (no names/IDs), retention of **12 months** (longer while a dispute is open). **DPO/legal sign-off needed.**
 
+**Decisions made while building (plan 4):**
+
+- *(my call)* Messages are sent over REST and pushed over a WebSocket, which only pushes. Outcomes, idempotency and rate limits therefore live in one place, and a client that missed a push reads from its last sequence number.
+- *(my call)* If the tone check is down, a message is held and retried with backoff, oldest first per sender and conversation. After 6 hours it is withheld with no strike and the sender is told. A held message is also withheld if the chat closed or the sender was muted or banned while it waited.
+- *(my call)* Strike defaults, owner-configurable: a strike counts for 30 days, a 24-hour mute after 3, owner review after 5, and at most one strike per 10 minutes.
+- *(my call)* A mute or posting ban stops posting only, never reading, orders or money. A review has no held state: during an outage nothing is stored and the buyer tries again.
+
 ## 8. Disputes
 
 1. Buyer opens a complaint (reason + photos) before funds are released → funds frozen.
