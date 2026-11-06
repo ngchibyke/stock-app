@@ -25,7 +25,7 @@ pub const QUEUE_PER_SOCKET: usize = 64;
 
 /// The result of sending a message, shared by the send route, the socket and
 /// the held-message job.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SendOutcomeView {
     /// `delivered`, `held`, `blocked` or `rewrite`.
     pub outcome: &'static str,

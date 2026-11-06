@@ -75,6 +75,23 @@ impl std::fmt::Debug for Verdict {
     }
 }
 
+/// The serious offline hits, which need no model and never leave the server.
+pub fn offline_block(text: &str, recent: &[&str]) -> Option<Verdict> {
+    let serious = |hit| match hit {
+        Scan::Hit {
+            severity: Severity::Serious,
+            category,
+        } => Some(category),
+        _ => None,
+    };
+    let category = serious(scan(text)).or_else(|| serious(scan_split_digits(recent, text)))?;
+    Some(Verdict::Block {
+        severity: FlagSeverity::Serious,
+        category,
+        source: Source::Filter,
+    })
+}
+
 /// Judges one text. Offline checks come first and Claude cannot overrule them:
 /// a serious hit never leaves the server, and a mild word stays mild whatever
 /// the model says. `recent` is the sender's latest messages, oldest first.
@@ -86,20 +103,8 @@ pub async fn judge(
     recent: &[&str],
     max_chars: usize,
 ) -> Result<Verdict, ToneError> {
-    let offline = match scan(text) {
-        Scan::Clean => scan_split_digits(recent, text),
-        hit => hit,
-    };
-    if let Scan::Hit {
-        severity: Severity::Serious,
-        category,
-    } = offline
-    {
-        return Ok(Verdict::Block {
-            severity: FlagSeverity::Serious,
-            category,
-            source: Source::Filter,
-        });
+    if let Some(block) = offline_block(text, recent) {
+        return Ok(block);
     }
 
     let answer = match tone.check(text).await {
@@ -130,7 +135,7 @@ pub async fn judge(
     }
 
     let tone_mild = answer.severity == Some(Severity::Mild);
-    if tone_mild || offline != Scan::Clean {
+    if tone_mild || scan(text) != Scan::Clean {
         return Ok(Verdict::Rewrite {
             category: Category::Rude,
             suggestion: answer

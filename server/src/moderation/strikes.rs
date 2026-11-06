@@ -242,6 +242,23 @@ async fn apply_strike(
     ))
 }
 
+/// Where the user stands now, for telling them about a block again.
+pub async fn notice(conn: &mut PgConnection, user: Uuid) -> Result<StrikeNotice, AppError> {
+    let active_strikes = active_strikes(conn, user).await?;
+    let muted_until = sqlx::query_scalar(
+        "SELECT muted_until FROM user_moderation WHERE user_id = $1 AND muted_until > now()",
+    )
+    .bind(user)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("read mute")?
+    .flatten();
+    Ok(StrikeNotice {
+        active_strikes,
+        muted_until,
+    })
+}
+
 /// Strikes that count: not voided, inside the owner's window.
 pub async fn active_strikes(conn: &mut PgConnection, user: Uuid) -> Result<i64, AppError> {
     let count = sqlx::query_scalar(

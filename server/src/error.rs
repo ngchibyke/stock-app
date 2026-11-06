@@ -107,7 +107,11 @@ impl IntoResponse for AppError {
                 (StatusCode::FORBIDDEN, payload)
             }
             AppError::Muted(until) => {
-                let mut payload = body("muted", "You can't post right now");
+                let copy = format!(
+                    "You can't post until {}, because of repeated rule breaks.",
+                    wat_time(until)
+                );
+                let mut payload = body("muted", &copy);
                 payload["muted_until"] = json!(
                     until
                         .format(&time::format_description::well_known::Rfc3339)
@@ -153,4 +157,14 @@ impl IntoResponse for AppError {
         };
         (status, Json(payload)).into_response()
     }
+}
+
+/// A time as a person in Abuja reads it, for copy shown to users.
+fn wat_time(at: time::OffsetDateTime) -> String {
+    let format = time::macros::format_description!(
+        "[day padding:none] [month repr:short] at [hour]:[minute]"
+    );
+    at.to_offset(time::macros::offset!(+1))
+        .format(&format)
+        .unwrap_or_else(|_| "later".into())
 }
