@@ -138,6 +138,7 @@ async fn serve(state: AppState, config: &Config) -> anyhow::Result<()> {
     let jobs_loop = tokio::spawn(jobs::run_loop(state.clone(), stop_jobs.clone()));
     let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel::<()>();
     let cancel_jobs = stop_jobs.clone();
+    let chat_hub = state.chat_hub.clone();
     let server = axum::serve(listener, build_app(state)).with_graceful_shutdown(async move {
         shutdown_signal().await;
         tracing::info!("shutdown signal received, draining connections");
