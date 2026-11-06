@@ -8,14 +8,16 @@ use axum::http::Method;
 use common::{Listing, TestApp, TestResponse};
 use serde_json::{Value, json};
 use server::{
-    chat::hub::Subscription,
+    chat::{held, hub::Subscription, send::apply_verdict},
     limits::{CHAT_SENDS_PER_MINUTE, MAX_CHAT_CHARS},
     moderation::{
         filter::Category,
+        pipeline::Verdict,
         tone::{ToneError, ToneVerdict},
     },
 };
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use tracing_test::traced_test;
 use uuid::Uuid;
 
@@ -623,4 +625,293 @@ async fn audit_has_no_message_text(pool: PgPool) {
         .unwrap();
     assert!(!details.is_empty());
     assert!(details.iter().all(|d| !d.to_string().contains("audited")));
+}
+
+/// Makes held rows due, as if their lease or backoff had passed.
+async fn make_due(c: &Chat) {
+    sqlx::query(
+        "UPDATE chat_messages SET next_attempt_at = now() - interval '1 second' \
+         WHERE status = 'held'",
+    )
+    .execute(&c.app.pool)
+    .await
+    .unwrap();
+}
+
+async fn run_job(c: &Chat) {
+    make_due(c).await;
+    held::run(&c.app.state, &CancellationToken::new())
+        .await
+        .unwrap();
+}
+
+async fn hold_three(c: &Chat) {
+    c.app.tone.set_all(Err(ToneError::Unavailable));
+    for text in ["first", "second", "third"] {
+        assert_eq!(c.send(text).await.json["outcome"], "held");
+    }
+}
+
+#[sqlx::test]
+async fn outage_holds_then_delivers_in_order(pool: PgPool) {
+    let c = chat(pool).await;
+    hold_three(&c).await;
+    assert_eq!(c.list(&c.shop.seller_token).await["messages"], json!([]));
+    let mine = c.list(&c.buyer).await;
+    assert!(
+        mine["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["status"] == "held")
+    );
+
+    c.app.tone.reset();
+    for _ in 0..3 {
+        run_job(&c).await;
+    }
+    let theirs = c.list(&c.shop.seller_token).await;
+    assert_eq!(bodies(&theirs), vec!["first", "second", "third"]);
+    let seqs: Vec<i64> = theirs["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["seq"].as_i64().unwrap())
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3]);
+    assert_eq!(c.list(&c.buyer).await["pending"], json!([]));
+}
+
+#[sqlx::test]
+async fn a_failed_row_is_not_overtaken(pool: PgPool) {
+    let c = chat(pool).await;
+    hold_three(&c).await;
+    // Still failing: one row is tried, and those behind it wait.
+    let before = c.app.tone.calls();
+    run_job(&c).await;
+    assert_eq!(c.app.tone.calls(), before + 1);
+    assert_eq!(c.send("fourth").await.json["outcome"], "held");
+    assert_eq!(c.list(&c.shop.seller_token).await["messages"], json!([]));
+}
+
+#[sqlx::test]
+async fn verdict_after_hold_can_block_or_offer_rewrite(pool: PgPool) {
+    let c = chat(pool).await;
+    let mut buyer = c.app.state.chat_hub.subscribe(c.buyer_id).unwrap();
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("a veiled threat").await;
+    next_frame(&mut buyer).await;
+
+    c.app
+        .tone
+        .set_next(Ok(ToneVerdict::serious(Category::Abuse)));
+    run_job(&c).await;
+    let frame = next_frame(&mut buyer).await;
+    assert_eq!(frame["type"], "moderation");
+    assert_eq!(frame["outcome"]["outcome"], "blocked");
+    assert_eq!(c.strikes().await, 1);
+
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("sort this out").await;
+    next_frame(&mut buyer).await;
+    c.app
+        .tone
+        .set_next(Ok(ToneVerdict::mild("Please check this.")));
+    run_job(&c).await;
+    let frame = next_frame(&mut buyer).await;
+    assert_eq!(frame["outcome"]["outcome"], "rewrite");
+    assert_eq!(frame["outcome"]["suggested"], "Please check this.");
+    assert_eq!(c.strikes().await, 1);
+    assert_eq!(c.list(&c.shop.seller_token).await["messages"], json!([]));
+}
+
+#[sqlx::test]
+async fn delivered_after_hold_tells_both_sides(pool: PgPool) {
+    let c = chat(pool).await;
+    let mut seller = c.app.state.chat_hub.subscribe(c.shop.seller_id).unwrap();
+    let mut buyer = c.app.state.chat_hub.subscribe(c.buyer_id).unwrap();
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    next_frame(&mut buyer).await;
+    run_job(&c).await;
+    assert_eq!(next_frame(&mut seller).await["body"], "hello");
+    let mut kinds = vec![
+        next_frame(&mut buyer).await["type"].clone(),
+        next_frame(&mut buyer).await["type"].clone(),
+    ];
+    kinds.sort_by_key(|k| k.to_string());
+    assert_eq!(kinds, vec![json!("message"), json!("moderation")]);
+}
+
+#[sqlx::test]
+async fn held_message_gives_up_after_six_hours(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    sqlx::query("UPDATE chat_messages SET created_at = now() - interval '6 hours 1 minute'")
+        .execute(&c.app.pool)
+        .await
+        .unwrap();
+    let calls = c.app.tone.calls();
+    run_job(&c).await;
+    assert_eq!(c.app.tone.calls(), calls, "no check after giving up");
+    let (status, cleared): (String, bool) =
+        sqlx::query_as("SELECT status, body_enc IS NULL FROM chat_messages")
+            .fetch_one(&c.app.pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), cleared), ("withheld", true));
+    assert_eq!(c.strikes().await, 0);
+    let mine = c.list(&c.buyer).await;
+    assert_eq!(
+        mine["pending"][0]["reason"],
+        "We couldn't check this message, so it wasn't sent. Try wording it differently."
+    );
+}
+
+#[sqlx::test]
+async fn held_message_from_a_banned_sender_is_not_delivered(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    sqlx::query("INSERT INTO user_moderation (user_id, banned_at) VALUES ($1, now())")
+        .bind(c.buyer_id)
+        .execute(&c.app.pool)
+        .await
+        .unwrap();
+    run_job(&c).await;
+    assert_eq!(c.list(&c.shop.seller_token).await["messages"], json!([]));
+    assert_eq!(c.strikes().await, 0);
+    assert_eq!(c.list(&c.buyer).await["pending"][0]["status"], "withheld");
+}
+
+#[sqlx::test]
+async fn held_message_in_a_closed_chat_is_not_delivered(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    sqlx::query("UPDATE stores SET status = 'suspended' WHERE id = $1")
+        .bind(c.shop.store_id)
+        .execute(&c.app.pool)
+        .await
+        .unwrap();
+    run_job(&c).await;
+    assert_eq!(c.list(&c.shop.seller_token).await["messages"], json!([]));
+}
+
+#[sqlx::test]
+async fn two_job_runs_never_double_deliver(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    make_due(&c).await;
+    let cancel = CancellationToken::new();
+    let (a, b) = tokio::join!(
+        held::run(&c.app.state, &cancel),
+        held::run(&c.app.state, &cancel)
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(bodies(&c.list(&c.shop.seller_token).await), vec!["hello"]);
+    let last: i64 = sqlx::query_scalar("SELECT last_seq FROM conversations WHERE id = $1")
+        .bind(c.id)
+        .fetch_one(&c.app.pool)
+        .await
+        .unwrap();
+    assert_eq!(last, 1);
+}
+
+#[sqlx::test]
+async fn verdict_is_ignored_once_a_row_has_moved_on(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_next(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM chat_messages")
+        .fetch_one(&c.app.pool)
+        .await
+        .unwrap();
+    let first = apply_verdict(&c.app.state, id, &Verdict::Clean)
+        .await
+        .unwrap();
+    let second = apply_verdict(&c.app.state, id, &Verdict::Clean)
+        .await
+        .unwrap();
+    assert_eq!(first.outcome, "delivered");
+    assert_eq!(second.outcome, "delivered");
+    assert_eq!(bodies(&c.list(&c.shop.seller_token).await), vec!["hello"]);
+}
+
+#[sqlx::test]
+async fn held_rows_stay_encrypted(pool: PgPool) {
+    let c = chat(pool).await;
+    hold_three(&c).await;
+    run_job(&c).await;
+    let rows: Vec<String> = sqlx::query_scalar("SELECT to_jsonb(m)::text FROM chat_messages m")
+        .fetch_all(&c.app.pool)
+        .await
+        .unwrap();
+    assert!(rows.iter().all(|r| !r.contains("first")));
+}
+
+#[sqlx::test]
+async fn tone_failures_back_off(pool: PgPool) {
+    let c = chat(pool).await;
+    c.app.tone.set_all(Err(ToneError::Unavailable));
+    c.send("hello").await;
+    let due_in = || async {
+        sqlx::query_as::<_, (i32, f64)>(
+            "SELECT attempts, extract(epoch FROM next_attempt_at - now())::float8 \
+             FROM chat_messages",
+        )
+        .fetch_one(&c.app.pool)
+        .await
+        .unwrap()
+    };
+    run_job(&c).await;
+    let (attempts, wait) = due_in().await;
+    assert_eq!(attempts, 1);
+    assert!((100.0..=121.0).contains(&wait), "{wait}");
+
+    // Inside the backoff the job leaves the row alone.
+    let calls = c.app.tone.calls();
+    held::run(&c.app.state, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(c.app.tone.calls(), calls);
+
+    for _ in 0..5 {
+        run_job(&c).await;
+    }
+    let (attempts, wait) = due_in().await;
+    assert_eq!(attempts, 6);
+    assert!(
+        (800.0..=901.0).contains(&wait),
+        "capped at 15 minutes: {wait}"
+    );
+}
+
+#[sqlx::test]
+async fn a_poisoned_row_cannot_fill_the_batch(pool: PgPool) {
+    let c = chat(pool).await;
+    sqlx::query(
+        "INSERT INTO chat_messages (conversation_id, sender_id, client_message_id, status, \
+                body_enc, next_attempt_at) \
+         VALUES ($1, $2, gen_random_uuid(), 'held', $3, now() - interval '1 hour')",
+    )
+    .bind(c.id)
+    .bind(c.buyer_id)
+    .bind(vec![1u8, 2, 3])
+    .execute(&c.app.pool)
+    .await
+    .unwrap();
+    // The row cannot be decrypted, so it fails, and is pushed back.
+    let stats = held::run(&c.app.state, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(stats.failed, 1);
+    let later: bool = sqlx::query_scalar("SELECT next_attempt_at > now() FROM chat_messages")
+        .fetch_one(&c.app.pool)
+        .await
+        .unwrap();
+    assert!(later);
 }

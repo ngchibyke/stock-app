@@ -394,6 +394,53 @@ pub(crate) async fn apply_in(
     })
 }
 
+/// Applies a late verdict to a held message, and tells both sides after commit.
+/// The status is re-checked under the row lock: a row that moved on answers
+/// with what already happened, and is not touched or announced again.
+pub async fn apply_verdict(
+    state: &AppState,
+    message_id: Uuid,
+    verdict: &Verdict,
+) -> Result<SendOutcomeView, AppError> {
+    let mut tx = begin(state).await?;
+    let row: (Uuid, Uuid, Uuid, String, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT conversation_id, sender_id, client_message_id, status, body_enc \
+         FROM chat_messages WHERE id = $1 FOR UPDATE",
+    )
+    .bind(message_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(busy_err("chat_busy", "lock message"))?;
+    let (conversation_id, sender_id, client_message_id, status, body) = row;
+    let access = service::access(&state.db, sender_id, conversation_id).await?;
+    let (true, Some(encrypted)) = (status == "held", body) else {
+        tx.rollback().await.context("rollback")?;
+        return first_outcome(state, &access, sender_id, client_message_id).await;
+    };
+    let text = state.cipher.decrypt(&encrypted)?;
+    let pending = Pending {
+        id: message_id,
+        conversation_id,
+        sender_id,
+        order_id: access.order_id,
+        text: &text,
+    };
+    let outcome = apply_in(&mut tx, &state.cipher, &pending, verdict).await?;
+    tx.commit().await.context("commit")?;
+    if let Some(view) = &outcome.message {
+        publish_message(state, &access, view);
+    }
+    state.chat_hub.publish(
+        sender_id,
+        Frame::Moderation {
+            conversation_id,
+            message_id,
+            outcome: outcome.clone(),
+        },
+    );
+    Ok(outcome)
+}
+
 pub(crate) fn held_outcome() -> SendOutcomeView {
     SendOutcomeView {
         outcome: "held",
