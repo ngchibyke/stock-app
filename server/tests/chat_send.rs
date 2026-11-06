@@ -9,14 +9,19 @@ use common::{Listing, TestApp, TestResponse};
 use serde_json::{Value, json};
 use server::{
     chat::{held, hub::Subscription, send::apply_verdict},
+    checkout::{SettleOutcome, settle_payment},
+    escrow::jobs::run_due_jobs,
     limits::{CHAT_SENDS_PER_MINUTE, MAX_CHAT_CHARS},
     moderation::{
         filter::Category,
         pipeline::Verdict,
         tone::{ToneError, ToneVerdict},
     },
+    orders::service::mark_picked_up,
+    payments::PaymentStatus,
 };
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing_test::traced_test;
 use uuid::Uuid;
@@ -914,4 +919,136 @@ async fn a_poisoned_row_cannot_fill_the_batch(pool: PgPool) {
         .await
         .unwrap();
     assert!(later);
+}
+
+#[sqlx::test]
+async fn full_path_from_question_to_review(pool: PgPool) {
+    let c = chat(pool).await;
+    let app = &c.app;
+    let seller = c.shop.seller_token.clone();
+
+    // A question, then a rude follow-up that goes out as the suggested rewrite.
+    assert_eq!(
+        c.send("Is the blue one in stock?").await.json["outcome"],
+        "delivered"
+    );
+    app.tone
+        .set_next(Ok(ToneVerdict::mild("Please answer when you can.")));
+    let rude = c.send("answer me now, are you asleep").await;
+    assert_eq!(rude.json["outcome"], "rewrite");
+    let body = json!({ "client_message_id": Uuid::new_v4() });
+    let sent = c
+        .use_suggestion(&c.buyer, &rude.json["flag_id"], body)
+        .await;
+    assert_eq!(sent.json["outcome"], "delivered", "{}", sent.json);
+    assert_eq!(
+        bodies(&c.list(&seller).await),
+        vec!["Is the blue one in stock?", "Please answer when you can."]
+    );
+
+    // They buy it, through the real checkout and settlement.
+    assert_eq!(
+        app.set_cart(&c.buyer, c.shop.variant_id, 1).await.status,
+        200
+    );
+    let res = app.checkout(&c.buyer, "mono_directpay").await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let reference = res.json["reference"].as_str().unwrap().to_string();
+    let checkout: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
+    app.fake.set_payment(
+        &reference,
+        PaymentStatus::Successful {
+            amount_kobo: res.json["total_kobo"].as_i64().unwrap(),
+            fee_kobo: 10,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.clone(),
+        },
+    );
+    assert_eq!(
+        settle_payment(&app.state, &reference).await.unwrap(),
+        SettleOutcome::Paid
+    );
+    let order: Uuid = sqlx::query_scalar("SELECT id FROM orders WHERE checkout_id = $1")
+        .bind(checkout)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+
+    // The order chat: a phone number is blocked and never reaches the buyer.
+    let res = app
+        .request(
+            Method::POST,
+            "/chats",
+            Some(json!({ "order_id": order })),
+            Some(&c.buyer),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let order_chat = res.json["id"].as_str().unwrap().to_string();
+    let path = format!("/chats/{order_chat}/messages");
+    let body = json!({ "client_message_id": Uuid::new_v4(), "body": PHONE_TEXT });
+    let blocked = app
+        .request(Method::POST, &path, Some(body), Some(&seller))
+        .await;
+    assert_eq!(blocked.json["outcome"], "blocked", "{}", blocked.json);
+    let flag = blocked.json["flag_id"].as_str().unwrap().to_string();
+    let theirs = app.request(Method::GET, &path, None, Some(&c.buyer)).await;
+    assert_eq!(theirs.json["messages"], json!([]));
+
+    // Delivered, and released when the window passes.
+    let now = OffsetDateTime::now_utc();
+    mark_picked_up(&app.pool, order, now).await.unwrap();
+    app.mark_delivered(order, now).await.unwrap();
+    sqlx::query("UPDATE orders SET release_at = now() - interval '1 minute' WHERE id = $1")
+        .bind(order)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(run_due_jobs(&app.state).await.released, 1);
+
+    // The buyer reviews, the seller replies, and the store shows the rating.
+    let review = app
+        .request(
+            Method::POST,
+            &format!("/orders/{order}/review"),
+            Some(json!({ "stars": 4, "body": "Good fabric, quick delivery." })),
+            Some(&c.buyer),
+        )
+        .await;
+    assert_eq!(review.json["outcome"], "posted", "{}", review.json);
+    let id = review.json["review"]["id"].as_str().unwrap();
+    let reply = app
+        .request(
+            Method::POST,
+            &format!("/reviews/{id}/reply"),
+            Some(json!({ "body": "Thank you for buying from us." })),
+            Some(&seller),
+        )
+        .await;
+    assert_eq!(reply.json["outcome"], "posted", "{}", reply.json);
+    let store = app
+        .request(Method::GET, "/stores/kano-fabrics", None, None)
+        .await;
+    assert_eq!(store.json["rating_count"], 1);
+    assert_eq!(store.json["rating_average"], 4.0);
+
+    // Only the owner reads what was withheld, and the read is on record.
+    let owner = app.owner_token().await;
+    let original = app
+        .request(
+            Method::GET,
+            &format!("/admin/moderation/flags/{flag}"),
+            None,
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(original.json["original"], PHONE_TEXT);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action = 'moderation.original_viewed'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
 }
