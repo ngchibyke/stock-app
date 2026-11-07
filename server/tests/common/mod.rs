@@ -92,6 +92,8 @@ pub struct TestApp {
     pub courier: Arc<server::couriers::fake::FakeCourier>,
     /// The installed tone check (always a fake; answers clean by default).
     pub tone: Arc<server::moderation::fake::FakeTone>,
+    /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
+    shipped_seq: std::sync::atomic::AtomicUsize,
 }
 
 impl TestApp {
@@ -134,6 +136,7 @@ impl TestApp {
             fake,
             courier,
             tone,
+            shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -689,15 +692,26 @@ impl TestApp {
     /// `"out_for_delivery"` or `"delivered"`). The steps go through the order
     /// service, never the routes, so a self-delivery order reaches `delivered`
     /// without being released (the handover route releases it). The payment is
-    /// 10 days old, so a release sends its payout at once. Creates the seller
-    /// 08011111111 and the buyer 08022222221, so call it once per app.
+    /// 10 days old, so a release sends its payout at once. Each call creates its
+    /// own seller, store and buyer (distinct phones), so it can be called any
+    /// number of times in one app.
     pub async fn shipped_order(&self, method: &str, status: &str) -> ShippedOrder {
         use server::{checkout::settle_payment, orders::service, payments::PaymentStatus};
         let now = time::OffsetDateTime::now_utc();
+        let n = self
+            .shipped_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let listing = self
-            .make_active_store_with_product("08011111111", "Mama Put", 10_000, 5)
+            .make_active_store_with_product(
+                &format!("0801{:07}", 5_000_000 + n),
+                &format!("Shipped Store {n}"),
+                10_000,
+                5,
+            )
             .await;
-        let (buyer_id, buyer_token) = self.sign_up_verified("08022222221").await;
+        let (buyer_id, buyer_token) = self
+            .sign_up_verified(&format!("0802{:07}", 5_000_000 + n))
+            .await;
         assert_eq!(
             self.set_cart(&buyer_token, listing.variant_id, 1)
                 .await

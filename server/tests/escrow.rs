@@ -222,12 +222,17 @@ async fn release(app: &TestApp, f: &Fixture) {
         .unwrap();
 }
 
-/// Releases a flagged payment as the owner (a buyer's release is refused while
-/// flagged), to test the payout gates behind the flag.
-async fn release_flagged(app: &TestApp, f: &Fixture) {
-    release_order(&app.state, f.order_id, ReleaseReason::OwnerDecision)
-        .await
-        .unwrap();
+/// Releases (unflagged, so the payout waits on settlement and is not sent
+/// inline), then flags the payment and makes the payout due: the send is what
+/// the flag must stop.
+async fn release_then_flag(app: &TestApp, f: &Fixture) {
+    release(app, f).await;
+    exec(app, "UPDATE checkouts SET provider_flagged = true").await;
+    exec(
+        app,
+        "UPDATE payouts SET send_after = now() - interval '1 minute'",
+    )
+    .await;
 }
 
 async fn send(app: &TestApp, id: Uuid) -> PayoutOutcome {
@@ -720,9 +725,9 @@ async fn auto_release_requires_delivered_and_due(pool: PgPool) {
 #[sqlx::test]
 async fn flagged_checkout_not_paid_out(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let f = picked_up_order(&app, 10_000, 10, true).await;
-    exec(&app, "UPDATE checkouts SET provider_flagged = true").await;
-    release_flagged(&app, &f).await;
+    let f = picked_up_order(&app, 10_000, 10, false).await;
+    release_then_flag(&app, &f).await;
+    send(&app, payout(&app).await.id).await;
     let p = payout(&app).await;
     assert_eq!(p.status, "scheduled");
     assert_eq!(p.last_error.as_deref(), Some("provider_flagged"));
@@ -766,9 +771,8 @@ async fn provider_unavailable_reschedules_with_backoff(pool: PgPool) {
 #[sqlx::test]
 async fn unavailable_after_max_attempts_goes_manual(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let f = picked_up_order(&app, 10_000, 10, true).await;
-    exec(&app, "UPDATE checkouts SET provider_flagged = true").await;
-    release_flagged(&app, &f).await;
+    let f = picked_up_order(&app, 10_000, 10, false).await;
+    release_then_flag(&app, &f).await;
     exec(&app, "UPDATE checkouts SET provider_flagged = false").await;
     exec(&app, "UPDATE payouts SET attempts = 7").await;
     make_due(&app).await;
@@ -1022,9 +1026,8 @@ async fn mono_mark_paid_inconclusive_needs_attestation(pool: PgPool) {
 #[sqlx::test]
 async fn expired_sending_lease_is_treated_as_unknown(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let f = picked_up_order(&app, 10_000, 10, true).await;
-    exec(&app, "UPDATE checkouts SET provider_flagged = true").await;
-    release_flagged(&app, &f).await;
+    let f = picked_up_order(&app, 10_000, 10, false).await;
+    release_then_flag(&app, &f).await;
     exec(&app, "UPDATE checkouts SET provider_flagged = false").await;
     make_due(&app).await;
     let p = payout(&app).await;
@@ -1721,9 +1724,8 @@ async fn seller_view_expected_payout_includes_self_fee(pool: PgPool) {
 #[sqlx::test]
 async fn concurrent_send_payout_creates_once(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let f = picked_up_order(&app, 10_000, 10, true).await;
-    exec(&app, "UPDATE checkouts SET provider_flagged = true").await;
-    release_flagged(&app, &f).await;
+    let f = picked_up_order(&app, 10_000, 10, false).await;
+    release_then_flag(&app, &f).await;
     exec(&app, "UPDATE checkouts SET provider_flagged = false").await;
     make_due(&app).await;
     let id = payout(&app).await.id;
@@ -2662,7 +2664,14 @@ async fn handover_on_flagged_payment_waits_for_the_window(pool: PgPool) {
     assert_eq!(res.status, 200, "{}", res.json);
     assert_eq!(order_status(&app, o.order_id).await, "delivered");
     assert!(
-        scalar_bool(&app, "SELECT release_at IS NOT NULL FROM orders").await,
+        scalar_bool(
+            &app,
+            &format!(
+                "SELECT release_at IS NOT NULL FROM orders WHERE id = '{}'",
+                o.order_id
+            )
+        )
+        .await,
         "release_at set"
     );
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
@@ -2734,4 +2743,32 @@ async fn owner_can_refund_flagged_order_after_handover(pool: PgPool) {
     assert_eq!(res.status, 200, "{}", res.json);
     assert_eq!(count(&app, "SELECT count(*) FROM refunds").await, 1);
     assert_eq!(count(&app, "SELECT count(*) FROM payouts").await, 0);
+}
+
+#[sqlx::test]
+async fn shipped_order_reaches_every_state(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let mut ids = std::collections::HashSet::new();
+    for method in ["self", "courier"] {
+        for status in ["picked_up", "out_for_delivery", "delivered"] {
+            let o = app.shipped_order(method, status).await;
+            assert!(ids.insert(o.order_id), "distinct orders");
+            let (got, delivery): (String, Option<String>) = sqlx::query_as(
+                "SELECT status::text, delivery_method::text FROM orders WHERE id = $1",
+            )
+            .bind(o.order_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+            assert_eq!(got, status, "{method}/{status}");
+            assert_eq!(delivery.as_deref(), Some(method), "{method}/{status}");
+            let payouts: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM payouts WHERE order_id = $1")
+                    .bind(o.order_id)
+                    .fetch_one(&app.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(payouts, 0, "{method}/{status}");
+        }
+    }
 }
