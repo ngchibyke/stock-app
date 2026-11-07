@@ -814,6 +814,16 @@ async fn return_round_trip(pool: PgPool) {
         audit_count(&app, "admin.dispute_return_requested", &id).await,
         1
     );
+    let detail: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit_log WHERE action = 'admin.dispute_return_requested'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        detail,
+        json!({ "paid_by": "seller", "note": "Photos show the wrong size" })
+    );
     let again = request_return(&app, &id, &support, ask).await;
     assert_eq!(again.status, 409);
     // No money moved and the order is still held.

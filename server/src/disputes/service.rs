@@ -634,14 +634,13 @@ pub async fn request_return(
     .execute(&mut *tx)
     .await
     .context("request return")?;
-    // The note is staff free text: audited by length only, never stored here.
     audit::record(
         &mut tx,
         Some(actor),
         "admin.dispute_return_requested",
         "dispute",
         Some(dispute_id),
-        json!({ "paid_by": paid_by.as_str(), "note_chars": note.chars().count() }),
+        json!({ "paid_by": paid_by.as_str(), "note": note }),
     )
     .await?;
     tx.commit().await.context("commit")?;
