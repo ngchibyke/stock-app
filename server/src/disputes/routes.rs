@@ -20,6 +20,8 @@ pub fn router() -> Router<AppState> {
         .route("/orders/{id}/dispute", post(open))
         .route("/disputes/{id}", get(show))
         .route("/disputes/{id}/withdraw", post(withdraw))
+        .route("/disputes/{id}/response", post(respond))
+        .route("/disputes/{id}/return-received", post(return_received))
 }
 
 #[derive(Deserialize)]
@@ -71,4 +73,37 @@ async fn withdraw(
         ));
     }
     Ok(Json(service::withdraw(&state, user.id, id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RespondBody {
+    body: String,
+    #[serde(default)]
+    photo_keys: Vec<String>,
+}
+
+async fn respond(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    AppJson(body): AppJson<RespondBody>,
+) -> Result<Json<DisputeView>, AppError> {
+    let statement = Statement {
+        body: body.body,
+        photo_keys: body.photo_keys,
+    };
+    Ok(Json(
+        service::respond(&state, user.id, parse_id(&id)?, statement).await?,
+    ))
+}
+
+async fn return_received(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<DisputeView>, AppError> {
+    Ok(Json(
+        service::return_received(&state, user.id, parse_id(&id)?).await?,
+    ))
 }

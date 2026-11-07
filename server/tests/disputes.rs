@@ -585,3 +585,337 @@ async fn dispute_blocked_behind_release_is_refused(pool: PgPool) {
     assert_eq!(disputes, 0);
     assert_eq!(hold(&app, o.order_id).await, (false, None));
 }
+
+// ------------------------------------------------- seller response and return
+
+const REPLY: &str = "It left the shop in perfect condition and was packed in a box";
+
+async fn open_id(app: &TestApp, o: &ShippedOrder) -> String {
+    let res = open(app, o, report(COMPLAINT)).await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    res.json["id"].as_str().unwrap().to_string()
+}
+
+async fn respond(app: &TestApp, id: &str, token: &str, body: &str) -> TestResponse {
+    app.request(
+        Method::POST,
+        &format!("/disputes/{id}/response"),
+        Some(json!({ "body": body, "photo_keys": ["evidence/s1.jpg"] })),
+        Some(token),
+    )
+    .await
+}
+
+async fn age_deadline(app: &TestApp, id: &str) {
+    sqlx::query(
+        "UPDATE disputes SET seller_respond_by = now() - interval '1 minute' WHERE id = $1::uuid",
+    )
+    .bind(id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+}
+
+async fn dispute_state(app: &TestApp, id: &str) -> (String, bool) {
+    sqlx::query_as("SELECT status, seller_missed_deadline FROM disputes WHERE id = $1::uuid")
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+async fn audit_count(app: &TestApp, action: &str, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = $1 AND subject_id = $2::uuid")
+        .bind(action)
+        .bind(id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+async fn request_return(app: &TestApp, id: &str, token: &str, body: Value) -> TestResponse {
+    app.request(
+        Method::POST,
+        &format!("/admin/disputes/{id}/request-return"),
+        Some(body),
+        Some(token),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn seller_responds_once_within_48_hours(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    let other = app.shipped_order("courier", "delivered").await;
+    let id = open_id(&app, &o).await;
+
+    // The buyer and another store's owner cannot answer for the seller.
+    assert_eq!(respond(&app, &id, &o.buyer_token, REPLY).await.status, 404);
+    assert_eq!(
+        respond(&app, &id, &other.seller_token, REPLY).await.status,
+        404
+    );
+    // A refused statement leaves the dispute open for a better one.
+    let bad = respond(&app, &id, &o.seller_token, "call me on 08012345678").await;
+    assert_eq!(
+        (bad.status, bad.json["error"]["code"].as_str()),
+        (422, Some("statement_refused"))
+    );
+
+    let res = respond(&app, &id, &o.seller_token, REPLY).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(res.json["status"], "awaiting_decision");
+    assert_eq!(res.json["seller_statement"]["body"], REPLY);
+    assert_eq!(res.json["seller_missed_deadline"], false);
+    let parse = |k: &str| {
+        time::OffsetDateTime::parse(
+            res.json[k].as_str().unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap()
+    };
+    let window = parse("seller_respond_by") - parse("opened_at");
+    assert_eq!(window.whole_hours(), SELLER_RESPONSE_HOURS);
+
+    let again = respond(&app, &id, &o.seller_token, REPLY).await;
+    assert_eq!(
+        (again.status, again.json["error"]["code"].as_str()),
+        (409, Some("already_responded"))
+    );
+    assert_eq!(audit_count(&app, "dispute.seller_responded", &id).await, 1);
+    // The audit row holds no statement text.
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail::text FROM audit_log WHERE action = 'dispute.seller_responded'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(!detail.contains("perfect condition"));
+    // Still held.
+    assert_eq!(hold(&app, o.order_id).await, (true, Some("dispute".into())));
+}
+
+#[sqlx::test]
+async fn late_response_is_closed(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    let id = open_id(&app, &o).await;
+    age_deadline(&app, &id).await;
+    let res = respond(&app, &id, &o.seller_token, REPLY).await;
+    assert_eq!(
+        (res.status, res.json["error"]["code"].as_str()),
+        (409, Some("response_closed"))
+    );
+    // Still closed once the job has moved it on.
+    run_due_jobs(&app.state).await;
+    let res = respond(&app, &id, &o.seller_token, REPLY).await;
+    assert_eq!(
+        (res.status, res.json["error"]["code"].as_str()),
+        (409, Some("response_closed"))
+    );
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dispute_statements WHERE party = 'seller'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[sqlx::test]
+async fn deadline_job_moves_dispute_on(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let late = app.shipped_order("courier", "delivered").await;
+    let fresh = app.shipped_order("courier", "delivered").await;
+    let late_id = open_id(&app, &late).await;
+    let fresh_id = open_id(&app, &fresh).await;
+    age_deadline(&app, &late_id).await;
+
+    let ticked = run_due_jobs(&app.state).await;
+    assert_eq!(ticked.disputes_advanced, 1);
+    assert_eq!(
+        dispute_state(&app, &late_id).await,
+        ("awaiting_decision".into(), true)
+    );
+    assert_eq!(
+        dispute_state(&app, &fresh_id).await,
+        ("awaiting_seller".into(), false)
+    );
+    assert_eq!(
+        audit_count(&app, "dispute.seller_missed_deadline", &late_id).await,
+        1
+    );
+    let ran: bool = sqlx::query_scalar(
+        "SELECT last_success_at IS NOT NULL FROM job_runs WHERE job = 'dispute_deadlines'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(ran);
+    // A second tick does nothing more.
+    assert_eq!(run_due_jobs(&app.state).await.disputes_advanced, 0);
+    assert_eq!(
+        audit_count(&app, "dispute.seller_missed_deadline", &late_id).await,
+        1
+    );
+    // The order is still held, and the view says the deadline was missed.
+    assert_eq!(
+        hold(&app, late.order_id).await,
+        (true, Some("dispute".into()))
+    );
+    let v = app
+        .request(
+            Method::GET,
+            &format!("/disputes/{late_id}"),
+            None,
+            Some(&late.seller_token),
+        )
+        .await;
+    assert_eq!(v.json["seller_missed_deadline"], true);
+}
+
+#[sqlx::test]
+async fn return_round_trip(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    let other = app.shipped_order("courier", "delivered").await;
+    let support = app.make_support().await;
+    let id = open_id(&app, &o).await;
+    let ask = json!({ "paid_by": "seller", "note": "Photos show the wrong size" });
+
+    // Not before the seller has answered or the deadline passed.
+    let early = request_return(&app, &id, &support, ask.clone()).await;
+    assert_eq!(
+        (early.status, early.json["error"]["code"].as_str()),
+        (409, Some("awaiting_seller"))
+    );
+    assert_eq!(respond(&app, &id, &o.seller_token, REPLY).await.status, 200);
+
+    // Staff only, a valid side, and a note.
+    for token in [&o.buyer_token, &o.seller_token] {
+        assert_eq!(
+            request_return(&app, &id, token, ask.clone()).await.status,
+            403
+        );
+    }
+    for body in [
+        json!({ "paid_by": "courier", "note": "x" }),
+        json!({ "paid_by": "buyer" }),
+        json!({ "paid_by": "buyer", "note": "  " }),
+        json!({ "paid_by": "buyer", "note": "x", "extra": 1 }),
+    ] {
+        assert_eq!(request_return(&app, &id, &support, body).await.status, 422);
+    }
+
+    let res = request_return(&app, &id, &support, ask.clone()).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(dispute_state(&app, &id).await.0, "awaiting_return");
+    assert_eq!(
+        audit_count(&app, "admin.dispute_return_requested", &id).await,
+        1
+    );
+    let again = request_return(&app, &id, &support, ask).await;
+    assert_eq!(again.status, 409);
+    // No money moved and the order is still held.
+    assert_eq!(payouts(&app, o.order_id).await, 0);
+    assert_eq!(hold(&app, o.order_id).await, (true, Some("dispute".into())));
+
+    // Both views show who pays; nobody else sees the dispute.
+    for token in [&o.buyer_token, &o.seller_token] {
+        let v = app
+            .request(Method::GET, &format!("/disputes/{id}"), None, Some(token))
+            .await;
+        assert_eq!(v.json["return_request"]["paid_by"], "seller");
+        assert_eq!(v.json["status"], "awaiting_return");
+        assert!(v.json["return_request"]["received_at"].is_null());
+    }
+    let v = app
+        .request(
+            Method::GET,
+            &format!("/disputes/{id}"),
+            None,
+            Some(&other.buyer_token),
+        )
+        .await;
+    assert_eq!(v.status, 404);
+
+    // Only the order's seller confirms receipt.
+    let path = format!("/disputes/{id}/return-received");
+    for token in [&o.buyer_token, &other.seller_token] {
+        let r = app
+            .request(Method::POST, &path, Some(json!({})), Some(token))
+            .await;
+        assert_eq!(r.status, 404);
+    }
+    let r = app
+        .request(Method::POST, &path, Some(json!({})), Some(&o.seller_token))
+        .await;
+    assert_eq!(r.status, 200, "{}", r.json);
+    assert_eq!(r.json["status"], "awaiting_decision");
+    assert_eq!(r.json["return_request"]["paid_by"], "seller");
+    assert!(!r.json["return_request"]["received_at"].is_null());
+    assert_eq!(audit_count(&app, "dispute.return_received", &id).await, 1);
+    let twice = app
+        .request(Method::POST, &path, Some(json!({})), Some(&o.seller_token))
+        .await;
+    assert_eq!(
+        (twice.status, twice.json["error"]["code"].as_str()),
+        (409, Some("not_awaiting_return"))
+    );
+
+    // The owner may also ask for the item back, once the deadline has passed.
+    let owner = app.owner_token().await;
+    let id2 = open_id(&app, &other).await;
+    age_deadline(&app, &id2).await;
+    run_due_jobs(&app.state).await;
+    let r = request_return(
+        &app,
+        &id2,
+        &owner,
+        json!({ "paid_by": "buyer", "note": "Return it first" }),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.json);
+}
+
+#[sqlx::test]
+async fn withdraw_during_return(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    let support = app.make_support().await;
+    let id = open_id(&app, &o).await;
+    age_deadline(&app, &id).await;
+    run_due_jobs(&app.state).await;
+    let r = request_return(
+        &app,
+        &id,
+        &support,
+        json!({ "paid_by": "buyer", "note": "Send it back first" }),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.json);
+    let w = withdraw(&app, &id, &o.buyer_token, json!({ "confirm": true })).await;
+    assert_eq!(w.status, 200, "{}", w.json);
+    assert_eq!(w.json["status"], "withdrawn");
+    assert_eq!(hold(&app, o.order_id).await, (false, None));
+    // Nothing more can happen to it.
+    let path = format!("/disputes/{id}/return-received");
+    let r = app
+        .request(Method::POST, &path, Some(json!({})), Some(&o.seller_token))
+        .await;
+    assert_eq!(
+        (r.status, r.json["error"]["code"].as_str()),
+        (409, Some("dispute_closed"))
+    );
+    let r = request_return(
+        &app,
+        &id,
+        &support,
+        json!({ "paid_by": "buyer", "note": "again" }),
+    )
+    .await;
+    assert_eq!(
+        (r.status, r.json["error"]["code"].as_str()),
+        (409, Some("dispute_closed"))
+    );
+}

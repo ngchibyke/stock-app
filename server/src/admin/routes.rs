@@ -45,6 +45,7 @@ pub fn router() -> Router<AppState> {
             put(set_holiday).delete(remove_holiday),
         )
         .merge(moderation::router())
+        .merge(super::disputes::router())
 }
 
 #[derive(Deserialize)]

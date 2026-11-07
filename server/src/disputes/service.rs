@@ -477,3 +477,208 @@ pub async fn view(
     }
     Ok(view)
 }
+
+/// Who pays for the return shipping (the side at fault). Nothing moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaidBy {
+    Buyer,
+    Seller,
+}
+
+impl PaidBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaidBy::Buyer => "buyer",
+            PaidBy::Seller => "seller",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "buyer" => Some(PaidBy::Buyer),
+            "seller" => Some(PaidBy::Seller),
+            _ => None,
+        }
+    }
+}
+
+/// The dispute's order, for the order-before-dispute lock order. `owner` of
+/// `Some` restricts to that store owner (404 otherwise).
+async fn order_of(
+    state: &AppState,
+    dispute_id: Uuid,
+    owner: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    sqlx::query_scalar(
+        "SELECT d.order_id FROM disputes d JOIN stores s ON s.id = d.store_id \
+         WHERE d.id = $1 AND ($2::uuid IS NULL OR s.owner_id = $2)",
+    )
+    .bind(dispute_id)
+    .bind(owner)
+    .fetch_optional(&state.db)
+    .await
+    .context("find dispute")?
+    .ok_or(AppError::NotFound)
+}
+
+#[derive(sqlx::FromRow)]
+struct Locked {
+    status: String,
+    late: bool,
+    responded: bool,
+    missed: bool,
+}
+
+/// Locks the order, then the dispute, in a new transaction.
+async fn lock_both(
+    state: &AppState,
+    order_id: Uuid,
+    dispute_id: Uuid,
+) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, Locked), AppError> {
+    let mut tx = begin_locked(state).await?;
+    sqlx::query("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(order_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(busy_err("order_busy", "lock order"))?;
+    let locked: Locked = sqlx::query_as(
+        "SELECT status, now() > seller_respond_by AS late, \
+                seller_responded_at IS NOT NULL AS responded, seller_missed_deadline AS missed \
+         FROM disputes WHERE id = $1 FOR UPDATE",
+    )
+    .bind(dispute_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(busy_err("dispute_busy", "lock dispute"))?;
+    Ok((tx, locked))
+}
+
+/// The seller answers once, before `seller_respond_by`.
+pub async fn respond(
+    state: &AppState,
+    seller: Uuid,
+    dispute_id: Uuid,
+    s: Statement,
+) -> Result<DisputeView, AppError> {
+    let order_id = order_of(state, dispute_id, Some(seller)).await?;
+    check_statement(&s)?;
+    let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
+    if d.responded {
+        return Err(AppError::Conflict("already_responded"));
+    }
+    match DisputeStatus::parse(&d.status) {
+        Some(DisputeStatus::AwaitingSeller) if !d.late => {}
+        Some(DisputeStatus::AwaitingSeller) => {
+            return Err(AppError::Conflict("response_closed"));
+        }
+        _ if d.missed => return Err(AppError::Conflict("response_closed")),
+        Some(st) if st.is_open() => return Err(AppError::Conflict("response_closed")),
+        _ => return Err(AppError::Conflict("dispute_closed")),
+    }
+    sqlx::query(
+        "INSERT INTO dispute_statements (dispute_id, party, body_enc, photo_keys) \
+         VALUES ($1, 'seller', $2, $3)",
+    )
+    .bind(dispute_id)
+    .bind(state.cipher.encrypt(s.body.trim()))
+    .bind(&s.photo_keys)
+    .execute(&mut *tx)
+    .await
+    .context("insert seller statement")?;
+    sqlx::query(
+        "UPDATE disputes SET status = 'awaiting_decision', seller_responded_at = now() \
+         WHERE id = $1",
+    )
+    .bind(dispute_id)
+    .execute(&mut *tx)
+    .await
+    .context("record response")?;
+    audit::record(
+        &mut tx,
+        Some(seller),
+        "dispute.seller_responded",
+        "dispute",
+        Some(dispute_id),
+        json!({ "photos": s.photo_keys.len() }),
+    )
+    .await?;
+    let (view, _, _) = load(&mut tx, state, dispute_id).await?;
+    tx.commit().await.context("commit")?;
+    Ok(view)
+}
+
+/// Staff ask for the item back before deciding. No money moves.
+pub async fn request_return(
+    state: &AppState,
+    actor: Uuid,
+    dispute_id: Uuid,
+    paid_by: PaidBy,
+    note: &str,
+) -> Result<(), AppError> {
+    let order_id = order_of(state, dispute_id, None).await?;
+    let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
+    match DisputeStatus::parse(&d.status) {
+        Some(DisputeStatus::AwaitingDecision) => {}
+        Some(DisputeStatus::AwaitingSeller) => return Err(AppError::Conflict("awaiting_seller")),
+        Some(DisputeStatus::AwaitingReturn) => {
+            return Err(AppError::Conflict("return_already_requested"));
+        }
+        _ => return Err(AppError::Conflict("dispute_closed")),
+    }
+    sqlx::query(
+        "UPDATE disputes SET status = 'awaiting_return', return_paid_by = $2, \
+                return_requested_at = now(), return_received_at = NULL WHERE id = $1",
+    )
+    .bind(dispute_id)
+    .bind(paid_by.as_str())
+    .execute(&mut *tx)
+    .await
+    .context("request return")?;
+    // The note is staff free text: audited by length only, never stored here.
+    audit::record(
+        &mut tx,
+        Some(actor),
+        "admin.dispute_return_requested",
+        "dispute",
+        Some(dispute_id),
+        json!({ "paid_by": paid_by.as_str(), "note_chars": note.chars().count() }),
+    )
+    .await?;
+    tx.commit().await.context("commit")?;
+    Ok(())
+}
+
+/// The seller confirms the item is back; the dispute returns to the queue.
+pub async fn return_received(
+    state: &AppState,
+    seller: Uuid,
+    dispute_id: Uuid,
+) -> Result<DisputeView, AppError> {
+    let order_id = order_of(state, dispute_id, Some(seller)).await?;
+    let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
+    match DisputeStatus::parse(&d.status) {
+        Some(DisputeStatus::AwaitingReturn) => {}
+        Some(st) if st.is_open() => return Err(AppError::Conflict("not_awaiting_return")),
+        _ => return Err(AppError::Conflict("dispute_closed")),
+    }
+    sqlx::query(
+        "UPDATE disputes SET status = 'awaiting_decision', return_received_at = now() \
+         WHERE id = $1",
+    )
+    .bind(dispute_id)
+    .execute(&mut *tx)
+    .await
+    .context("record return")?;
+    audit::record(
+        &mut tx,
+        Some(seller),
+        "dispute.return_received",
+        "dispute",
+        Some(dispute_id),
+        json!({}),
+    )
+    .await?;
+    let (view, _, _) = load(&mut tx, state, dispute_id).await?;
+    tx.commit().await.context("commit")?;
+    Ok(view)
+}

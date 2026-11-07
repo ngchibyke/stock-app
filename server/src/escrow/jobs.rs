@@ -57,6 +57,9 @@
 //! 11. `chat_held`: messages held while the tone check was down, oldest first
 //!     per sender and conversation -> [`held::run`]. See
 //!     [`chat::held`](crate::chat::held).
+//! 12. `dispute_deadlines`: `awaiting_seller` disputes past their stored
+//!     `seller_respond_by` -> `awaiting_decision` with `seller_missed_deadline`
+//!     set -> [`disputes::jobs::run`](crate::disputes::jobs::run).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -107,6 +110,7 @@ use crate::{
         events::{POLL_AFTER, POLLED_STATUSES, poll_one},
         shipments::{self, book_one, cancel_one},
     },
+    disputes::jobs as dispute_jobs,
     error::AppError,
     settings,
 };
@@ -170,6 +174,7 @@ pub struct JobReport {
     pub shipments_cancelled: u32,
     pub shipments_polled: u32,
     pub chat_held: u32,
+    pub disputes_advanced: u32,
     pub failed: u32,
 }
 
@@ -197,7 +202,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 11] = [
+    let jobs: [(&str, Job); 12] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -209,6 +214,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (CANCEL_SHIPMENTS, Job::CancelShipments),
         (POLL_SHIPMENTS, Job::PollShipments),
         (held::CHAT_HELD, Job::ChatHeld),
+        (dispute_jobs::DISPUTE_DEADLINES, Job::DisputeDeadlines),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -235,6 +241,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::CancelShipments => &mut report.shipments_cancelled,
             Job::PollShipments => &mut report.shipments_polled,
             Job::ChatHeld => &mut report.chat_held,
+            Job::DisputeDeadlines => &mut report.disputes_advanced,
         };
         *slot += stats.done;
     }
@@ -265,6 +272,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 shipments_cancelled = r.shipments_cancelled,
                 shipments_polled = r.shipments_polled,
                 chat_held = r.chat_held,
+                disputes_advanced = r.disputes_advanced,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -311,6 +319,7 @@ enum Job {
     CancelShipments,
     PollShipments,
     ChatHeld,
+    DisputeDeadlines,
 }
 
 impl Job {
@@ -327,6 +336,7 @@ impl Job {
             Job::CancelShipments => cancel_shipments(state, cancel).await,
             Job::PollShipments => poll_shipments(state, cancel).await,
             Job::ChatHeld => held::run(state, cancel).await,
+            Job::DisputeDeadlines => dispute_jobs::run(state, cancel).await,
         }
     }
 }
