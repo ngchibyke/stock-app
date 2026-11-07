@@ -12,7 +12,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::LOCK_TIMEOUT;
-use crate::{audit, checkout::service::busy_err, error::AppError};
+use crate::{
+    audit, checkout::service::busy_err, disputes::service::open_for_order, error::AppError,
+};
 
 /// Statuses a hold makes sense on: money still in escrow, or a payout that
 /// may not have gone yet.
@@ -76,9 +78,15 @@ pub async fn hold(db: &PgPool, actor: Uuid, order_id: Uuid, reason: &str) -> Res
     Ok(())
 }
 
+/// An order with an open dispute is 409 `dispute_open`: the dispute's decision
+/// or withdrawal lifts its hold.
 pub async fn unhold(db: &PgPool, actor: Uuid, order_id: Uuid, note: &str) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
     let (status, held, reason) = lock_order(&mut tx, order_id).await?;
+    // A dispute's hold is lifted by its decision or withdrawal, never here.
+    if open_for_order(&mut tx, order_id).await?.is_some() {
+        return Err(AppError::Conflict("dispute_open"));
+    }
     if !held {
         return Err(AppError::Conflict("not_held"));
     }

@@ -220,7 +220,7 @@ struct DisputeRow {
 }
 
 /// The dispute as the parties see it, plus the two people allowed to see it.
-async fn load(
+pub(crate) async fn load(
     conn: &mut PgConnection,
     state: &AppState,
     dispute_id: Uuid,
@@ -282,7 +282,7 @@ async fn load(
     Ok((view, d.buyer_id, d.owner_id))
 }
 
-async fn begin_locked(
+pub(crate) async fn begin_locked(
     state: &AppState,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, AppError> {
     let mut tx = state.db.begin().await.context("begin")?;

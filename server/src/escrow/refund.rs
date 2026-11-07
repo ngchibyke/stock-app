@@ -38,6 +38,7 @@ use crate::{
     AppState, audit,
     checkout::service::busy_err,
     delivery::shipments,
+    disputes,
     error::AppError,
     ledger::{self, Account, Entry},
     limits::MAX_STOCK,
@@ -73,7 +74,8 @@ fn db_err(ctx: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
 /// unheld shipped order is 409 `order_not_held` (hold it first, which stops
 /// its release). Not a no-op on retry: an order already `refund_pending` or
 /// `refunded` (or in any other state) is 409 `invalid_order_state` naming it;
-/// a `completed` order is 409 `already_released`.
+/// a `completed` order is 409 `already_released`. An order with an open
+/// dispute is 409 `dispute_open`: its decision settles it ([`crate::disputes::decide`]).
 pub async fn owner_refund_order(
     state: &AppState,
     order_id: Uuid,
@@ -95,6 +97,14 @@ pub async fn owner_refund_order(
         .await
         .context("set lock_timeout")?;
     let begun = begin(&mut tx, order_id, status == "paid", "owner_decision", true).await?;
+    // Checked under the order lock `begin` took; an error rolls back what it
+    // booked. An open dispute is settled through its decision, never directly.
+    if disputes::service::open_for_order(&mut tx, order_id)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict("dispute_open"));
+    }
     audit::record(
         &mut tx,
         Some(actor),

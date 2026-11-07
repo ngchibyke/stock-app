@@ -79,6 +79,7 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     checkout::service::busy_err,
+    disputes,
     error::AppError,
     ledger::{self, Account, Entry},
     money::{self, FeeSchedule},
@@ -385,6 +386,8 @@ pub async fn release_order(
 /// the order's hold in the same transaction and audits the owner and `note`.
 /// Not a no-op on retry: an order that is not `picked_up`/`out_for_delivery`/
 /// `delivered` (e.g. already released) is 409 `invalid_order_state` naming its status.
+/// An order with an open dispute is 409 `dispute_open`: its decision settles it
+/// ([`crate::disputes::decide`]).
 pub async fn release_by_owner(
     state: &AppState,
     order_id: Uuid,
@@ -429,6 +432,14 @@ async fn release(
         ),
         None => None,
     };
+    // An open dispute is settled through its decision, never directly.
+    if owner.is_some()
+        && disputes::service::open_for_order(&mut tx, order_id)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict("dispute_open"));
+    }
     let (payout_id, status, send_after) =
         match release_in(&mut tx, &settings, order_id, reason, None).await? {
             ReleasedIn::Done {

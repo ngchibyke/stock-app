@@ -1,5 +1,5 @@
-//! Staff dispute routes: asking for the item back. The decision and the
-//! staff screen are added here by later tasks.
+//! Staff dispute routes: asking for the item back, and the owner's decision.
+//! The staff screen is added here by a later task.
 
 use axum::{
     Json, Router,
@@ -9,10 +9,13 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Staff, note, parse_id};
+use super::{Owner, Staff, note, parse_id};
 use crate::{
     AppState,
-    disputes::service::{self, PaidBy},
+    disputes::{
+        decide::{self, Decision},
+        service::{self, DisputeView, PaidBy},
+    },
     error::AppError,
     extract::AppJson,
 };
@@ -20,7 +23,52 @@ use crate::{
 const NOTE_MAX: usize = 500;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/admin/disputes/{id}/request-return", post(request_return))
+    Router::new()
+        .route("/admin/disputes/{id}/request-return", post(request_return))
+        .route("/admin/disputes/{id}/decide", post(decide))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideBody {
+    decision: String,
+    refund_kobo: Option<i64>,
+    note: Option<String>,
+}
+
+/// Owner only (Support gets 403 before the body is read). `refund_kobo` is
+/// required for `partial_refund` and refused otherwise.
+async fn decide(
+    State(state): State<AppState>,
+    Owner(user): Owner,
+    Path(id): Path<String>,
+    AppJson(body): AppJson<DecideBody>,
+) -> Result<Json<DisputeView>, AppError> {
+    let id = parse_id(&id)?;
+    let decision = match (body.decision.as_str(), body.refund_kobo) {
+        ("partial_refund", Some(kobo)) => Decision::PartialRefund(kobo),
+        ("partial_refund", None) => {
+            return Err(AppError::Validation(
+                "refund_kobo is required for partial_refund".into(),
+            ));
+        }
+        ("full_refund" | "release", Some(_)) => {
+            return Err(AppError::Validation(
+                "refund_kobo is only allowed for partial_refund".into(),
+            ));
+        }
+        ("full_refund", None) => Decision::FullRefund,
+        ("release", None) => Decision::Release,
+        _ => {
+            return Err(AppError::Validation(
+                "decision must be full_refund, partial_refund or release".into(),
+            ));
+        }
+    };
+    let note = note("note", body.note.as_deref(), NOTE_MAX)?;
+    Ok(Json(
+        decide::decide(&state, user.id, id, decision, &note).await?,
+    ))
 }
 
 #[derive(Deserialize)]
