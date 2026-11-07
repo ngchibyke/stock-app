@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod limits;
 pub mod moderation;
 pub mod money;
+pub mod notify;
 pub mod orders;
 pub mod payments;
 pub mod payout_accounts;
@@ -112,6 +113,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(chat::routes::router())
         .merge(reviews::routes::router())
         .merge(disputes::routes::router())
+        .merge(notify::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())

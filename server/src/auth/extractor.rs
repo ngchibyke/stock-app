@@ -20,6 +20,8 @@ pub enum Role {
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub id: Uuid,
+    /// The session this request's bearer token belongs to.
+    pub session_id: Uuid,
     pub role: Role,
     pub is_seller: bool,
     pub phone_verified: bool,
@@ -47,8 +49,8 @@ impl FromRequestParts<AppState> for AuthUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
         let token = bearer_token(&parts.headers).ok_or(AppError::Unauthorized)?;
-        let row: Option<(Uuid, Role, bool, bool)> = sqlx::query_as(
-            "SELECT u.id, u.role, u.is_seller, u.phone_verified_at IS NOT NULL \
+        let row: Option<(Uuid, Uuid, Role, bool, bool)> = sqlx::query_as(
+            "SELECT u.id, s.id, u.role, u.is_seller, u.phone_verified_at IS NOT NULL \
              FROM sessions s JOIN users u ON u.id = s.user_id \
              WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() \
                AND u.deleted_at IS NULL",
@@ -57,9 +59,11 @@ impl FromRequestParts<AppState> for AuthUser {
         .fetch_optional(&state.db)
         .await
         .map_err(anyhow::Error::from)?;
-        let (id, role, is_seller, phone_verified) = row.ok_or(AppError::Unauthorized)?;
+        let (id, session_id, role, is_seller, phone_verified) =
+            row.ok_or(AppError::Unauthorized)?;
         Ok(AuthUser {
             id,
+            session_id,
             role,
             is_seller,
             phone_verified,
