@@ -112,6 +112,17 @@ async fn owner_screen_has_every_section(pool: PgPool) {
 
     let id = open_id(&app, &o).await;
     respond(&app, &o, &id).await;
+    // Inserted newest first: the screen orders by receipt time. Other events
+    // on the order (from the fixture) are counted by status below.
+    sqlx::query(
+        "INSERT INTO delivery_events (order_id, source, status, occurred_at, received_at, dedupe_key)          VALUES ($1, 'courier', 'zz_late', NULL, now() + interval '2 hours', $2),                 ($1, 'seller', 'zz_early', now() + interval '1 hour', now() + interval '1 hour', $3)",
+    )
+    .bind(o.order_id)
+    .bind(format!("test:{}:late", o.order_id))
+    .bind(format!("test:{}:early", o.order_id))
+    .execute(&app.pool)
+    .await
+    .unwrap();
 
     let res = screen(&app, &id, &owner).await;
     assert_eq!(res.status, 200, "{}", res.json);
@@ -139,7 +150,21 @@ async fn owner_screen_has_every_section(pool: PgPool) {
             .map(|s| s["key"].clone()),
         Some(json!("out_for_delivery"))
     );
-    assert!(v["delivery_events"].is_array());
+    let events = v["delivery_events"].as_array().unwrap();
+    let last_two: Vec<&Value> = events.iter().rev().take(2).rev().collect();
+    assert_eq!(last_two[0]["source"], "seller");
+    assert_eq!(last_two[0]["status"], "zz_early");
+    assert!(last_two[0]["occurred_at"].is_string());
+    assert!(last_two[0]["received_at"].is_string());
+    assert_eq!(last_two[1]["source"], "courier");
+    assert_eq!(last_two[1]["status"], "zz_late");
+    assert!(last_two[1]["occurred_at"].is_null());
+    assert!(last_two[1]["received_at"].is_string());
+    let times: Vec<&str> = events
+        .iter()
+        .map(|e| e["received_at"].as_str().unwrap())
+        .collect();
+    assert!(times.windows(2).all(|w| w[0] <= w[1]), "{times:?}");
     assert_eq!(v["handover"]["applies"], true);
     assert_eq!(v["handover"]["wrong_entries"], 1);
     assert_eq!(v["handover"]["delivered_with_code"], false);
