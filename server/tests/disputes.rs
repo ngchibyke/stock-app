@@ -503,3 +503,85 @@ async fn seller_sees_buyer_as_buyer(pool: PgPool) {
     let res = withdraw(&app, id, &o.seller_token, json!({ "confirm": true })).await;
     assert_eq!(res.status, 404);
 }
+
+#[sqlx::test]
+async fn dispute_blocked_behind_release_is_refused(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    make_due(&app, o.order_id).await;
+
+    // Stand in for a release in flight: it holds the order's row lock.
+    let mut tx = app.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM orders WHERE id = $1 FOR UPDATE")
+        .bind(o.order_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    let task = {
+        let app_router = server::build_app(app.state.clone());
+        let path = format!("/orders/{}/dispute", o.order_id);
+        let token = o.buyer_token.clone();
+        tokio::spawn(async move {
+            use tower::ServiceExt;
+            let req = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(report(COMPLAINT).to_string()))
+                .unwrap();
+            let res = app_router.oneshot(req).await.unwrap();
+            let status = res.status().as_u16();
+            let bytes = http_body_util::BodyExt::collect(res.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        })
+    };
+
+    // Wait until the dispute is queued behind our lock.
+    let mut waiting = false;
+    for _ in 0..200 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE wait_event_type = 'Lock' AND datname = current_database()",
+        )
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        if n > 0 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(waiting, "the dispute never queued behind the order lock");
+
+    // The release lands: the order is completed and the payout exists.
+    sqlx::query("UPDATE orders SET status = 'completed' WHERE id = $1")
+        .bind(o.order_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO payouts (order_id, reference, provider, amount_kobo, status, release_reason) \
+         VALUES ($1, 'PO1TEST', 'fake', 100, 'manual', 'auto_after_delivery')",
+    )
+    .bind(o.order_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let (status, body) = task.await.unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "already_released");
+    let disputes: i64 = sqlx::query_scalar("SELECT count(*) FROM disputes")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(disputes, 0);
+    assert_eq!(hold(&app, o.order_id).await, (false, None));
+}
