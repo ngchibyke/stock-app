@@ -351,8 +351,9 @@ pub struct RefundMarked {
 
 /// The owner refunded the buyer by hand. The money left escrow when the
 /// refund was requested (key `("refund", id)`), so nothing more is booked;
-/// the refund becomes `completed` and its order `refunded` (409
-/// `order_state_changed` if the order is no longer `refund_pending`).
+/// the refund becomes `completed` and, for a full refund, its order
+/// `refunded` (409 `order_state_changed` if the order is no longer
+/// `refund_pending`). A partial refund's order stays `completed`.
 pub async fn mark_refunded(
     db: &PgPool,
     actor: Uuid,
@@ -375,14 +376,15 @@ pub async fn mark_refunded(
     .await
     .map_err(db_err("lock order"))?
     .ok_or(AppError::NotFound)?;
-    let (status, amount, attempts, timeouts): (String, i64, i32, i32) = sqlx::query_as(
-        "SELECT status::text, amount_kobo, attempts, timeouts FROM refunds \
-         WHERE id = $1 FOR UPDATE",
-    )
-    .bind(refund_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(db_err("lock refund"))?;
+    let (status, amount, attempts, timeouts, kind): (String, i64, i32, i32, String) =
+        sqlx::query_as(
+            "SELECT status::text, amount_kobo, attempts, timeouts, kind FROM refunds \
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(refund_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err("lock refund"))?;
     let marked = RefundMarked {
         provider_attempts: attempts,
         provider_outcome_unknown: timeouts > 0,
@@ -404,16 +406,20 @@ pub async fn mark_refunded(
     .execute(&mut *tx)
     .await
     .context("mark refund completed")?;
-    let order = sqlx::query(
-        "UPDATE orders SET status = 'refunded' WHERE id = $1 AND status = 'refund_pending'",
-    )
-    .bind(order_id)
-    .execute(&mut *tx)
-    .await
-    .context("mark order refunded")?;
-    if order.rows_affected() != 1 {
-        // Dropping the transaction rolls the refund update back.
-        return Err(AppError::Conflict("order_state_changed"));
+    // A partial refund's order was released with the rest of its money and
+    // stays `completed`; only a full refund makes the order `refunded`.
+    if kind == "full" {
+        let order = sqlx::query(
+            "UPDATE orders SET status = 'refunded' WHERE id = $1 AND status = 'refund_pending'",
+        )
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await
+        .context("mark order refunded")?;
+        if order.rows_affected() != 1 {
+            // Dropping the transaction rolls the refund update back.
+            return Err(AppError::Conflict("order_state_changed"));
+        }
     }
     audit::record(
         &mut tx,
@@ -427,6 +433,7 @@ pub async fn mark_refunded(
             "provider_reference": provider_reference,
             "order_id": order_id,
             "amount_kobo": amount,
+            "kind": kind,
             "provider_attempts": marked.provider_attempts,
             "provider_outcome_unknown": marked.provider_outcome_unknown,
         }),

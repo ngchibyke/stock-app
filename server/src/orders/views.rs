@@ -212,7 +212,9 @@ impl Row {
 
     /// What the seller should expect to be paid (see the module docs): the
     /// payout's own amount once released, else the sum release makes. None
-    /// once the order is cancelled or refunded.
+    /// once the order is cancelled or refunded. A partially refunded order
+    /// (`completed`) shows its payout's amount, which is on the retained items
+    /// only: the estimate from the order's own totals would overstate it.
     fn expected_payout(&self, live: Option<&FeeSchedule>) -> Option<i64> {
         if matches!(
             self.status.as_str(),
