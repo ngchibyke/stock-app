@@ -53,6 +53,12 @@ pub struct PayoutView {
     pub status: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DisputeSummary {
+    pub id: Uuid,
+    pub status: String,
+}
+
 /// Fields common to both audiences.
 #[derive(Debug, Serialize)]
 pub struct OrderCore {
@@ -64,6 +70,9 @@ pub struct OrderCore {
     pub delivery_fee_kobo: i64,
     pub total_kobo: i64,
     pub held: bool,
+    /// Left out when the order has no dispute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispute: Option<DisputeSummary>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub paid_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -172,6 +181,8 @@ struct Row {
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
     held: bool,
+    dispute_id: Option<Uuid>,
+    dispute_status: Option<String>,
     paid_at: Option<OffsetDateTime>,
     ship_by: Option<OffsetDateTime>,
     delivered_at: Option<OffsetDateTime>,
@@ -238,6 +249,7 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
         o.items_total_kobo, o.delivery_fee_kobo, COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
         o.platform_cut_kobo, \
         o.collection_fee_share_kobo, (o.held_at IS NOT NULL) AS held, \
+        d.id AS dispute_id, d.status AS dispute_status, \
         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ship_by, o.delivered_at, o.release_at, \
         o.created_at, u.display_name AS buyer_display_name, \
         p.status::text AS payout_status, p.amount_kobo AS payout_amount_kobo, \
@@ -247,7 +259,8 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
      JOIN checkouts c ON c.id = o.checkout_id \
      JOIN users u ON u.id = o.buyer_id \
      JOIN stores s ON s.id = o.store_id \
-     LEFT JOIN payouts p ON p.order_id = o.id";
+     LEFT JOIN payouts p ON p.order_id = o.id \
+     LEFT JOIN disputes d ON d.order_id = o.id";
 
 async fn items_for(db: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<ItemView>>, AppError> {
     let rows: Vec<(Uuid, String, Value, i64, i32)> = sqlx::query_as(
@@ -289,6 +302,10 @@ fn core(r: &Row, items: Vec<ItemView>, seller: bool) -> Result<OrderCore, AppErr
         delivery_fee_kobo: r.delivery_fee_kobo,
         total_kobo: total,
         held: r.held,
+        dispute: r
+            .dispute_id
+            .zip(r.dispute_status.clone())
+            .map(|(id, status)| DisputeSummary { id, status }),
         paid_at: r.paid_at,
         ship_by: r.ship_by,
         delivered_at: r.delivered_at,

@@ -23,3 +23,7 @@ pub const CHAT_SENDS_PER_MINUTE: i64 = 20;
 pub const CHAT_SENDS_PER_DAY: i64 = 500;
 /// Conversations one user may start per day.
 pub const NEW_CONVERSATIONS_PER_DAY: i64 = 20;
+/// Longest dispute statement, in characters (after trimming).
+pub const MAX_DISPUTE_CHARS: usize = 2000;
+/// Most photos on one dispute statement.
+pub const MAX_DISPUTE_PHOTOS: usize = 5;

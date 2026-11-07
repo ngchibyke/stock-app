@@ -9,6 +9,7 @@ pub mod config;
 pub mod couriers;
 pub mod crypto;
 pub mod delivery;
+pub mod disputes;
 pub mod error;
 pub mod escrow;
 pub mod extract;
@@ -110,6 +111,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(orders::routes::router())
         .merge(chat::routes::router())
         .merge(reviews::routes::router())
+        .merge(disputes::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())

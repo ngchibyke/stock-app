@@ -191,7 +191,7 @@ async fn cancel(
 }
 
 /// The body must be exactly `{"confirm": true}`.
-fn confirmed(body: &[u8]) -> bool {
+pub(crate) fn confirmed(body: &[u8]) -> bool {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Confirm {
