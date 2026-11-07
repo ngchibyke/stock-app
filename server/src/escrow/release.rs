@@ -229,6 +229,7 @@ struct ReleaseRow {
     paid_at: Option<OffsetDateTime>,
     has_payout: bool,
     held: bool,
+    provider_flagged: bool,
     delivered: bool,
     release_due: bool,
     fee_small_kobo: Option<i64>,
@@ -319,7 +320,7 @@ async fn release(
                 o.platform_cut_kobo, o.collection_fee_share_kobo, \
                 o.collection_fee_courier_kobo, o.checkout_id, c.paid_at, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
-                o.held_at IS NOT NULL AS held, o.delivered_at IS NOT NULL AS delivered, \
+                o.held_at IS NOT NULL AS held, c.provider_flagged, o.delivered_at IS NOT NULL AS delivered, \
                 COALESCE(o.release_at <= now(), false) AS release_due, \
                 o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
                 o.stamp_duty_kobo, o.stamp_duty_threshold_kobo \
@@ -341,6 +342,12 @@ async fn release(
     // The release rules, enforced here as well as by the callers.
     if row.held && reason != ReleaseReason::OwnerDecision {
         return Err(AppError::Conflict("order_held"));
+    }
+    // A provider flag blocks a buyer's release too: after it the owner could no
+    // longer refund. The auto-release job and the owner's decision are gated
+    // elsewhere (the job skips a flagged payment; the owner decides knowingly).
+    if row.provider_flagged && reason == ReleaseReason::BuyerConfirmed {
+        return Err(AppError::Conflict("payment_under_review"));
     }
     if reason == ReleaseReason::AutoAfterDelivery && !(row.delivered && row.release_due) {
         return Ok(Released::Unchanged(row.status));
