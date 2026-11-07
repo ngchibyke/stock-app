@@ -171,22 +171,26 @@ impl ShipmentFacts {
     }
 }
 
+const FACTS_SELECT: &str = "SELECT o.buyer_id, o.store_id, s.name AS store_name,         o.status::text AS status, o.delivery_method::text AS delivery_method, o.promised_date,         (o.held_at IS NOT NULL) AS held, o.delivery_area,         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ready_at, o.picked_up_at,         o.out_for_delivery_at, o.delivered_at, o.completed_at,         o.delivery_address_enc, o.handover_code_enc     FROM orders o     JOIN checkouts c ON c.id = o.checkout_id     JOIN stores s ON s.id = o.store_id";
+
+/// The steps the buyer sees on order `order_id`, for staff reading a dispute.
+/// No contact, code or address is read into the result.
+pub async fn staff_timeline(db: &PgPool, order_id: Uuid) -> Result<Vec<Step>, AppError> {
+    let facts: Facts = sqlx::query_as(&format!("{FACTS_SELECT} WHERE o.id = $1"))
+        .bind(order_id)
+        .fetch_optional(db)
+        .await
+        .context("load staff timeline")?
+        .ok_or(AppError::NotFound)?;
+    Ok(steps(&facts))
+}
+
 /// The tracking view of order `order_id` for `viewer`; 404 for anyone who is
 /// not its buyer or its store's owner.
 pub async fn get(state: &AppState, viewer: Uuid, order_id: Uuid) -> Result<TrackingView, AppError> {
-    let facts: Facts = sqlx::query_as(
-        "SELECT o.buyer_id, o.store_id, s.name AS store_name, o.status::text AS status, \
-                o.delivery_method::text AS delivery_method, o.promised_date, \
-                (o.held_at IS NOT NULL) AS held, o.delivery_area, \
-                COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ready_at, o.picked_up_at, \
-                o.out_for_delivery_at, o.delivered_at, o.completed_at, \
-                o.delivery_address_enc, o.handover_code_enc \
-         FROM orders o \
-         JOIN checkouts c ON c.id = o.checkout_id \
-         JOIN stores s ON s.id = o.store_id \
-         WHERE o.id = $1 AND (o.buyer_id = $2 \
-               OR (s.owner_id = $2 AND COALESCE(o.paid_at, c.paid_at) IS NOT NULL))",
-    )
+    let facts: Facts = sqlx::query_as(&format!(
+        "{FACTS_SELECT} WHERE o.id = $1 AND (o.buyer_id = $2                OR (s.owner_id = $2 AND COALESCE(o.paid_at, c.paid_at) IS NOT NULL))"
+    ))
     .bind(order_id)
     .bind(viewer)
     .fetch_optional(&state.db)

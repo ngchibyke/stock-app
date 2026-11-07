@@ -5,3 +5,4 @@ pub mod decide;
 pub mod jobs;
 pub mod routes;
 pub mod service;
+pub mod staff;

@@ -1,29 +1,33 @@
 //! Staff dispute routes: asking for the item back, and the owner's decision.
-//! The staff screen is added here by a later task.
+//! The staff queue and screen (read-only) are served here too.
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::post,
+    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Owner, Staff, note, parse_id};
+use super::{Owner, Staff, note, parse_id, views};
 use crate::{
     AppState,
     disputes::{
         decide::{self, Decision},
-        service::{self, DisputeView, PaidBy},
+        service::{self, DisputeStatus, DisputeView, PaidBy},
+        staff::{self, QueueRow, StaffDisputeView},
     },
     error::AppError,
-    extract::AppJson,
+    extract::{AppJson, AppQuery},
 };
 
 const NOTE_MAX: usize = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/admin/disputes", get(queue))
+        .route("/admin/disputes/{id}", get(screen))
         .route("/admin/disputes/{id}/request-return", post(request_return))
         .route("/admin/disputes/{id}/decide", post(decide))
 }
@@ -92,4 +96,42 @@ async fn request_return(
     Ok(Json(
         json!({ "status": "awaiting_return", "paid_by": paid_by.as_str() }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Oldest first. Ids, reasons and amounts only; the read is audited.
+async fn queue(
+    State(state): State<AppState>,
+    Staff(user): Staff,
+    AppQuery(q): AppQuery<QueueQuery>,
+) -> Result<Json<views::Items<QueueRow>>, AppError> {
+    let status = q
+        .status
+        .as_deref()
+        .map(|s| {
+            DisputeStatus::parse(s)
+                .ok_or_else(|| AppError::Validation("status is not a dispute status".into()))
+        })
+        .transpose()?;
+    let limit = views::limit(q.limit)?;
+    let items = staff::queue(&state.db, status, limit).await?;
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    views::record_view(&mut conn, user.id, "disputes", items.len()).await?;
+    Ok(Json(views::Items { items }))
+}
+
+/// Owner: any dispute. Support: open disputes, without originals.
+async fn screen(
+    State(state): State<AppState>,
+    staff: Staff,
+    Path(id): Path<String>,
+) -> Result<Json<StaffDisputeView>, AppError> {
+    let id = parse_id(&id)?;
+    Ok(Json(staff::screen(&state, &staff, id).await?))
 }
