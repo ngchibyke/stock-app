@@ -17,7 +17,7 @@
 //! Ledger: `("refund", refund_id)` posts `escrow −refund_kobo`, `refunds
 //! +refund_kobo`; then `("release", order_id)` posts on `retained + delivery`,
 //! which empties the order's escrow. The order ends `completed` with its hold
-//! cleared, and its `refunds` row has `kind = 'partial'` (reason
+//! cleared, its `platform_cut_kobo` is the cut on `retained`, and its `refunds` row has `kind = 'partial'` (reason
 //! `dispute_partial`), so [`super::refund::send_refund`] and the owner's mark-refunded
 //! leave the order `completed`.
 //!
@@ -67,6 +67,7 @@ struct PartialRow {
     status: String,
     items_total_kobo: i64,
     platform_cut_bps: i32,
+    platform_cut_kobo: i64,
     checkout_id: Uuid,
     provider: String,
     held: bool,
@@ -98,7 +99,7 @@ pub async fn partial_refund_in(
         .map_err(db_err("set lock_timeout"))?;
     let row: PartialRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.platform_cut_bps, \
-                o.checkout_id, c.provider, o.held_at IS NOT NULL AS held, \
+                o.platform_cut_kobo, o.checkout_id, c.provider, o.held_at IS NOT NULL AS held, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
                 EXISTS (SELECT 1 FROM refunds r WHERE r.order_id = o.id) AS has_refund \
          FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
@@ -135,6 +136,15 @@ pub async fn partial_refund_in(
     }
     let retained = items - refund_kobo;
     let cut = money::cut_kobo(retained, row.platform_cut_bps);
+    // The order's cut becomes the one actually taken (the release books it,
+    // and a released order's snapshot is never recomputed), so the seller's
+    // view shows it beside the payout. The original is kept in the audit.
+    sqlx::query("UPDATE orders SET platform_cut_kobo = $2 WHERE id = $1")
+        .bind(order_id)
+        .bind(cut)
+        .execute(&mut *conn)
+        .await
+        .context("record partial cut")?;
 
     let reference = payments::new_reference(REFERENCE_PREFIX);
     let refund_id: Uuid = sqlx::query_scalar(
@@ -196,6 +206,7 @@ pub async fn partial_refund_in(
             "refund_kobo": refund_kobo,
             "retained_kobo": retained,
             "cut_kobo": cut,
+            "original_cut_kobo": row.platform_cut_kobo,
         }),
     )
     .await?;

@@ -10,6 +10,9 @@
 //!   order when it was paid (the live one only for orders paid before the
 //!   snapshot existed), is never below 0, and is left out once the order is
 //!   cancelled or refunded.
+//! - Both views carry `refunded_kobo` (the order's refund amount, full or
+//!   partial) when the order has a refund. After a partial refund the
+//!   order's `platform_cut_kobo` is the cut on the retained items.
 //!
 //! Every query puts the principal in the SQL, so a missing order and someone
 //! else's order are indistinguishable (both `NotFound`).
@@ -73,6 +76,10 @@ pub struct OrderCore {
     /// Left out when the order has no dispute.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispute: Option<DisputeSummary>,
+    /// What went back to the buyer: the order's refund (full or partial).
+    /// Left out when the order has no refund.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refunded_kobo: Option<i64>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub paid_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -191,6 +198,8 @@ struct Row {
     buyer_display_name: String,
     payout_status: Option<String>,
     payout_amount_kobo: Option<i64>,
+    /// The order's refund amount (full or partial; one refund per order).
+    refunded_kobo: Option<i64>,
     fee_small_kobo: Option<i64>,
     fee_large_kobo: Option<i64>,
     fee_threshold_kobo: Option<i64>,
@@ -255,6 +264,7 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ship_by, o.delivered_at, o.release_at, \
         o.created_at, u.display_name AS buyer_display_name, \
         p.status::text AS payout_status, p.amount_kobo AS payout_amount_kobo, \
+        rf.amount_kobo AS refunded_kobo, \
         o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
         o.stamp_duty_kobo, o.stamp_duty_threshold_kobo \
      FROM orders o \
@@ -262,7 +272,8 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
      JOIN users u ON u.id = o.buyer_id \
      JOIN stores s ON s.id = o.store_id \
      LEFT JOIN payouts p ON p.order_id = o.id \
-     LEFT JOIN disputes d ON d.order_id = o.id";
+     LEFT JOIN disputes d ON d.order_id = o.id \
+     LEFT JOIN refunds rf ON rf.order_id = o.id";
 
 async fn items_for(db: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<ItemView>>, AppError> {
     let rows: Vec<(Uuid, String, Value, i64, i32)> = sqlx::query_as(
@@ -308,6 +319,7 @@ fn core(r: &Row, items: Vec<ItemView>, seller: bool) -> Result<OrderCore, AppErr
             .dispute_id
             .zip(r.dispute_status.clone())
             .map(|(id, status)| DisputeSummary { id, status }),
+        refunded_kobo: r.refunded_kobo,
         paid_at: r.paid_at,
         ship_by: r.ship_by,
         delivered_at: r.delivered_at,

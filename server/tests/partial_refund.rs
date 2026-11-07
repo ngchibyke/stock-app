@@ -388,8 +388,16 @@ async fn check_amounts(app: &TestApp, order_id: Uuid, refund: i64, done: &Partia
             "refund_kobo": refund,
             "retained_kobo": e.retained,
             "cut_kobo": e.cut,
+            "original_cut_kobo": money::cut_kobo(o.items_total_kobo, o.platform_cut_bps),
         })
     );
+    // The order's cut is now the one the release took.
+    let cut: i64 = sqlx::query_scalar("SELECT platform_cut_kobo FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(cut, e.cut);
 }
 
 // --------------------------------------------------------------- amounts
@@ -644,18 +652,60 @@ async fn partial_refund_keeps_order_completed(pool: PgPool) {
 async fn seller_sees_partial_payout(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let o = held_order(&app, "self", "delivered").await;
+    // Before any refund there is no `refunded_kobo` at all.
+    let before = view(&app, o.order_id, &o.seller_token).await;
+    assert!(before.get("refunded_kobo").is_none(), "{before}");
+    assert_eq!(before["platform_cut_kobo"], 500);
+
     partial_and_send(&app, o.order_id, 2_000).await;
     let p = payout_row(&app, o.order_id).await;
     assert!(p.amount_kobo > 0);
+    let seller = view(&app, o.order_id, &o.seller_token).await;
+    assert_eq!(seller["status"], "completed");
+    assert_eq!(seller["expected_payout_kobo"], json!(p.amount_kobo));
+    // 8,000 retained at 5%: the cut beside the payout is the one taken.
+    assert_eq!(seller["platform_cut_kobo"], 400);
+    assert_eq!(seller["refunded_kobo"], 2_000);
+    let buyer = view(&app, o.order_id, &o.buyer_token).await;
+    assert_eq!(buyer["refunded_kobo"], 2_000);
+    assert!(buyer.get("platform_cut_kobo").is_none());
+}
+
+#[sqlx::test]
+async fn full_refund_shows_refunded_kobo(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = held_order(&app, "self", "delivered").await;
+    let owner = app.owner_token().await;
     let res = app
         .request(
-            Method::GET,
-            &format!("/orders/{}", o.order_id),
-            None,
-            Some(&o.seller_token),
+            Method::POST,
+            &format!("/admin/orders/{}/refund", o.order_id),
+            Some(json!({ "note": "decided for the buyer" })),
+            Some(&owner),
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.json);
-    assert_eq!(res.json["status"], "completed");
-    assert_eq!(res.json["expected_payout_kobo"], json!(p.amount_kobo));
+    let row = order_row(&app, o.order_id).await;
+    let total = row.items_total_kobo + row.delivery_fee_kobo;
+    assert_eq!(
+        view(&app, o.order_id, &o.buyer_token).await["refunded_kobo"],
+        total
+    );
+    let seller = view(&app, o.order_id, &o.seller_token).await;
+    assert_eq!(seller["refunded_kobo"], total);
+    assert_eq!(seller["status"], "cancelled");
+}
+
+/// `GET /orders/{id}` as `token`'s user (200).
+async fn view(app: &TestApp, order_id: Uuid, token: &str) -> Value {
+    let res = app
+        .request(
+            Method::GET,
+            &format!("/orders/{order_id}"),
+            None,
+            Some(token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    res.json
 }
