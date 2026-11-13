@@ -929,3 +929,276 @@ async fn withdraw_during_return(pool: PgPool) {
         (409, Some("dispute_closed"))
     );
 }
+
+// ---- The whole path (plan 5, task 10) ----
+
+/// From a courier delivery to a partial refund: every step tells the right
+/// people, every notice is pushed, the ledger balances and the audit trail
+/// has each step.
+#[sqlx::test]
+async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
+    use server::{
+        checkout::settle_payment, couriers::fake::FAKE_SIGNATURE_HEADER, notify::worker,
+        payments::PaymentStatus,
+    };
+
+    let app = TestApp::new(pool).await;
+    let owner = app.make_owner().await;
+    let shop = app
+        .make_active_store_with_product("08077777701", "Wuse Bags", 10_000, 5)
+        .await;
+    let (buyer_id, buyer) = app.sign_up_verified("08077777702").await;
+    for (session, token) in [
+        (&buyer, "buyer-phone"),
+        (&shop.seller_token, "seller-phone"),
+    ] {
+        let res = app
+            .request(
+                Method::PUT,
+                "/me/push-device",
+                Some(json!({ "token": token, "platform": "android" })),
+                Some(session),
+            )
+            .await;
+        assert!(res.status < 300, "{}", res.json);
+    }
+    let post = |path: String, body: Value, token: String| {
+        let app = &app;
+        async move {
+            app.request(Method::POST, &path, Some(body), Some(&token))
+                .await
+        }
+    };
+    let kinds = |user: Uuid| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT kind FROM notifications WHERE user_id = $1 ORDER BY kind",
+            )
+            .bind(user)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // 1. A courier order, paid, booked and delivered by the courier's webhooks.
+    assert_eq!(app.set_cart(&buyer, shop.variant_id, 1).await.status, 200);
+    let address = app.buyer_address(&buyer).await;
+    let opts = app.delivery_options(&buyer, address).await;
+    let option: Uuid = opts.json["stores"][0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["method"] == "courier")
+        .expect("a courier option")["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let res = app
+        .checkout_with(
+            &buyer,
+            "mono_directpay",
+            address,
+            &[(shop.store_id, option)],
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let reference = res.json["reference"].as_str().unwrap().to_string();
+    app.fake.set_payment(
+        &reference,
+        PaymentStatus::Successful {
+            amount_kobo: res.json["total_kobo"].as_i64().unwrap(),
+            fee_kobo: 10,
+            currency: "NGN".into(),
+            held: false,
+            reference: reference.clone(),
+        },
+    );
+    settle_payment(&app.state, &reference).await.unwrap();
+    let order: Uuid = sqlx::query_scalar("SELECT id FROM orders WHERE store_id = $1")
+        .bind(shop.store_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let ready = post(
+        format!("/orders/{order}/ready"),
+        json!({}),
+        shop.seller_token.clone(),
+    )
+    .await;
+    assert_eq!(ready.status, 200, "{}", ready.json);
+    run_due_jobs(&app.state).await;
+    for state in ["picked_up", "in_transit", "completed"] {
+        let res = app
+            .send_raw(
+                Method::POST,
+                "/webhooks/couriers/fake",
+                &[(FAKE_SIGNATURE_HEADER, "ok")],
+                serde_json::to_vec(&json!({ "provider_order_id": "fake-1", "state": state }))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{state}: {}", res.json);
+    }
+    let status: String = sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1")
+        .bind(order)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "delivered");
+    assert!(
+        kinds(buyer_id)
+            .await
+            .contains(&"order_delivered".to_string())
+    );
+    assert_eq!(kinds(shop.seller_id).await, ["order_paid"]);
+
+    // 2. The buyer reports damage, with a photo.
+    let res = post(
+        format!("/orders/{order}/dispute"),
+        json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+        buyer.clone(),
+    )
+    .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id = res.json["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        kinds(shop.seller_id).await,
+        ["dispute_opened", "order_paid"]
+    );
+
+    // 3. The seller answers; the item comes back at the seller's cost.
+    let res = respond(&app, &id, &shop.seller_token, REPLY).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = request_return(
+        &app,
+        &id,
+        &owner,
+        json!({ "paid_by": "seller", "note": "Send it back first" }),
+    )
+    .await;
+    assert!(res.status < 300, "{}", res.json);
+    let res = post(
+        format!("/disputes/{id}/return-received"),
+        json!({}),
+        shop.seller_token.clone(),
+    )
+    .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+
+    // 4. The owner reads the screen and refunds part of it.
+    let screen = app
+        .request(
+            Method::GET,
+            &format!("/admin/disputes/{id}"),
+            None,
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(screen.status, 200, "{}", screen.json);
+    assert_eq!(screen.json["dispute"]["status"], "awaiting_decision");
+    let res = post(
+        format!("/admin/disputes/{id}/decide"),
+        json!({ "decision": "partial_refund", "refund_kobo": 4_000, "note": "Half each" }),
+        owner.clone(),
+    )
+    .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(res.json["decision"]["refund_kobo"], 4_000);
+
+    // 5. Both are told of the decision; the buyer of the refund.
+    let buyer_kinds = kinds(buyer_id).await;
+    for kind in ["dispute_decided", "refund_started", "return_requested"] {
+        assert!(
+            buyer_kinds.contains(&kind.to_string()),
+            "{kind}: {buyer_kinds:?}"
+        );
+    }
+    assert!(!buyer_kinds.contains(&"dispute_opened".to_string()));
+    assert_eq!(
+        kinds(shop.seller_id).await,
+        [
+            "dispute_decided",
+            "dispute_opened",
+            "funds_released",
+            "order_paid",
+            "return_requested"
+        ]
+    );
+
+    // 6. Every notice is pushed once, to its own person's phone and nobody else's.
+    worker::run_once(&app.state).await.unwrap();
+    let mut want: Vec<(String, String, Uuid)> = sqlx::query_as(
+        "SELECT CASE WHEN user_id = $1 THEN 'buyer-phone' ELSE 'seller-phone' END, kind, id \
+         FROM notifications",
+    )
+    .bind(buyer_id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    let mut got: Vec<(String, String, Uuid)> = app
+        .push
+        .sent()
+        .into_iter()
+        .map(|(token, kind, id)| (token, kind.to_string(), id))
+        .collect();
+    want.sort();
+    got.sort();
+    assert_eq!(got, want);
+    assert!(want.len() >= 11, "{want:?}");
+    let unsent: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notifications WHERE push_status <> 'sent'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(unsent, 0);
+
+    // The order's ledger nets to zero and no posting is lopsided.
+    let net: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(amount_kobo), 0)::bigint FROM ledger_entries WHERE order_id = $1",
+    )
+    .bind(order)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(net, 0);
+    let lopsided: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT txn_id FROM ledger_entries \
+         GROUP BY txn_id HAVING sum(amount_kobo) <> 0) x",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(lopsided, 0);
+    let (refund, payout): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT amount_kobo FROM refunds WHERE order_id = $1), \
+                (SELECT count(*) FROM payouts WHERE order_id = $1)",
+    )
+    .bind(order)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!((refund, payout), (4_000, 1));
+
+    // The audit trail has every step.
+    let trail: Vec<String> = sqlx::query_scalar("SELECT DISTINCT action FROM audit_log")
+        .fetch_all(&app.pool)
+        .await
+        .unwrap();
+    for action in [
+        "checkout.paid",
+        "order.delivered",
+        "dispute.opened",
+        "dispute.seller_responded",
+        "admin.dispute_return_requested",
+        "dispute.return_received",
+        "admin.dispute_viewed",
+        "admin.dispute_decided",
+        "order.partial_refund",
+        "order.released",
+    ] {
+        assert!(trail.contains(&action.to_string()), "missing {action}");
+    }
+}
