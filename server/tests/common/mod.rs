@@ -92,6 +92,8 @@ pub struct TestApp {
     pub courier: Arc<server::couriers::fake::FakeCourier>,
     /// The installed tone check (always a fake; answers clean by default).
     pub tone: Arc<server::moderation::fake::FakeTone>,
+    /// The push double the state sends through.
+    pub push: Arc<server::notify::fake::FakePush>,
     /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
     shipped_seq: std::sync::atomic::AtomicUsize,
 }
@@ -110,6 +112,7 @@ impl TestApp {
         providers.register(fake.clone());
         let courier = Arc::new(server::couriers::fake::FakeCourier::new());
         let tone = Arc::new(server::moderation::fake::FakeTone::new());
+        let push = Arc::new(server::notify::fake::FakePush::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -121,6 +124,7 @@ impl TestApp {
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
             courier: Some(courier.clone()),
             tone: tone.clone(),
+            push: push.clone(),
             chat_hub: Arc::new(server::chat::hub::ChatHub::with_timings(
                 server::chat::hub::SocketTimings {
                     ping: std::time::Duration::from_secs(30),
@@ -136,6 +140,7 @@ impl TestApp {
             fake,
             courier,
             tone,
+            push,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
