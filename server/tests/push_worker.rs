@@ -343,6 +343,16 @@ async fn late_answer_after_lease_is_not_recorded(pool: PgPool) {
 
     let state_clone = app.state.clone();
     let running = tokio::spawn(async move { run_once(&state_clone).await });
+    // Wait until the send itself is in flight. Moving the lease any earlier
+    // (after the claim but before the worker renews it for the send) would
+    // rightly make the worker give the notice up without sending at all.
+    for _ in 0..500 {
+        if !app.push.sent().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(app.push.sent().len(), 1, "the send started");
     // While the send is in flight, the lease passes to another worker.
     let mut moved = 0;
     for _ in 0..100 {
