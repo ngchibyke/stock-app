@@ -27,7 +27,10 @@
 //!    schedule at release). An owner decision ([`release_by_owner`]) also
 //!    clears the order's hold in the same transaction, so the payout can go.
 //!    The payout waits for the provider's settlement of the buyer's payment:
-//!    `send_after = max(now, settlement_time(paid_at) + buffer)`.
+//!    `send_after = max(now, settlement_time(paid_at) + buffer)`. The work
+//!    inside the transaction is [`release_in`] (the arithmetic is
+//!    [`release_amounts`]), which a caller with its own transaction (a
+//!    partial refund) runs before committing and sending the payout itself.
 //! 2. [`send_payout`] (inline after release when due, else the Task 9 job):
 //!    re-checks the gates (order not held, checkout not flagged, payout account
 //!    verified and outside the 48h change hold, `send_after` and the backoff
@@ -76,9 +79,11 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     checkout::service::busy_err,
+    disputes,
     error::AppError,
     ledger::{self, Account, Entry},
     money::{self, FeeSchedule},
+    notify::{kinds::Kind, service as notify},
     payments::{self, PayoutHandle, PayoutRequest, PayoutState, ProviderError},
     settings,
 };
@@ -229,6 +234,7 @@ struct ReleaseRow {
     paid_at: Option<OffsetDateTime>,
     has_payout: bool,
     held: bool,
+    provider_flagged: bool,
     delivered: bool,
     release_due: bool,
     fee_small_kobo: Option<i64>,
@@ -264,6 +270,103 @@ enum Released {
     Unchanged(String),
 }
 
+/// What [`release_in`] did inside the caller's transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleasedIn {
+    /// The order was released and has a payout row (`scheduled` or `manual`).
+    /// Nothing was sent: after commit the caller sends it with
+    /// [`send_payout`] when it is `scheduled` and `send_after` has passed.
+    Done {
+        payout_id: Uuid,
+        status: &'static str,
+        send_after: OffsetDateTime,
+    },
+    /// Nothing changed; the order's status.
+    Unchanged(String),
+}
+
+/// The order's amounts a release books (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseInputs {
+    pub items: i64,
+    pub delivery: i64,
+    pub self_delivery: bool,
+    pub cut: i64,
+    pub share: i64,
+    pub courier_share: i64,
+}
+
+/// The release's ledger amounts and the seller's payout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseAmounts {
+    /// Out of escrow: items + delivery.
+    pub gross: i64,
+    /// To `platform_revenue`: cut + the platform's delivery fee − shortfall −
+    /// the courier part of the collection fee.
+    pub cut_and_delivery: i64,
+    /// To `provider_fees`: the whole collection fee.
+    pub provider_fee: i64,
+    /// Charged to the seller, to `platform_revenue`.
+    pub payout_fee: i64,
+    /// To `seller_payable`; never below 0.
+    pub payout: i64,
+    /// What the platform absorbs when fees exceed the seller's share.
+    pub shortfall: i64,
+    /// The self-delivery fee paid to the seller (0 for a courier).
+    pub seller_delivery: i64,
+}
+
+/// The release formula (see the module docs) on `i`, with the payout fee
+/// from `s`. 422 `amount_too_large` on overflow.
+pub fn release_amounts(i: &ReleaseInputs, s: &FeeSchedule) -> Result<ReleaseAmounts, AppError> {
+    let ReleaseInputs {
+        items,
+        delivery,
+        self_delivery,
+        cut,
+        share,
+        courier_share,
+    } = *i;
+    // A self-delivery fee belongs to the seller; a courier fee (or none, on
+    // part-2 orders) stays with the platform, which pays the courier. The
+    // platform cut applies to items only.
+    let (seller_delivery, platform_delivery) = if self_delivery {
+        (delivery, 0)
+    } else {
+        (0, delivery)
+    };
+    let before_fee = items
+        .checked_sub(cut)
+        .and_then(|x| x.checked_sub(share))
+        .and_then(|x| x.checked_add(seller_delivery))
+        .ok_or_else(too_large)?;
+    // The fee tier and the stamp-duty threshold are compared against the
+    // payout BEFORE the fee (Task 1 ruling): a payout just over ₦10,000 pays
+    // the duty even if the net lands just under it.
+    let payout_fee = money::payout_fee_kobo(before_fee, s);
+    let computed = before_fee.checked_sub(payout_fee).ok_or_else(too_large)?;
+    // Fees above the order: the seller is owed nothing (never a negative
+    // payable); the platform absorbs the shortfall out of its cut + delivery.
+    let payout = computed.max(0);
+    let shortfall = payout - computed;
+    let gross = items.checked_add(delivery).ok_or_else(too_large)?;
+    let cut_and_delivery = cut
+        .checked_add(platform_delivery)
+        .and_then(|x| x.checked_sub(shortfall))
+        .and_then(|x| x.checked_sub(courier_share))
+        .ok_or_else(too_large)?;
+    let provider_fee = share.checked_add(courier_share).ok_or_else(too_large)?;
+    Ok(ReleaseAmounts {
+        gross,
+        cut_and_delivery,
+        provider_fee,
+        payout_fee,
+        payout,
+        shortfall,
+        seller_delivery,
+    })
+}
+
 /// Step 1 (see the module docs). Idempotent: an order that is not
 /// `picked_up`/`out_for_delivery`/`delivered`, or already has a payout, is
 /// left as it is (Ok).
@@ -284,6 +387,8 @@ pub async fn release_order(
 /// the order's hold in the same transaction and audits the owner and `note`.
 /// Not a no-op on retry: an order that is not `picked_up`/`out_for_delivery`/
 /// `delivered` (e.g. already released) is 409 `invalid_order_state` naming its status.
+/// An order with an open dispute is 409 `dispute_open`: its decision settles it
+/// ([`crate::disputes::decide`]).
 pub async fn release_by_owner(
     state: &AppState,
     order_id: Uuid,
@@ -313,13 +418,103 @@ async fn release(
         .execute(&mut *tx)
         .await
         .map_err(db_err("set lock_timeout"))?;
+    // The owner's audit names the order's state before the release: read it
+    // under the order lock, which release_in takes again in this transaction.
+    let prior: Option<(String, bool)> = match owner {
+        Some(_) => Some(
+            sqlx::query_as(
+                "SELECT status::text, held_at IS NOT NULL FROM orders WHERE id = $1 FOR UPDATE",
+            )
+            .bind(order_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err("lock order"))?
+            .ok_or(AppError::NotFound)?,
+        ),
+        None => None,
+    };
+    // An open dispute is settled through its decision, never directly.
+    if owner.is_some()
+        && disputes::service::open_for_order(&mut tx, order_id)
+            .await?
+            .is_some()
+    {
+        return Err(AppError::Conflict("dispute_open"));
+    }
+    let (payout_id, status, send_after) =
+        match release_in(&mut tx, &settings, order_id, reason, None).await? {
+            ReleasedIn::Done {
+                payout_id,
+                status,
+                send_after,
+            } => (payout_id, status, send_after),
+            ReleasedIn::Unchanged(status) => return Ok(Released::Unchanged(status)),
+        };
+    if let (Some(owner), Some((prior_status, was_held))) = (&owner, &prior) {
+        // The owner's decision ends the complaint: the hold goes with it, in
+        // this transaction, so the payout is not left gated on it.
+        if *was_held {
+            sqlx::query("UPDATE orders SET held_at = NULL, hold_reason = NULL WHERE id = $1")
+                .bind(order_id)
+                .execute(&mut *tx)
+                .await
+                .context("clear hold")?;
+        }
+        audit::record(
+            &mut tx,
+            Some(owner.actor),
+            "admin.order_released",
+            "order",
+            Some(order_id),
+            json!({
+                "note": owner.note,
+                "prior_status": prior_status,
+                "was_held": was_held,
+                "payout_id": payout_id,
+            }),
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(db_err("commit release"))?;
+
+    if status == "scheduled"
+        && send_after <= OffsetDateTime::now_utc()
+        && let Err(e) = send_payout(state, payout_id).await
+    {
+        tracing::warn!(error = %e, "payout after release not sent; the job retries");
+    }
+    Ok(Released::Done)
+}
+
+/// Step 1 of a release (see the module docs), **inside the caller's
+/// transaction**: locks the order, checks its state and the release rules,
+/// books the ledger (key `("release", order_id)`), inserts the payout row,
+/// completes the order and audits `order.released`. It neither commits nor
+/// sends: after the commit the caller sends the payout with [`send_payout`]
+/// when it is `scheduled` and its `send_after` has passed (never inside the
+/// transaction). It does not clear the order's hold.
+///
+/// `items_override = Some((items, cut))` releases on those items and that
+/// platform cut instead of the order's own (a partial refund keeps the rest
+/// with the seller); delivery and the collection fee shares stay the order's.
+pub async fn release_in(
+    conn: &mut PgConnection,
+    settings: &settings::Settings,
+    order_id: Uuid,
+    reason: ReleaseReason,
+    items_override: Option<(i64, i64)>,
+) -> Result<ReleasedIn, AppError> {
+    sqlx::query(LOCK_TIMEOUT)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err("set lock_timeout"))?;
     let row: ReleaseRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.delivery_fee_kobo, \
                 COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
                 o.platform_cut_kobo, o.collection_fee_share_kobo, \
                 o.collection_fee_courier_kobo, o.checkout_id, c.paid_at, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
-                o.held_at IS NOT NULL AS held, o.delivered_at IS NOT NULL AS delivered, \
+                o.held_at IS NOT NULL AS held, c.provider_flagged, o.delivered_at IS NOT NULL AS delivered, \
                 COALESCE(o.release_at <= now(), false) AS release_due, \
                 o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
                 o.stamp_duty_kobo, o.stamp_duty_threshold_kobo \
@@ -327,7 +522,7 @@ async fn release(
          WHERE o.id = $1 FOR UPDATE OF o",
     )
     .bind(order_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(db_err("lock order"))?
     .ok_or(AppError::NotFound)?;
@@ -336,57 +531,49 @@ async fn release(
         "picked_up" | "out_for_delivery" | "delivered"
     ) || row.has_payout
     {
-        return Ok(Released::Unchanged(row.status));
+        return Ok(ReleasedIn::Unchanged(row.status));
     }
     // The release rules, enforced here as well as by the callers.
     if row.held && reason != ReleaseReason::OwnerDecision {
         return Err(AppError::Conflict("order_held"));
     }
+    // A provider flag blocks a buyer's release too: after it the owner could no
+    // longer refund. The auto-release job and the owner's decision are gated
+    // elsewhere (the job skips a flagged payment; the owner decides knowingly).
+    if row.provider_flagged && reason == ReleaseReason::BuyerConfirmed {
+        return Err(AppError::Conflict("payment_under_review"));
+    }
     if reason == ReleaseReason::AutoAfterDelivery && !(row.delivered && row.release_due) {
-        return Ok(Released::Unchanged(row.status));
+        return Ok(ReleasedIn::Unchanged(row.status));
     }
 
-    let items = row.items_total_kobo;
-    let delivery = row.delivery_fee_kobo;
-    let cut = row.platform_cut_kobo;
-    let share = row.collection_fee_share_kobo;
-    let courier_share = row.collection_fee_courier_kobo;
-    // A self-delivery fee belongs to the seller; a courier fee (or none, on
-    // part-2 orders) stays with the platform, which pays the courier. The
-    // platform cut applies to items only.
-    let (seller_delivery, platform_delivery) = if row.self_delivery {
-        (delivery, 0)
-    } else {
-        (0, delivery)
-    };
-    let before_fee = items
-        .checked_sub(cut)
-        .and_then(|x| x.checked_sub(share))
-        .and_then(|x| x.checked_add(seller_delivery))
-        .ok_or_else(too_large)?;
-    // The fee tier and the stamp-duty threshold are compared against the
-    // payout BEFORE the fee (Task 1 ruling): a payout just over ₦10,000 pays
-    // the duty even if the net lands just under it.
+    let (items, cut) = items_override.unwrap_or((row.items_total_kobo, row.platform_cut_kobo));
     let schedule = row
         .fee_snapshot()
         .unwrap_or_else(|| settings.fee_schedule());
-    let payout_fee = money::payout_fee_kobo(before_fee, &schedule);
-    let computed = before_fee.checked_sub(payout_fee).ok_or_else(too_large)?;
-    // Fees above the order: the seller is owed nothing (never a negative
-    // payable); the platform absorbs the shortfall out of its cut + delivery.
-    let payout = computed.max(0);
-    let shortfall = payout - computed;
-    let gross = items.checked_add(delivery).ok_or_else(too_large)?;
-    let cut_and_delivery = cut
-        .checked_add(platform_delivery)
-        .and_then(|x| x.checked_sub(shortfall))
-        .and_then(|x| x.checked_sub(courier_share))
-        .ok_or_else(too_large)?;
-    let provider_fee = share.checked_add(courier_share).ok_or_else(too_large)?;
+    let ReleaseAmounts {
+        gross,
+        cut_and_delivery,
+        provider_fee,
+        payout_fee,
+        payout,
+        shortfall,
+        seller_delivery,
+    } = release_amounts(
+        &ReleaseInputs {
+            items,
+            delivery: row.delivery_fee_kobo,
+            self_delivery: row.self_delivery,
+            cut,
+            share: row.collection_fee_share_kobo,
+            courier_share: row.collection_fee_courier_kobo,
+        },
+        &schedule,
+    )?;
 
     let now = OffsetDateTime::now_utc();
     let paid_at = row.paid_at.unwrap_or(now);
-    let holidays = load_bank_holidays(&mut tx, paid_at.to_offset(LAGOS).date()).await?;
+    let holidays = load_bank_holidays(&mut *conn, paid_at.to_offset(LAGOS).date()).await?;
     let buffer = time::Duration::hours(i64::from(settings.payout_settlement_buffer_hours));
     let send_after = (settlement_time(paid_at, &holidays) + buffer).max(now);
     let (status, last_error) = if payout <= 0 {
@@ -405,7 +592,7 @@ async fn release(
         reference: Some(reference.clone()),
     };
     ledger::post(
-        &mut tx,
+        &mut *conn,
         ("release", &order_id.to_string()),
         &[
             entry(Account::Escrow, -gross),
@@ -432,7 +619,7 @@ async fn release(
     .bind(send_after)
     .bind(reason.as_str())
     .bind(last_error)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await
     .context("insert payout")?;
     sqlx::query(
@@ -441,11 +628,11 @@ async fn release(
          WHERE id = $1",
     )
     .bind(order_id)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .context("complete order")?;
     audit::record(
-        &mut tx,
+        &mut *conn,
         None,
         "order.released",
         "order",
@@ -463,40 +650,12 @@ async fn release(
         }),
     )
     .await?;
-    if let Some(owner) = &owner {
-        // The owner's decision ends the complaint: the hold goes with it, in
-        // this transaction, so the payout is not left gated on it.
-        if row.held {
-            sqlx::query("UPDATE orders SET held_at = NULL, hold_reason = NULL WHERE id = $1")
-                .bind(order_id)
-                .execute(&mut *tx)
-                .await
-                .context("clear hold")?;
-        }
-        audit::record(
-            &mut tx,
-            Some(owner.actor),
-            "admin.order_released",
-            "order",
-            Some(order_id),
-            json!({
-                "note": owner.note,
-                "prior_status": row.status,
-                "was_held": row.held,
-                "payout_id": payout_id,
-            }),
-        )
-        .await?;
-    }
-    tx.commit().await.map_err(db_err("commit release"))?;
-
-    if status == "scheduled"
-        && send_after <= OffsetDateTime::now_utc()
-        && let Err(e) = send_payout(state, payout_id).await
-    {
-        tracing::warn!(error = %e, "payout after release not sent; the job retries");
-    }
-    Ok(Released::Done)
+    notify::tell_seller(conn, Kind::FundsReleased, order_id).await?;
+    Ok(ReleasedIn::Done {
+        payout_id,
+        status,
+        send_after,
+    })
 }
 
 #[derive(sqlx::FromRow)]
@@ -1454,6 +1613,69 @@ mod tests {
         // Jitter adds up to 20%, still capped.
         assert_eq!(backoff_delay(1, 1.0), time::Duration::minutes(6));
         assert_eq!(backoff_delay(9, 1.0), time::Duration::hours(6));
+    }
+
+    #[test]
+    fn release_amounts_matches_existing_cases() {
+        let s = FeeSchedule::default();
+        // tests/escrow.rs::release_amount_matches_formula: 1,000,000 - 50,000
+        // cut - 1,500 fee share = 948,500 -> fee 3,500 -> 945,000.
+        let a = release_amounts(
+            &ReleaseInputs {
+                items: 1_000_000,
+                delivery: 0,
+                self_delivery: false,
+                cut: 50_000,
+                share: 1_500,
+                courier_share: 0,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            ReleaseAmounts {
+                gross: 1_000_000,
+                cut_and_delivery: 50_000,
+                provider_fee: 1_500,
+                payout_fee: 3_500,
+                payout: 945_000,
+                shortfall: 0,
+                seller_delivery: 0,
+            }
+        );
+        // tests/escrow.rs::non_positive_payout_goes_manual: 3,000 - 150 cut -
+        // 10 share = 2,840; fee 3,500 -> -660: payout 0, the platform absorbs
+        // the 660 out of cut + delivery (150 + 0).
+        let a = release_amounts(
+            &ReleaseInputs {
+                items: 3_000,
+                delivery: 0,
+                self_delivery: false,
+                cut: 150,
+                share: 10,
+                courier_share: 0,
+            },
+            &s,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            ReleaseAmounts {
+                gross: 3_000,
+                cut_and_delivery: 150 - 660,
+                provider_fee: 10,
+                payout_fee: 3_500,
+                payout: 0,
+                shortfall: 660,
+                seller_delivery: 0,
+            }
+        );
+        // The entries balance: escrow out = everything booked in.
+        assert_eq!(
+            a.gross,
+            a.cut_and_delivery + a.provider_fee + a.payout_fee + a.payout
+        );
     }
 
     #[test]

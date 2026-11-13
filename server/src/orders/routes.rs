@@ -191,7 +191,7 @@ async fn cancel(
 }
 
 /// The body must be exactly `{"confirm": true}`.
-fn confirmed(body: &[u8]) -> bool {
+pub(crate) fn confirmed(body: &[u8]) -> bool {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Confirm {
@@ -344,6 +344,10 @@ async fn delivered(
             // Expected: a hold must stop the money. Auto-release picks it up after unhold.
             Err(AppError::Conflict("order_held")) => {
                 tracing::info!("order held at handover; not released");
+            }
+            // Same for a flagged payment: it waits for the owner to clear the flag.
+            Err(AppError::Conflict("payment_under_review")) => {
+                tracing::info!("payment under review at handover; not released");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "release after handover failed; auto-release covers it");

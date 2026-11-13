@@ -92,6 +92,10 @@ pub struct TestApp {
     pub courier: Arc<server::couriers::fake::FakeCourier>,
     /// The installed tone check (always a fake; answers clean by default).
     pub tone: Arc<server::moderation::fake::FakeTone>,
+    /// The push double the state sends through.
+    pub push: Arc<server::notify::fake::FakePush>,
+    /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
+    shipped_seq: std::sync::atomic::AtomicUsize,
 }
 
 impl TestApp {
@@ -108,6 +112,7 @@ impl TestApp {
         providers.register(fake.clone());
         let courier = Arc::new(server::couriers::fake::FakeCourier::new());
         let tone = Arc::new(server::moderation::fake::FakeTone::new());
+        let push = Arc::new(server::notify::fake::FakePush::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -119,6 +124,7 @@ impl TestApp {
             postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
             courier: Some(courier.clone()),
             tone: tone.clone(),
+            push: push.clone(),
             chat_hub: Arc::new(server::chat::hub::ChatHub::with_timings(
                 server::chat::hub::SocketTimings {
                     ping: std::time::Duration::from_secs(30),
@@ -134,6 +140,8 @@ impl TestApp {
             fake,
             courier,
             tone,
+            push,
+            shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -668,5 +676,148 @@ impl TestApp {
             Some(token),
         )
         .await
+    }
+}
+
+/// A paid order moved on to `picked_up`, `out_for_delivery` or `delivered`;
+/// see [`TestApp::shipped_order`].
+pub struct ShippedOrder {
+    pub order_id: Uuid,
+    pub checkout_id: Uuid,
+    pub store_id: Uuid,
+    pub buyer_id: Uuid,
+    pub buyer_token: String,
+    pub seller_id: Uuid,
+    pub seller_token: String,
+}
+
+impl TestApp {
+    /// One paid order (a single ₦10,000 unit) delivered by `method` (`"self"` or
+    /// `"courier"`), moved through the service to `status` (`"picked_up"`,
+    /// `"out_for_delivery"` or `"delivered"`). The steps go through the order
+    /// service, never the routes, so a self-delivery order reaches `delivered`
+    /// without being released (the handover route releases it). The payment is
+    /// 10 days old, so a release sends its payout at once. Each call creates its
+    /// own seller, store and buyer (distinct phones), so it can be called any
+    /// number of times in one app.
+    pub async fn shipped_order(&self, method: &str, status: &str) -> ShippedOrder {
+        use server::{checkout::settle_payment, orders::service, payments::PaymentStatus};
+        let now = time::OffsetDateTime::now_utc();
+        let n = self
+            .shipped_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let listing = self
+            .make_active_store_with_product(
+                &format!("0801{:07}", 5_000_000 + n),
+                &format!("Shipped Store {n}"),
+                10_000,
+                5,
+            )
+            .await;
+        let (buyer_id, buyer_token) = self
+            .sign_up_verified(&format!("0802{:07}", 5_000_000 + n))
+            .await;
+        assert_eq!(
+            self.set_cart(&buyer_token, listing.variant_id, 1)
+                .await
+                .status,
+            200
+        );
+        let res = if method == "courier" {
+            let address = self.buyer_address(&buyer_token).await;
+            let opts = self.delivery_options(&buyer_token, address).await;
+            assert_eq!(opts.status, 200, "delivery options: {}", opts.json);
+            let option: Uuid = opts.json["stores"][0]["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["method"] == "courier")
+                .expect("a courier option")["id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            self.checkout_with(
+                &buyer_token,
+                "mono_directpay",
+                address,
+                &[(listing.store_id, option)],
+            )
+            .await
+        } else {
+            assert_eq!(method, "self", "unknown delivery method");
+            self.checkout(&buyer_token, "mono_directpay").await
+        };
+        assert_eq!(res.status, 201, "checkout: {}", res.json);
+        let reference = res.json["reference"].as_str().unwrap().to_string();
+        let total = res.json["total_kobo"].as_i64().unwrap();
+        let checkout_id: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
+        self.fake.set_payment(
+            &reference,
+            PaymentStatus::Successful {
+                amount_kobo: total,
+                fee_kobo: 10,
+                currency: "NGN".into(),
+                held: false,
+                reference: reference.clone(),
+            },
+        );
+        settle_payment(&self.state, &reference).await.unwrap();
+        let order_id: Uuid = sqlx::query_scalar("SELECT id FROM orders WHERE checkout_id = $1")
+            .bind(checkout_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE checkouts SET paid_at = now() - interval '10 days' WHERE id = $1")
+            .bind(checkout_id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+
+        service::mark_picked_up(&self.pool, order_id, now)
+            .await
+            .unwrap();
+        if status != "picked_up" {
+            let mut tx = self.pool.begin().await.unwrap();
+            service::mark_out_for_delivery(&mut tx, &self.state.cipher, order_id, now)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        match status {
+            "picked_up" | "out_for_delivery" => {}
+            "delivered" if method == "self" => {
+                let enc: Vec<u8> =
+                    sqlx::query_scalar("SELECT handover_code_enc FROM orders WHERE id = $1")
+                        .bind(order_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .unwrap();
+                let code = self.state.cipher.decrypt(&enc).unwrap();
+                service::deliver_with_code(
+                    &self.pool,
+                    &self.state.cipher,
+                    listing.seller_id,
+                    order_id,
+                    &code,
+                    now,
+                )
+                .await
+                .unwrap();
+            }
+            "delivered" => service::mark_delivered(&self.pool, order_id, now)
+                .await
+                .unwrap(),
+            other => panic!("unknown order status {other}"),
+        }
+        ShippedOrder {
+            order_id,
+            checkout_id,
+            store_id: listing.store_id,
+            buyer_id,
+            buyer_token,
+            seller_id: listing.seller_id,
+            seller_token: listing.seller_token,
+        }
     }
 }

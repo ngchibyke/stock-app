@@ -176,6 +176,12 @@ Based on Baymard order-tracking research and established delivery-app patterns:
 4. Owner decides: **full refund**, **partial refund** (amount set), or **release to seller**.
 5. Both parties notified; decision written to the audit log permanently.
 
+- *(my call)* One report per order. Withdrawing it is final, so a buyer cannot toggle a hold to keep delaying a seller's payout.
+- *(my call)* Statements are checked offline only (word filter, scam and contact-detail patterns). A serious hit is refused with no strike, and a statement is never sent to Claude: complaints are expected to be heated, and evidence should not go to a third party.
+- *(my call)* The owner cannot decide until the seller has answered or their 48 hours have passed, so the seller always gets the window.
+- *(my call)* A partial refund comes out of the item total only. The delivery fee goes back only with a full refund, because on a courier order the platform has already paid the courier. The 5% cut is taken on what the seller keeps.
+- *(my call)* When the item must come back first, who pays for return shipping is recorded and not charged. The two sides arrange it; charging the side at fault comes with plan 6.
+
 ## 9. Reviews
 
 - Only buyers with a **confirmed delivery** can review that order's store.
@@ -187,6 +193,11 @@ Based on Baymard order-tracking research and established delivery-app patterns:
 ## 10. Notifications
 
 Push (plus in-app inbox) for: payment received (seller), order status changes (buyer), new chat message, confirm-delivery reminders, funds released (seller), dispute opened/decided, moderation warnings.
+
+- *(my call)* The inbox stores no text: each notice is a kind and ids, and its title and body are fixed copy. A push carries that fixed copy and two ids, never an order, a name, an amount or message text, so nothing personal reaches a lock screen.
+- *(my call)* Chat notices are coalesced: every message sent before the other side reads the conversation shares one notice.
+- *(my call)* Reminder timing: the "delivered" notice is the first reminder, the second comes 24 hours after delivery, and the last 24 hours before release. A reminder whose moment has passed is skipped, never sent late, and a held order gets none. A delivery confirmed with the handover code sends no "delivered" notice, because the buyer was there.
+- *(my call)* A push goes only to devices whose session is still signed in. A token registered again under another account moves to it, so a shared phone never gets the previous user's notices.
 
 ## 11. Owner dashboard (web)
 

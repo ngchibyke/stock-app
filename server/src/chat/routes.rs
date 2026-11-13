@@ -122,6 +122,9 @@ async fn read(
 ) -> Result<StatusCode, AppError> {
     let access = service::access(&state.db, user.id, parse_id(&id)?).await?;
     service::mark_read(&state.db, &access, body.seq).await?;
+    let mut conn = state.db.acquire().await.map_err(anyhow::Error::from)?;
+    crate::notify::service::mark_conversation_read(&mut conn, user.id, access.conversation_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -27,6 +27,7 @@
 //! **Double payment.** Mark-paid on a payout the provider may have paid asks
 //! the provider first (see [`money::mark_paid`]).
 
+pub mod disputes;
 pub mod holidays;
 pub mod moderation;
 pub mod money;

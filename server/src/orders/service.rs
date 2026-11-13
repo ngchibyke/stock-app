@@ -34,6 +34,7 @@ use crate::{
     crypto::FieldCipher,
     delivery::{events, handover, shipments},
     error::AppError,
+    notify::{kinds::Kind, service as notify},
 };
 
 const LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '5s'";
@@ -109,7 +110,11 @@ pub(crate) async fn picked_up_in(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<bool, AppError> {
-    transition(conn, order_id, at, &["paid"], "picked_up").await
+    let moved = transition(conn, order_id, at, &["paid"], "picked_up").await?;
+    if moved {
+        notify::tell_buyer(conn, Kind::OrderPickedUp, order_id).await?;
+    }
+    Ok(moved)
 }
 
 /// `picked_up | out_for_delivery -> delivered` at `at`, snapshotting the
@@ -135,14 +140,18 @@ pub(crate) async fn delivered_in(
     order_id: Uuid,
     at: OffsetDateTime,
 ) -> Result<bool, AppError> {
-    transition(
+    let moved = transition(
         conn,
         order_id,
         at,
         &["picked_up", "out_for_delivery"],
         "delivered",
     )
-    .await
+    .await?;
+    if moved {
+        notify::tell_buyer(conn, Kind::OrderDelivered, order_id).await?;
+    }
+    Ok(moved)
 }
 
 /// `picked_up -> out_for_delivery` at `at`, inside the caller's transaction
@@ -198,6 +207,7 @@ pub(crate) async fn out_for_delivery_in(
         json!({}),
     )
     .await?;
+    notify::tell_buyer(conn, Kind::OrderOutForDelivery, order_id).await?;
     Ok(true)
 }
 

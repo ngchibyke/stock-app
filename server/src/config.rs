@@ -3,6 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::couriers::shipbubble::{self, ShipbubbleConfig};
 use crate::moderation::claude::{self, ClaudeConfig};
+use crate::notify::fcm::FcmConfig;
 use crate::payments::mono::{self, AmountUnit, MonoConfig, Secret};
 
 #[derive(Clone)]
@@ -25,6 +26,9 @@ pub struct Config {
     /// Claude settings; `None` when `ANTHROPIC_API_KEY` is unset (production
     /// then refuses to serve).
     pub claude: Option<ClaudeConfig>,
+    /// FCM settings; `None` when `FCM_SERVICE_ACCOUNT_FILE` is unset
+    /// (production then refuses to serve; elsewhere pushes are dropped).
+    pub fcm: Option<FcmConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -35,6 +39,7 @@ impl std::fmt::Debug for Config {
             .field("mono", &self.mono)
             .field("shipbubble", &self.shipbubble)
             .field("claude", &self.claude)
+            .field("fcm", &self.fcm)
             .finish_non_exhaustive()
     }
 }
@@ -234,6 +239,27 @@ fn claude_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<ClaudeC
     }))
 }
 
+/// FCM push: the service-account file (a secret kept outside the repository)
+/// and an optional base URL override, which must be https.
+fn fcm_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FcmConfig>> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(file) = get("FCM_SERVICE_ACCOUNT_FILE") else {
+        return Ok(None);
+    };
+    let mut cfg = FcmConfig::from_service_account_file(&file)?;
+    if let Some(base_url) = get("FCM_BASE_URL") {
+        if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
+            bail!("FCM_BASE_URL must be an https URL");
+        }
+        cfg.base_url = base_url;
+    }
+    Ok(Some(cfg))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -267,11 +293,13 @@ impl Config {
         let mono = mono_config(&var, app_env == "production")?;
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
         let claude = claude_config(&var)?;
+        let fcm = fcm_config(&var)?;
         Ok(Self {
             public_redirect_url,
             mono,
             shipbubble,
             claude,
+            fcm,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,
@@ -318,6 +346,60 @@ mod tests {
         }
         // Echo off is fine anywhere.
         assert!(!load(&[("APP_ENV", "production")]).unwrap().otp_dev_echo);
+    }
+
+    /// A service-account file in a fresh temp directory; returns its path.
+    fn service_account(token_uri: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("fcm-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("service-account.json");
+        let body = serde_json::json!({
+            "project_id": "demo-project",
+            "client_email": "push@demo-project.iam.gserviceaccount.com",
+            "private_key": "placeholder",
+            "token_uri": token_uri,
+        });
+        std::fs::write(&file, body.to_string()).unwrap();
+        file.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn fcm_is_optional_and_read_from_the_file() {
+        assert!(load(&[]).unwrap().fcm.is_none());
+        let file = service_account("https://oauth2.googleapis.com/token");
+        let cfg = load(&[("FCM_SERVICE_ACCOUNT_FILE", &file)])
+            .unwrap()
+            .fcm
+            .unwrap();
+        assert_eq!(cfg.project_id, "demo-project");
+        assert_eq!(cfg.base_url, "https://fcm.googleapis.com");
+        assert!(!cfg.insecure_http_for_tests);
+        let cfg = load(&[
+            ("FCM_SERVICE_ACCOUNT_FILE", &file),
+            ("FCM_BASE_URL", "https://fcm.proxy.example"),
+        ])
+        .unwrap()
+        .fcm
+        .unwrap();
+        assert_eq!(cfg.base_url, "https://fcm.proxy.example");
+    }
+
+    #[test]
+    fn fcm_base_url_must_be_https() {
+        let file = service_account("https://oauth2.googleapis.com/token");
+        let err = load(&[
+            ("FCM_SERVICE_ACCOUNT_FILE", &file),
+            ("FCM_BASE_URL", "http://plain.example"),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("FCM_BASE_URL"), "{err}");
+    }
+
+    #[test]
+    fn fcm_token_uri_must_be_google() {
+        let file = service_account("https://evil.example/token");
+        let err = load(&[("FCM_SERVICE_ACCOUNT_FILE", &file)]).unwrap_err();
+        assert!(format!("{err:#}").contains("token_uri"), "{err:#}");
     }
 
     #[test]

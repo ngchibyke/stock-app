@@ -18,6 +18,11 @@ use server::{
         claude::ClaudeTone,
         tone::{NoTone, ToneChecker},
     },
+    notify::{
+        fcm::FcmPush,
+        push::{NoPush, PushSender},
+        worker as push_worker,
+    },
     payments::{ProviderRegistry, mono::MonoProvider},
     phone::normalize_ng_phone,
     pool_options,
@@ -68,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     if matches!(command, Command::Serve) {
         require_payment_provider(&config.app_env, config.mono.is_some())?;
         require_moderation(&config.app_env, config.claude.is_some())?;
+        require_push(&config.app_env, config.fcm.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -105,6 +111,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let push: Arc<dyn PushSender> = match config.fcm.clone() {
+        Some(cfg) => Arc::new(FcmPush::new(cfg)?),
+        None => {
+            tracing::warn!("FCM_SERVICE_ACCOUNT_FILE not set: pushes are accepted and dropped");
+            Arc::new(NoPush)
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -119,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         postcodes: Arc::new(server::delivery::postcode::ManualPostcode),
         courier,
         tone,
+        push,
         chat_hub: chat_hub.clone(),
     };
 
@@ -136,6 +151,8 @@ async fn serve(state: AppState, config: &Config) -> anyhow::Result<()> {
     // awaited before the pool closes.
     let stop_jobs = CancellationToken::new();
     let jobs_loop = tokio::spawn(jobs::run_loop(state.clone(), stop_jobs.clone()));
+    // The push loop stops on the same token: between ticks, never mid-send.
+    let push_loop = tokio::spawn(push_worker::run_loop(state.clone(), stop_jobs.clone()));
     let (signalled_tx, signalled_rx) = tokio::sync::oneshot::channel::<()>();
     let cancel_jobs = stop_jobs.clone();
     let chat_hub = state.chat_hub.clone();
@@ -167,6 +184,12 @@ async fn serve(state: AppState, config: &Config) -> anyhow::Result<()> {
         .is_err()
     {
         tracing::warn!("jobs did not stop in time, shutting down anyway");
+    }
+    if tokio::time::timeout(SHUTDOWN_GRACE, push_loop)
+        .await
+        .is_err()
+    {
+        tracing::warn!("pushes did not stop in time, shutting down anyway");
     }
     db.close().await;
     tracing::info!("shut down");
@@ -203,6 +226,15 @@ async fn shutdown_signal() {
 fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Result<()> {
     if app_env == "production" && !mono_configured {
         bail!("APP_ENV is production but no payment provider is configured (set MONO_SECRET_KEY)");
+    }
+    Ok(())
+}
+
+/// Production refuses to start without push: buyers and sellers would miss
+/// every notice unless they happened to open the inbox.
+fn require_push(app_env: &str, fcm_configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !fcm_configured {
+        bail!("APP_ENV is production but push is not configured (set FCM_SERVICE_ACCOUNT_FILE)");
     }
     Ok(())
 }
@@ -286,6 +318,19 @@ mod tests {
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
         assert!(require_moderation("production", true).is_ok());
         assert!(require_moderation("development", false).is_ok());
+    }
+
+    #[test]
+    fn production_requires_fcm() {
+        let err = require_push("production", false).unwrap_err();
+        assert!(
+            err.to_string().contains("FCM_SERVICE_ACCOUNT_FILE"),
+            "{err}"
+        );
+        assert!(require_push("production", true).is_ok());
+        for env in ["development", "test", "staging"] {
+            assert!(require_push(env, false).is_ok(), "{env}");
+        }
     }
 
     #[test]

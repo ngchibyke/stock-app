@@ -10,6 +10,9 @@
 //!   order when it was paid (the live one only for orders paid before the
 //!   snapshot existed), is never below 0, and is left out once the order is
 //!   cancelled or refunded.
+//! - Both views carry `refunded_kobo` (the order's refund amount, full or
+//!   partial) when the order has a refund. After a partial refund the
+//!   order's `platform_cut_kobo` is the cut on the retained items.
 //!
 //! Every query puts the principal in the SQL, so a missing order and someone
 //! else's order are indistinguishable (both `NotFound`).
@@ -53,6 +56,12 @@ pub struct PayoutView {
     pub status: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DisputeSummary {
+    pub id: Uuid,
+    pub status: String,
+}
+
 /// Fields common to both audiences.
 #[derive(Debug, Serialize)]
 pub struct OrderCore {
@@ -64,6 +73,13 @@ pub struct OrderCore {
     pub delivery_fee_kobo: i64,
     pub total_kobo: i64,
     pub held: bool,
+    /// Left out when the order has no dispute.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispute: Option<DisputeSummary>,
+    /// What went back to the buyer: the order's refund (full or partial).
+    /// Left out when the order has no refund.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refunded_kobo: Option<i64>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub paid_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -172,6 +188,8 @@ struct Row {
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
     held: bool,
+    dispute_id: Option<Uuid>,
+    dispute_status: Option<String>,
     paid_at: Option<OffsetDateTime>,
     ship_by: Option<OffsetDateTime>,
     delivered_at: Option<OffsetDateTime>,
@@ -180,6 +198,8 @@ struct Row {
     buyer_display_name: String,
     payout_status: Option<String>,
     payout_amount_kobo: Option<i64>,
+    /// The order's refund amount (full or partial; one refund per order).
+    refunded_kobo: Option<i64>,
     fee_small_kobo: Option<i64>,
     fee_large_kobo: Option<i64>,
     fee_threshold_kobo: Option<i64>,
@@ -201,7 +221,9 @@ impl Row {
 
     /// What the seller should expect to be paid (see the module docs): the
     /// payout's own amount once released, else the sum release makes. None
-    /// once the order is cancelled or refunded.
+    /// once the order is cancelled or refunded. A partially refunded order
+    /// (`completed`) shows its payout's amount, which is on the retained items
+    /// only: the estimate from the order's own totals would overstate it.
     fn expected_payout(&self, live: Option<&FeeSchedule>) -> Option<i64> {
         if matches!(
             self.status.as_str(),
@@ -238,16 +260,20 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
         o.items_total_kobo, o.delivery_fee_kobo, COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
         o.platform_cut_kobo, \
         o.collection_fee_share_kobo, (o.held_at IS NOT NULL) AS held, \
+        d.id AS dispute_id, d.status AS dispute_status, \
         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ship_by, o.delivered_at, o.release_at, \
         o.created_at, u.display_name AS buyer_display_name, \
         p.status::text AS payout_status, p.amount_kobo AS payout_amount_kobo, \
+        rf.amount_kobo AS refunded_kobo, \
         o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
         o.stamp_duty_kobo, o.stamp_duty_threshold_kobo \
      FROM orders o \
      JOIN checkouts c ON c.id = o.checkout_id \
      JOIN users u ON u.id = o.buyer_id \
      JOIN stores s ON s.id = o.store_id \
-     LEFT JOIN payouts p ON p.order_id = o.id";
+     LEFT JOIN payouts p ON p.order_id = o.id \
+     LEFT JOIN disputes d ON d.order_id = o.id \
+     LEFT JOIN refunds rf ON rf.order_id = o.id";
 
 async fn items_for(db: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<ItemView>>, AppError> {
     let rows: Vec<(Uuid, String, Value, i64, i32)> = sqlx::query_as(
@@ -289,6 +315,11 @@ fn core(r: &Row, items: Vec<ItemView>, seller: bool) -> Result<OrderCore, AppErr
         delivery_fee_kobo: r.delivery_fee_kobo,
         total_kobo: total,
         held: r.held,
+        dispute: r
+            .dispute_id
+            .zip(r.dispute_status.clone())
+            .map(|(id, status)| DisputeSummary { id, status }),
+        refunded_kobo: r.refunded_kobo,
         paid_at: r.paid_at,
         ship_by: r.ship_by,
         delivered_at: r.delivered_at,

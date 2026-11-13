@@ -474,3 +474,83 @@ pub async fn mark_read(db: &PgPool, access: &Access, seq: i64) -> Result<(), App
     .context("mark read")?;
     Ok(())
 }
+
+/// A delivered message as staff read it in a dispute.
+#[derive(Debug, Serialize)]
+pub struct StaffMessage {
+    pub seq: i64,
+    pub from: Party,
+    pub body: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub sent_at: OffsetDateTime,
+}
+
+/// What a blocked or flagged message said, for the Owner only.
+#[derive(Debug, Serialize)]
+pub struct FlaggedOriginal {
+    pub from: Party,
+    pub severity: String,
+    pub category: String,
+    pub original: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// The order's conversation, delivered messages only, oldest first. Empty when
+/// the two never wrote. Staff reach it only through a dispute, and the caller
+/// audits that read.
+pub async fn staff_transcript(
+    db: &PgPool,
+    cipher: &FieldCipher,
+    order_id: Uuid,
+) -> Result<Vec<StaffMessage>, AppError> {
+    let rows: Vec<(i64, bool, Vec<u8>, OffsetDateTime)> = sqlx::query_as(
+        "SELECT m.seq, m.sender_id = c.buyer_id, m.body_enc, COALESCE(m.delivered_at, m.created_at) \
+         FROM chat_messages m JOIN conversations c ON c.id = m.conversation_id \
+         WHERE c.order_id = $1 AND m.status = 'delivered' AND m.seq IS NOT NULL \
+         ORDER BY m.seq",
+    )
+    .bind(order_id)
+    .fetch_all(db)
+    .await
+    .context("read staff transcript")?;
+    rows.into_iter()
+        .map(|(seq, buyer, enc, sent_at)| {
+            Ok(StaffMessage {
+                seq,
+                from: if buyer { Party::Buyer } else { Party::Seller },
+                body: cipher.decrypt(&enc)?,
+                sent_at,
+            })
+        })
+        .collect()
+}
+
+/// The flags raised on the order's conversation, oldest first, with the
+/// original text. Owner only: the caller decides who may call this.
+pub async fn flagged_originals(
+    db: &PgPool,
+    cipher: &FieldCipher,
+    order_id: Uuid,
+) -> Result<Vec<FlaggedOriginal>, AppError> {
+    let rows: Vec<(bool, String, String, Vec<u8>, OffsetDateTime)> = sqlx::query_as(
+        "SELECT f.user_id = c.buyer_id, f.severity, f.category, f.original_enc, f.created_at \
+         FROM moderation_flags f JOIN conversations c ON c.id = f.conversation_id \
+         WHERE c.order_id = $1 ORDER BY f.created_at, f.id",
+    )
+    .bind(order_id)
+    .fetch_all(db)
+    .await
+    .context("read flagged originals")?;
+    rows.into_iter()
+        .map(|(buyer, severity, category, enc, at)| {
+            Ok(FlaggedOriginal {
+                from: if buyer { Party::Buyer } else { Party::Seller },
+                severity,
+                category,
+                original: cipher.decrypt(&enc)?,
+                at,
+            })
+        })
+        .collect()
+}

@@ -1790,6 +1790,8 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "book_shipments",
             "cancel_shipments",
             "chat_held",
+            "confirm_reminders",
+            "dispute_deadlines",
             "expire_checkouts",
             "payouts",
             "poll_shipments",
@@ -2010,4 +2012,43 @@ async fn refund_and_reverify_errors_write_no_push_back_rows(pool: PgPool) {
         .await,
         0
     );
+}
+
+#[sqlx::test]
+async fn dispute_deadlines_job_advances_overdue_disputes(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let o = app.shipped_order("courier", "delivered").await;
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{}/dispute", o.order_id),
+            Some(json!({ "reason": "damaged", "body": "The zip was torn" })),
+            Some(&o.buyer_token),
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id = res.json["id"].as_str().unwrap().to_string();
+    // Not yet due: nothing moves.
+    assert_eq!(tick(&app).await.disputes_advanced, 0);
+    exec(
+        &app,
+        &format!(
+            "UPDATE disputes SET seller_respond_by = now() - interval '1 second' WHERE id = '{id}'"
+        ),
+    )
+    .await;
+    assert_eq!(tick(&app).await.disputes_advanced, 1);
+    let (status, missed): (String, bool) =
+        sqlx::query_as("SELECT status, seller_missed_deadline FROM disputes WHERE id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), missed), ("awaiting_decision", true));
+    let runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_runs WHERE job = 'dispute_deadlines'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(runs, 1);
 }

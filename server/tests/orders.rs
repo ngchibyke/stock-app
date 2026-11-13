@@ -662,5 +662,8 @@ async fn expected_payout_uses_the_order_fee_snapshot(pool: PgPool) {
     assert_eq!(res.json["status"], "cancelled");
     let mut expected = seller_keys(false);
     expected.remove("expected_payout_kobo");
+    // The order has a refund now: what went back to the buyer is shown.
+    expected.insert("refunded_kobo".into());
     assert_eq!(keys(&res.json), expected);
+    assert_eq!(res.json["refunded_kobo"], 10_000);
 }

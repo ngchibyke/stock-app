@@ -9,6 +9,7 @@ pub mod config;
 pub mod couriers;
 pub mod crypto;
 pub mod delivery;
+pub mod disputes;
 pub mod error;
 pub mod escrow;
 pub mod extract;
@@ -16,6 +17,7 @@ pub mod ledger;
 pub mod limits;
 pub mod moderation;
 pub mod money;
+pub mod notify;
 pub mod orders;
 pub mod payments;
 pub mod payout_accounts;
@@ -54,6 +56,8 @@ pub struct AppState {
     pub courier: Option<Arc<dyn couriers::CourierProvider>>,
     /// Tone check for chat and reviews. Production always has a real one.
     pub tone: Arc<dyn moderation::tone::ToneChecker>,
+    /// Sends notices to devices. Production always has a real one.
+    pub push: Arc<dyn notify::push::PushSender>,
     /// Live pushes to open sockets.
     pub chat_hub: Arc<chat::hub::ChatHub>,
 }
@@ -110,6 +114,8 @@ pub fn build_app(state: AppState) -> Router {
         .merge(orders::routes::router())
         .merge(chat::routes::router())
         .merge(reviews::routes::router())
+        .merge(disputes::routes::router())
+        .merge(notify::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())
         .merge(payments::webhooks::router())

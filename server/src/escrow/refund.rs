@@ -13,7 +13,9 @@
 //! 2. [`send_refund`] (after commit): claims the row, calls `provider.refund`
 //!    with the same reference every time, and records the answer:
 //!    - Ok: refund `processing` (the buyer gets the money within about 10
-//!      working days; not `completed`), order `refunded`;
+//!      working days; not `completed`), order `refunded`. A `partial` refund
+//!      (`refunds.kind`, see [`super::partial`]) leaves its order `completed`:
+//!      the rest of the order's money was released to the seller;
 //!    - NotSupported: refund `manual`, order stays `refund_pending` (the owner
 //!      refunds by hand, then marks the refund done, which makes it `refunded`);
 //!    - Rejected: refund `failed`, order stays `refund_pending` (owner follow-up);
@@ -36,9 +38,11 @@ use crate::{
     AppState, audit,
     checkout::service::busy_err,
     delivery::shipments,
+    disputes,
     error::AppError,
     ledger::{self, Account, Entry},
     limits::MAX_STOCK,
+    notify::{kinds::Kind, service as notify},
     payments::{self, ProviderError, RefundRequest},
 };
 
@@ -71,7 +75,8 @@ fn db_err(ctx: &'static str) -> impl FnOnce(sqlx::Error) -> AppError {
 /// unheld shipped order is 409 `order_not_held` (hold it first, which stops
 /// its release). Not a no-op on retry: an order already `refund_pending` or
 /// `refunded` (or in any other state) is 409 `invalid_order_state` naming it;
-/// a `completed` order is 409 `already_released`.
+/// a `completed` order is 409 `already_released`. An order with an open
+/// dispute is 409 `dispute_open`: its decision settles it ([`crate::disputes::decide`]).
 pub async fn owner_refund_order(
     state: &AppState,
     order_id: Uuid,
@@ -93,6 +98,14 @@ pub async fn owner_refund_order(
         .await
         .context("set lock_timeout")?;
     let begun = begin(&mut tx, order_id, status == "paid", "owner_decision", true).await?;
+    // Checked under the order lock `begin` took; an error rolls back what it
+    // booked. An open dispute is settled through its decision, never directly.
+    if disputes::service::open_for_order(&mut tx, order_id)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict("dispute_open"));
+    }
     audit::record(
         &mut tx,
         Some(actor),
@@ -109,6 +122,18 @@ pub async fn owner_refund_order(
     .await?;
     tx.commit().await.map_err(db_err("commit refund"))?;
     send_refund(state, begun.refund_id).await
+}
+
+/// The owner's full refund of a dispute (reason `dispute_refund`), **inside
+/// the caller's transaction**: what [`owner_refund_order`] books (a held
+/// shipped order, no stock restored, the platform absorbs the collection
+/// fee), without its audit or commit. Returns the refund id. It sends
+/// nothing: after the commit the caller sends the refund with
+/// [`send_refund`] (never inside the transaction).
+pub async fn owner_begin_in(conn: &mut PgConnection, order_id: Uuid) -> Result<Uuid, AppError> {
+    Ok(begin(conn, order_id, false, "dispute_refund", true)
+        .await?
+        .refund_id)
 }
 
 struct Begun {
@@ -280,6 +305,7 @@ async fn begin(
     .fetch_one(&mut *conn)
     .await
     .context("insert refund")?;
+    notify::tell_buyer(conn, Kind::RefundStarted, order_id).await?;
     let entry = |account, amount_kobo| Entry {
         order_id: Some(order_id),
         checkout_id: Some(checkout_id),
@@ -345,6 +371,8 @@ struct Claimed {
     provider: String,
     amount_kobo: i64,
     reason: String,
+    /// `full` or `partial`; only a full refund moves the order to `refunded`.
+    kind: String,
     /// Fencing token: the outcome is written only while the claim still holds it.
     claimed_until: OffsetDateTime,
     payment_reference: String,
@@ -364,7 +392,7 @@ pub async fn send_refund(state: &AppState, refund_id: Uuid) -> Result<RefundOutc
          WHERE r.id = $1 AND o.id = r.order_id AND r.status = 'requested' \
            AND r.attempts < $2 \
            AND (r.sending_until IS NULL OR r.sending_until < now()) \
-         RETURNING r.order_id, r.reference, r.provider, r.amount_kobo, r.reason, \
+         RETURNING r.order_id, r.reference, r.provider, r.amount_kobo, r.reason, r.kind, \
                    r.sending_until AS claimed_until, c.reference AS payment_reference",
     )
     .bind(refund_id)
@@ -392,8 +420,8 @@ pub async fn send_refund(state: &AppState, refund_id: Uuid) -> Result<RefundOutc
             "provider not configured"
         ))),
     };
-    // (refund status, provider refund id, order refunded?, sanitised error)
-    let (status, provider_id, done, error): (&str, Option<String>, bool, Option<&str>) =
+    // (refund status, provider refund id, accepted?, sanitised error)
+    let (status, provider_id, accepted, error): (&str, Option<String>, bool, Option<&str>) =
         match result {
             Ok(h) => ("processing", Some(h.provider_refund_id), true, None),
             // The buyer is not paid back until the owner refunds by hand.
@@ -441,6 +469,10 @@ pub async fn send_refund(state: &AppState, refund_id: Uuid) -> Result<RefundOutc
         );
         return current(&state.db, refund_id).await;
     }
+    // A partial refund's order was released (`completed`) with the rest of
+    // its money in the same transaction; only a full refund makes it `refunded`.
+    let partial = c.kind == "partial";
+    let done = accepted && !partial;
     if done {
         sqlx::query(
             "UPDATE orders SET status = 'refunded' WHERE id = $1 AND status = 'refund_pending'",
@@ -450,7 +482,22 @@ pub async fn send_refund(state: &AppState, refund_id: Uuid) -> Result<RefundOutc
         .await
         .context("mark order refunded")?;
     }
-    if done {
+    if accepted && partial {
+        audit::record(
+            &mut tx,
+            None,
+            "refund.partial_sent",
+            "refund",
+            Some(refund_id),
+            json!({
+                "order_id": c.order_id,
+                "refund_id": refund_id,
+                "refund_status": status,
+                "amount_kobo": c.amount_kobo,
+            }),
+        )
+        .await?;
+    } else if done {
         audit::record(
             &mut tx,
             None,
