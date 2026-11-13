@@ -25,6 +25,7 @@ use crate::{
         refund::{owner_begin_in, send_refund},
         release::{ReleaseReason, ReleasedIn, release_in, send_payout},
     },
+    notify::{kinds::Kind, service as notify},
     settings,
 };
 
@@ -197,6 +198,7 @@ pub async fn decide(
         }),
     )
     .await?;
+    notify::tell_both(&mut tx, Kind::DisputeDecided, order_id, dispute_id).await?;
     tx.commit().await.context("commit decision")?;
 
     // After the commit; the sweepers retry anything that fails here.

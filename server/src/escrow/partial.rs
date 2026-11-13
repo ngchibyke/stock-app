@@ -37,7 +37,9 @@ use crate::{
     checkout::service::busy_err,
     error::AppError,
     ledger::{self, Account, Entry},
-    money, payments,
+    money,
+    notify::{kinds::Kind, service as notify},
+    payments,
     settings::Settings,
 };
 
@@ -159,6 +161,7 @@ pub async fn partial_refund_in(
     .fetch_one(&mut *conn)
     .await
     .context("insert partial refund")?;
+    notify::tell_buyer(conn, Kind::RefundStarted, order_id).await?;
     let entry = |account, amount_kobo| Entry {
         order_id: Some(order_id),
         checkout_id: Some(row.checkout_id),

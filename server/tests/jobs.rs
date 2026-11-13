@@ -1790,6 +1790,7 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "book_shipments",
             "cancel_shipments",
             "chat_held",
+            "confirm_reminders",
             "dispute_deadlines",
             "expire_checkouts",
             "payouts",

@@ -42,6 +42,7 @@ use crate::{
     error::AppError,
     ledger::{self, Account, Entry},
     limits::MAX_STOCK,
+    notify::{kinds::Kind, service as notify},
     payments::{self, ProviderError, RefundRequest},
 };
 
@@ -304,6 +305,7 @@ async fn begin(
     .fetch_one(&mut *conn)
     .await
     .context("insert refund")?;
+    notify::tell_buyer(conn, Kind::RefundStarted, order_id).await?;
     let entry = |account, amount_kobo| Entry {
         order_id: Some(order_id),
         checkout_id: Some(checkout_id),

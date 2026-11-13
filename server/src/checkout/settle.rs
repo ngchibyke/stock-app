@@ -53,6 +53,7 @@ use crate::{
     escrow::refund::{begin_refund, send_refund},
     ledger::{self, Account, Entry},
     money::split_proportional,
+    notify::{kinds::Kind, service as notify},
     payments::PaymentStatus,
     settings,
 };
@@ -492,6 +493,9 @@ async fn apply(
             flag_reused_quotes(&mut tx, checkout_id).await?;
         }
         clear_cart_lines(&mut tx, buyer_id, &items).await?;
+        for (order_id, ..) in &orders {
+            notify::tell_seller(&mut tx, Kind::OrderPaid, *order_id).await?;
+        }
         audit::record(
             &mut tx,
             None,

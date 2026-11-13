@@ -23,6 +23,10 @@ use crate::{
     error::AppError,
     limits::{MAX_DISPUTE_CHARS, MAX_DISPUTE_PHOTOS},
     moderation::filter::{Category, Scan, Severity, scan},
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Notice},
+    },
 };
 
 /// Calendar hours the seller has to respond.
@@ -398,6 +402,12 @@ pub async fn open(
         json!({ "reason": reason.as_str(), "prior_status": order.status }),
     )
     .await?;
+    let (_, seller) = notify::order_parties(&mut tx, order_id).await?;
+    notify::enqueue(
+        &mut tx,
+        Notice::dispute(seller, Kind::DisputeOpened, dispute_id),
+    )
+    .await?;
     let (view, _, _) = load(&mut tx, state, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(view)
@@ -643,6 +653,7 @@ pub async fn request_return(
         json!({ "paid_by": paid_by.as_str(), "note": note }),
     )
     .await?;
+    notify::tell_both(&mut tx, Kind::ReturnRequested, order_id, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(())
 }

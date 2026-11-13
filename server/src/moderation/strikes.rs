@@ -11,7 +11,15 @@ use super::{
     filter::Category,
     pipeline::{FlagSeverity, Verdict},
 };
-use crate::{audit, crypto::FieldCipher, error::AppError};
+use crate::{
+    audit,
+    crypto::FieldCipher,
+    error::AppError,
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Notice},
+    },
+};
 
 /// At most one strike per user in this many minutes, so one bad burst cannot
 /// jump the ladder. Later attempts are still flagged.
@@ -173,6 +181,11 @@ async fn apply_strike(
             json!({ "category": category.as_str() }),
         )
         .await?;
+        notify::enqueue(
+            conn,
+            Notice::user(user, Kind::ModerationWarning, format!("strike:{id}")),
+        )
+        .await?;
         Some(id)
     };
 
@@ -210,6 +223,10 @@ async fn apply_strike(
             json!({ "active_strikes": active, "hours": mute_hours }),
         )
         .await?;
+        if let Some(until) = muted_until {
+            let key = format!("mute:{user}:{}", until.unix_timestamp());
+            notify::enqueue(conn, Notice::user(user, Kind::ModerationMuted, key)).await?;
+        }
     }
     if strike_id.is_some() && active >= i64::from(review_after) {
         sqlx::query(

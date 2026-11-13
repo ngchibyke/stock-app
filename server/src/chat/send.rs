@@ -26,6 +26,10 @@ use crate::{
         pipeline::{FlagSeverity, Source, Verdict, judge, offline_block, reason_copy},
         strikes::{self, NewFlag, Surface, ensure_can_post, record_flag},
     },
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Notice},
+    },
 };
 
 /// How many of the sender's latest messages the split-digit check reads.
@@ -300,14 +304,16 @@ pub async fn deliver_in(
     conversation_id: Uuid,
     text: &str,
 ) -> Result<MessageView, AppError> {
-    let (seq, buyer_id): (i64, Uuid) = sqlx::query_as(
-        "UPDATE conversations SET last_seq = last_seq + 1, last_message_at = now() \
-         WHERE id = $1 RETURNING last_seq, buyer_id",
-    )
-    .bind(conversation_id)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(busy_err("chat_busy", "take sequence number"))?;
+    let (seq, buyer_id, store_id, buyer_read, seller_read): (i64, Uuid, Uuid, i64, i64) =
+        sqlx::query_as(
+            "UPDATE conversations SET last_seq = last_seq + 1, last_message_at = now() \
+             WHERE id = $1 \
+             RETURNING last_seq, buyer_id, store_id, buyer_read_seq, seller_read_seq",
+        )
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(busy_err("chat_busy", "take sequence number"))?;
     let (sender, sent_at): (Uuid, OffsetDateTime) = sqlx::query_as(
         "UPDATE chat_messages SET status = 'delivered', seq = $2, body_enc = $3, \
                 delivered_at = now(), next_attempt_at = NULL \
@@ -319,6 +325,30 @@ pub async fn deliver_in(
     .fetch_one(&mut *conn)
     .await
     .context("deliver message")?;
+    // One notice per unread stretch: every message sent before the other side
+    // reads the conversation shares the key, so it shares the notice.
+    let (recipient, read_seq) = if sender == buyer_id {
+        let owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM stores WHERE id = $1")
+            .bind(store_id)
+            .fetch_one(&mut *conn)
+            .await
+            .context("load store owner")?;
+        (owner, seller_read)
+    } else {
+        (buyer_id, buyer_read)
+    };
+    notify::enqueue(
+        &mut *conn,
+        Notice {
+            user: recipient,
+            kind: Kind::ChatMessage,
+            order_id: None,
+            dispute_id: None,
+            conversation_id: Some(conversation_id),
+            dedupe_key: format!("chat:{conversation_id}:{read_seq}"),
+        },
+    )
+    .await?;
     Ok(MessageView {
         id: message_id,
         conversation_id,
