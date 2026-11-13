@@ -43,6 +43,17 @@ Chat, moderation and reviews (part 4):
 - **Reviews:** one per completed delivery, with stars, optional text and photos, moderated like chat, and one seller reply. Store pages show the rating; the public list never shows who the buyer is.
 - **Moderation desk:** staff list flags as metadata, resolve them and hide reviews. Only the owner reads a flagged original, always audited, and only the owner unmutes or bans. A ban stops posting only.
 
+Disputes and notifications (part 5):
+
+- **Reporting a problem:** a buyer can report an order that has shipped but not been paid out, with a reason, a statement and up to five photos. The order's money is frozen at once. One report per order, and withdrawing it is final.
+- **The seller's side:** the seller has 48 hours to answer once. After that the report moves on without them. Staff can ask for the item to be returned first and record who pays for the return.
+- **The decision:** the owner settles it with a full refund, a partial refund or a release. A partial refund comes out of the item total; the rest is released to the seller with the 5% cut taken on what they keep. While a report is open, the plain release, refund and unhold routes refuse the order, so every decision goes through the report and into the audit log.
+- **The dispute screen (server side):** order, payment, ledger, delivery timeline and events, handover-code status, both statements and the order chat. Only the owner sees flagged originals. Support sees open disputes only, and nobody sees the buyer's phone or address there. Every read is audited.
+- **Inbox:** every event (paid, picked up, out for delivery, delivered, refund started, payment released, new message, report opened, return requested, report decided, moderation warning, mute) writes an inbox row in the same transaction as the change. The inbox stores no text: titles and bodies are fixed copy.
+- **Reminders:** a "did your order arrive?" notice a day after delivery and a "payment releases tomorrow" notice a day before release. A missed reminder is skipped, never sent late.
+- **Push:** notices go out through Firebase Cloud Messaging with the fixed copy and two ids, and nothing else: no order, name, amount or message text reaches a lock screen. A signed-out session gets no push, a dead token is disabled, and an outage is retried with backoff without re-sending to devices that already got it.
+- **Flagged payments:** a buyer can no longer release an order whose payment the provider flagged.
+
 ## Roadmap
 
 | Part | What it adds |
@@ -51,7 +62,7 @@ Chat, moderation and reviews (part 4):
 | 2 | Payments and escrow (Mono first, behind a switchable provider layer): cart, orders, held funds, release, refunds, 5% platform cut (done) |
 | 3 | Delivery and tracking: FCT addresses, Shipbubble couriers, self-delivery, handover codes, tracking timeline (done) |
 | 4 | Moderated chat and reviews (done) |
-| 5 | Disputes and notifications |
+| 5 | Disputes and notifications (done) |
 | 6 | Owner web dashboard |
 | 7 | Flutter phone app (Android and iPhone) |
 | 8 | Data export, deletion and retention |
@@ -120,3 +131,8 @@ These are tracked in the roadmap:
 - Native-speaker review of the word lists and the eval fixture, and a run of the language eval (`server/tests/tone_eval.rs`), with the owner choosing the accuracy bar before launch.
 - Photos in reviews are not checked and can carry phone numbers. Decide before launch. The upload plan must also check that a key belongs to the uploader.
 - Owner decisions: whether users can report a message that got through (not in the spec, so not built); whether chat should close some time after an order ends; whether sellers may see buyer names.
+- DPO and legal: Google (Firebase Cloud Messaging) as a processor of push tokens, and the cross-border transfer under the NDPA; the privacy notice naming push; and whether generic lock-screen copy is enough, or users should be able to opt out per kind of notice.
+- DPO: retention of dispute statements and evidence photos (which may hold personal data of third parties), inbox rows and push devices; Support's access to statements inside open disputes; and staff free-text notes, which are kept in the audit log for every admin action, now including return requests and dispute decisions.
+- Evidence photos on a dispute are not checked and can carry phone numbers, as in reviews. The upload plan must check that a key belongs to the uploader.
+- Owner decisions on disputes: whether the seller's 48 hours should pause on Sundays and holidays (today they are calendar hours, like the ship deadline); whether a withdrawn report should ever be reopenable; and whether a dispute on a courier order still in transit should cancel the courier.
+- Set `FCM_SERVICE_ACCOUNT_FILE` to the Firebase service-account file, kept outside the repository. Production refuses to start without it.
