@@ -284,6 +284,15 @@ async fn token_endpoint_failure_is_unavailable() {
         Err(PushError::Unavailable)
     );
     assert!(calls(&server, SEND_PATH).await.is_empty());
+    // While the token endpoint is down, the next sends fail at once instead
+    // of each waiting on it in turn.
+    for _ in 0..3 {
+        assert_eq!(
+            push.send(&message(Uuid::new_v4())).await,
+            Err(PushError::Unavailable)
+        );
+    }
+    assert_eq!(calls(&server, "/token").await.len(), 1);
 }
 
 #[tokio::test]

@@ -6,6 +6,10 @@
 //! no transaction open, at most [`IN_FLIGHT`] at a time. A notice whose worker
 //! died is claimed again once its lease runs out.
 //!
+//! **Lease renewed at the send.** A claimed notice may wait behind others for
+//! a permit. Its lease is taken afresh when its turn comes, so a second
+//! worker cannot take a notice that is being sent and send it again.
+//!
 //! **Fenced outcome.** The outcome is written only if the notice still has
 //! the `push_until` this worker set: an answer that arrives after the lease
 //! passed to someone else changes nothing.
@@ -28,6 +32,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
+use serde_json::json;
 use time::OffsetDateTime;
 use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -38,7 +43,7 @@ use super::{
     push::{PushError, PushMessage},
 };
 use crate::{
-    AppState,
+    AppState, audit,
     error::AppError,
     escrow::jobs::{Stats, run_every},
 };
@@ -54,7 +59,7 @@ pub const MAX_ATTEMPTS: i32 = 6;
 /// How often the loop runs.
 pub const PERIOD: Duration = Duration::from_secs(5);
 /// How long a claim lasts (`push_until`).
-const LEASE: &str = "interval '2 minutes'";
+const LEASE: Duration = Duration::from_secs(120);
 
 #[derive(sqlx::FromRow)]
 struct Claimed {
@@ -78,8 +83,13 @@ enum Outcome {
 /// One pass over the outbox (see the module docs). `done` counts notices
 /// settled (`sent` or `skipped`), `failed` those put back or given up.
 pub async fn run_once(state: &AppState) -> Result<Stats, AppError> {
-    let claimed: Vec<Claimed> = sqlx::query_as(&format!(
-        "UPDATE notifications n SET push_status = 'sending', push_until = now() + {LEASE} \
+    run_once_with_lease(state, LEASE).await
+}
+
+/// [`run_once`] with a custom lease (tests).
+pub async fn run_once_with_lease(state: &AppState, lease: Duration) -> Result<Stats, AppError> {
+    let claimed: Vec<Claimed> = sqlx::query_as(
+        "UPDATE notifications n SET push_status = 'sending', push_until = now() + make_interval(secs => $3) \
          WHERE n.id IN ( \
              SELECT id FROM notifications \
              WHERE (push_status = 'pending' AND next_push_at <= now()) \
@@ -87,10 +97,11 @@ pub async fn run_once(state: &AppState) -> Result<Stats, AppError> {
              ORDER BY next_push_at, id LIMIT $1 FOR UPDATE SKIP LOCKED) \
          RETURNING n.id, n.user_id, n.kind, \
                    n.created_at < now() - make_interval(hours => $2) AS stale, \
-                   n.push_attempts, n.pushed_devices, n.push_until"
-    ))
+                   n.push_attempts, n.pushed_devices, n.push_until",
+    )
     .bind(CLAIM)
     .bind(STALE_HOURS)
+    .bind(lease.as_secs_f64())
     .fetch_all(&state.db)
     .await
     .context("claim notices")?;
@@ -99,7 +110,7 @@ pub async fn run_once(state: &AppState) -> Result<Stats, AppError> {
     let mut tasks = JoinSet::new();
     for notice in claimed {
         let (state, limit) = (state.clone(), limit.clone());
-        tasks.spawn(async move { push_one(&state, &limit, notice).await });
+        tasks.spawn(async move { push_one(&state, &limit, lease, notice).await });
     }
     let mut stats = Stats::default();
     while let Some(joined) = tasks.join_next().await {
@@ -137,13 +148,39 @@ pub async fn run_loop(state: AppState, cancel: CancellationToken) {
 }
 
 /// Sends one claimed notice and records the outcome. `true` when it settled.
-async fn push_one(state: &AppState, limit: &Semaphore, n: Claimed) -> Result<bool, AppError> {
+async fn push_one(
+    state: &AppState,
+    limit: &Semaphore,
+    lease: Duration,
+    mut n: Claimed,
+) -> Result<bool, AppError> {
+    // One notice at a time per permit, its devices in turn: at most
+    // `IN_FLIGHT` calls are ever out.
+    let _permit = limit.acquire().await.context("push limit closed")?;
+    // The claim was taken when the batch was, and this notice may have waited
+    // behind others since. Take a fresh lease now, so it lasts for the send;
+    // if another worker took the notice meanwhile, it is theirs.
+    let renewed: Option<OffsetDateTime> = sqlx::query_scalar(
+        "UPDATE notifications SET push_until = now() + make_interval(secs => $3) \
+         WHERE id = $1 AND push_status = 'sending' AND push_until = $2 \
+         RETURNING push_until",
+    )
+    .bind(n.id)
+    .bind(n.push_until)
+    .bind(lease.as_secs_f64())
+    .fetch_optional(&state.db)
+    .await
+    .context("renew push lease")?;
+    let Some(push_until) = renewed else {
+        return Ok(false);
+    };
+    n.push_until = push_until;
     let mut pushed = n.pushed_devices.clone();
     let outcome = match Kind::parse(&n.kind) {
         _ if n.stale => Outcome::Skipped,
         // A kind this build does not know: nothing it could say.
         None => Outcome::Skipped,
-        Some(kind) => send_to_devices(state, limit, &n, kind, &mut pushed).await?,
+        Some(kind) => send_to_devices(state, &n, kind, &mut pushed).await?,
     };
     let fence = "id = $1 AND push_status = 'sending' AND push_until = $2";
     let written = match outcome {
@@ -199,7 +236,6 @@ async fn push_one(state: &AppState, limit: &Semaphore, n: Claimed) -> Result<boo
 /// is done (sent, or refused for good) to it.
 async fn send_to_devices(
     state: &AppState,
-    limit: &Semaphore,
     n: &Claimed,
     kind: Kind,
     pushed: &mut Vec<Uuid>,
@@ -240,29 +276,42 @@ async fn send_to_devices(
             kind: kind.as_str(),
             notification_id: n.id,
         };
-        let answer = {
-            let _permit = limit.acquire().await.context("push limit closed")?;
-            state.push.send(&message).await
-        };
-        match answer {
+        match state.push.send(&message).await {
             Ok(()) => pushed.push(device_id),
             Err(PushError::Rejected) => {
                 tracing::warn!(error = "rejected", "push refused for a device");
                 pushed.push(device_id);
             }
-            Err(PushError::Unregistered) => {
-                sqlx::query(
-                    "UPDATE push_devices SET disabled_at = now(), \
-                            disabled_reason = 'unregistered' \
-                     WHERE id = $1 AND disabled_at IS NULL",
-                )
-                .bind(device_id)
-                .execute(&state.db)
-                .await
-                .context("disable push device")?;
-            }
+            Err(PushError::Unregistered) => disable_device(state, device_id).await?,
             Err(PushError::Unavailable) => retry = true,
         }
     }
     Ok(if retry { Outcome::Retry } else { Outcome::Sent })
+}
+
+/// Retires a device whose token the provider says is dead, with its audit
+/// row (the device id only, never the token).
+async fn disable_device(state: &AppState, device_id: Uuid) -> Result<(), AppError> {
+    let mut tx = state.db.begin().await.context("begin")?;
+    let disabled = sqlx::query(
+        "UPDATE push_devices SET disabled_at = now(), disabled_reason = 'unregistered' \
+         WHERE id = $1 AND disabled_at IS NULL",
+    )
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await
+    .context("disable push device")?;
+    if disabled.rows_affected() == 1 {
+        audit::record(
+            &mut tx,
+            None,
+            "push_device.disabled",
+            "push_device",
+            Some(device_id),
+            json!({ "reason": "unregistered" }),
+        )
+        .await?;
+    }
+    tx.commit().await.context("commit")?;
+    Ok(())
 }

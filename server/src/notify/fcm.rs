@@ -40,6 +40,8 @@ pub const MAX_RESPONSE_BODY: usize = 64 * 1024;
 const ASSERTION_SECS: i64 = 3600;
 /// The cached access token is dropped this long before it runs out.
 const REFRESH_MARGIN: Duration = Duration::from_secs(300);
+/// After a failed token exchange, sends fail at once for this long.
+const TOKEN_RETRY_AFTER: Duration = Duration::from_secs(10);
 const GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 
 #[derive(Debug, Clone)]
@@ -116,13 +118,20 @@ struct Cached {
     until: Instant,
 }
 
+/// The access token, and when the exchange last failed.
+#[derive(Default)]
+struct TokenState {
+    cached: Option<Cached>,
+    failed_at: Option<Instant>,
+}
+
 pub struct FcmPush {
     cfg: FcmConfig,
     send_url: Url,
     token_url: Url,
     key: EncodingKey,
     client: reqwest::Client,
-    token: Mutex<Option<Cached>>,
+    token: Mutex<TokenState>,
 }
 
 impl FcmPush {
@@ -152,20 +161,38 @@ impl FcmPush {
             token_url,
             key,
             client,
-            token: Mutex::new(None),
+            token: Mutex::new(TokenState::default()),
         })
     }
 
     /// The `Authorization` header: the cached access token, or a fresh one.
     /// The lock is held across the exchange, so concurrent sends share one.
     async fn bearer(&self) -> Result<HeaderValue, PushError> {
-        let mut cached = self.token.lock().await;
-        if let Some(token) = cached.as_ref()
+        let mut state = self.token.lock().await;
+        if let Some(token) = state.cached.as_ref()
             && Instant::now() < token.until
         {
             return Ok(token.header.clone());
         }
-        *cached = None;
+        state.cached = None;
+        // The exchange just failed: the sends queued behind it fail at once
+        // instead of each waiting out a timeout in turn.
+        if state
+            .failed_at
+            .is_some_and(|at| at.elapsed() < TOKEN_RETRY_AFTER)
+        {
+            return Err(PushError::Unavailable);
+        }
+        let minted = self.mint().await;
+        state.failed_at = minted.is_err().then(Instant::now);
+        let token = minted?;
+        let header = token.header.clone();
+        state.cached = Some(token);
+        Ok(header)
+    }
+
+    /// Exchanges a fresh assertion for an access token.
+    async fn mint(&self) -> Result<Cached, PushError> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let claims = Claims {
             iss: &self.cfg.client_email,
@@ -205,19 +232,18 @@ impl FcmPush {
             .map_err(|_| failed("token_bad_answer", Some(status)))?;
         header.set_sensitive(true);
         let lifetime = Duration::from_secs(expires_in).saturating_sub(REFRESH_MARGIN);
-        *cached = Some(Cached {
-            header: header.clone(),
+        Ok(Cached {
+            header,
             until: Instant::now() + lifetime,
-        });
-        Ok(header)
+        })
     }
 
     /// Forgets `used` if it is still the cached token (another send may have
     /// replaced it already).
     async fn forget(&self, used: &HeaderValue) {
-        let mut cached = self.token.lock().await;
-        if cached.as_ref().is_some_and(|t| t.header == *used) {
-            *cached = None;
+        let mut state = self.token.lock().await;
+        if state.cached.as_ref().is_some_and(|t| t.header == *used) {
+            state.cached = None;
         }
     }
 

@@ -12,7 +12,7 @@ use server::notify::{
     kinds::Kind,
     push::PushError,
     service::{Notice, enqueue},
-    worker::run_once,
+    worker::{run_once, run_once_with_lease},
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -260,6 +260,19 @@ async fn unregistered_token_is_disabled(pool: PgPool) {
     assert!(disabled);
     assert_eq!(reason.as_deref(), Some("unregistered"));
     assert_eq!(state(&app, id).await.0, "sent", "nothing is left to try");
+    // The change is in the audit trail, with the device id and no token.
+    let (subject, detail): (Uuid, serde_json::Value) = sqlx::query_as(
+        "SELECT subject_id, detail FROM audit_log WHERE action = 'push_device.disabled'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    let device_id: Uuid = sqlx::query_scalar("SELECT id FROM push_devices")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(subject, device_id);
+    assert_eq!(detail, json!({ "reason": "unregistered" }));
 
     // The dead device is never tried again.
     let next = notice(&app, ada, Kind::OrderDelivered).await;
@@ -375,4 +388,34 @@ async fn expired_lease_is_claimed_again(pool: PgPool) {
     .unwrap();
     tick(&app).await;
     assert_eq!(state(&app, id).await, ("sent".to_string(), 0, 1));
+}
+
+/// A backlog longer than one lease, with a second worker arriving late: a
+/// notice being sent must still hold its claim, or the second worker takes
+/// it and the device gets it twice.
+#[sqlx::test]
+async fn backlog_is_not_sent_twice_by_a_second_worker(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (ada, session) = app.sign_up_verified(ADA).await;
+    device(&app, &session, "ada-phone").await;
+    app.push.set_delay(Duration::from_millis(900));
+    // Three waves of eight: the last starts 1.8s in and ends 2.7s in.
+    for _ in 0..24 {
+        notice(&app, ada, Kind::OrderDelivered).await;
+    }
+    let lease = Duration::from_secs(2);
+    let state = app.state.clone();
+    let first = tokio::spawn(async move { run_once_with_lease(&state, lease).await });
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    run_once_with_lease(&app.state, lease).await.unwrap();
+    first.await.unwrap().unwrap();
+
+    assert_eq!(app.push.sent().len(), 24, "each notice went once");
+    let by_status: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT push_status, count(*) FROM notifications GROUP BY push_status ORDER BY 1",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(by_status, [("sent".to_string(), 24)]);
 }
