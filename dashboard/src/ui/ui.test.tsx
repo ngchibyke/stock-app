@@ -9,7 +9,8 @@ import { StatusBadge, Tabs, toneFor } from "./kit";
 
 describe("Icon", () => {
   it("has a glyph with paths and a behaviour for every name", () => {
-    for (const [name, g] of Object.entries(glyphs)) {
+    for (const [name, glyph] of Object.entries(glyphs)) {
+      const g: { paths: string[]; extra?: unknown; behaviour: string } = glyph;
       expect(g.paths.length + (g.extra ? 1 : 0), name).toBeGreaterThan(0);
       expect(g.behaviour, name).toBeTruthy();
     }
