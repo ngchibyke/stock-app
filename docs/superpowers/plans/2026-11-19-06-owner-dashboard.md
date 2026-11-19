@@ -49,7 +49,7 @@ server/src/admin/
   payouts.rs        # NEW  payout re-poll for bank reversals (Task 8)
   statement.rs      # NEW  daily reconciliation against Mono (Task 9)
 server/migrations/
-  0036_staff_and_suspension.sql
+  0036_store_suspension.sql
   0037_alert_acks.sql
 server/tests/
   admin_users.rs  admin_stores.rs  admin_orders.rs  admin_alerts.rs
@@ -75,7 +75,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 ### Task 2: Staff accounts
 
-**Files:** `server/src/admin/users.rs`, migration `0036_staff_and_suspension.sql`, `server/tests/admin_users.rs`.
+**Files:** `server/src/admin/users.rs`, migration `0036_store_suspension.sql`, `server/tests/admin_users.rs`.
 
 - `POST /admin/staff` (Owner) creates a Support account from a phone and name and sets the first password, which the Owner passes on. *(Built: the auth module has no change-password route, so a forced change at first sign-in is not built. Add one with that route.)* The route also gives `GET /admin/staff`, and reuses `insert_user`.
 - `POST /admin/staff/{id}/remove` (Owner): sets the role back to `buyer`, revokes sessions in the same transaction, refuses `cannot_remove_self` (409). *(Built: `last_owner` cannot happen, because the caller is always an owner, so removing another owner is allowed.)*
@@ -87,7 +87,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 **Files:** `server/src/admin/stores.rs`, migration `0036` (adds `stores.suspended_at`, `suspended_reason`), `server/tests/admin_stores.rs`.
 
 - `GET /admin/stores`, `GET /admin/stores/{id}` (Owner): name, owner id, product count, open order count, payout-account status, suspension.
-- `POST /admin/stores/{id}/suspend` (`reason` required, 1..=500 chars) and `/unsuspend` (Owner). Browse excludes suspended stores; checkout refuses a cart line from one with 409 `store_suspended`.
+- `POST /admin/stores/{id}/suspend` (`reason` required, 1..=500 chars) and `/unsuspend` (Owner). Browse excludes suspended stores; checkout refuses a cart line from one with the existing 422 `item_unavailable`. *(Built: `stores.status = 'suspended'` already existed and was already honoured by browse, cart and checkout, so migration 0036 only adds the reason, time and actor. Unsuspend returns the store to `active` if its payout account is verified, else `pending`.)*
 - [ ] **Step 1:** Failing tests, including browse exclusion and checkout refusal, and that an existing paid order still progresses.
 - [ ] **Steps 2–5:** implement and commit `feat: suspend and unsuspend stores`.
 

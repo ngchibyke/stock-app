@@ -33,6 +33,7 @@ pub mod moderation;
 pub mod money;
 pub mod orders;
 pub mod routes;
+pub mod stores;
 pub mod users;
 pub mod views;
 

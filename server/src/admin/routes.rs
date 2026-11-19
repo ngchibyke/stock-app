@@ -46,6 +46,7 @@ pub fn router() -> Router<AppState> {
         )
         .merge(moderation::router())
         .merge(super::users::router())
+        .merge(super::stores::router())
         .merge(super::disputes::router())
 }
 
