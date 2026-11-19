@@ -33,6 +33,8 @@ pub struct Config {
     /// Photo storage (`S3_*` and `PHOTO_BASE_URL`); `None` when none is set (production
     /// then refuses to serve; elsewhere `POST /uploads` answers 503).
     pub s3: Option<S3Config>,
+    /// The oldest phone-app version still served (`MIN_APP_VERSION`, `major.minor.patch`).
+    pub min_app_version: String,
 }
 
 impl std::fmt::Debug for Config {
@@ -354,6 +356,13 @@ impl Config {
         let claude = claude_config(&var)?;
         let fcm = fcm_config(&var)?;
         let s3 = s3_config(&var)?;
+        let min_app_version = var("MIN_APP_VERSION")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "1.0.0".to_string());
+        if !crate::app_config::valid_version(&min_app_version) {
+            bail!("MIN_APP_VERSION must look like 1.0.0");
+        }
         Ok(Self {
             public_redirect_url,
             mono,
@@ -361,6 +370,7 @@ impl Config {
             claude,
             fcm,
             s3,
+            min_app_version,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,
@@ -785,5 +795,20 @@ mod tests {
         pairs.retain(|(k, _)| *k != "S3_BUCKET");
         pairs.push(("S3_BUCKET", "bad/bucket"));
         assert!(load(&pairs).unwrap_err().to_string().contains("S3_BUCKET"));
+    }
+
+    #[test]
+    fn the_minimum_app_version_defaults_and_is_checked() {
+        assert_eq!(load(&[]).unwrap().min_app_version, "1.0.0");
+        assert_eq!(
+            load(&[("MIN_APP_VERSION", " 2.3.4 ")])
+                .unwrap()
+                .min_app_version,
+            "2.3.4"
+        );
+        for bad in ["2", "2.3", "latest", "2.3.x"] {
+            let err = load(&[("MIN_APP_VERSION", bad)]).unwrap_err().to_string();
+            assert!(err.contains("MIN_APP_VERSION"), "{err}");
+        }
     }
 }

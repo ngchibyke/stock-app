@@ -1,5 +1,6 @@
 pub mod access_codes;
 pub mod admin;
+pub mod app_config;
 pub mod audit;
 pub mod auth;
 pub mod cart;
@@ -68,6 +69,8 @@ pub struct AppState {
     /// Where uploaded photos are stored. `None` when no object store is configured:
     /// `POST /uploads` then answers 503.
     pub photos: Option<Arc<dyn uploads::ObjectStore>>,
+    /// What `GET /config` tells the phone app.
+    pub app_config: Arc<app_config::AppConfig>,
 }
 
 async fn health() -> Json<Value> {
@@ -113,6 +116,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .merge(auth::routes::router())
         .merge(uploads::routes::router())
+        .merge(app_config::router())
         .merge(access_codes::routes::router())
         .merge(stores::routes::router())
         .merge(products::routes::router())

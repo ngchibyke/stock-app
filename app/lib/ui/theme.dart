@@ -9,10 +9,15 @@ abstract final class AppTheme {
   static ThemeData dark() => _build(Brightness.dark);
 
   static ThemeData _build(Brightness brightness) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: seed,
-      brightness: brightness,
-    );
+    // The seed's own colour as the primary, so the app matches the dashboard's indigo; the
+    // rest of the scheme is still derived from it.
+    final light = brightness == Brightness.light;
+    final scheme = ColorScheme.fromSeed(seedColor: seed, brightness: brightness)
+        .copyWith(
+          primary: light ? seed : const Color(0xFF8B83FF),
+          onPrimary: light ? Colors.white : const Color(0xFF14123A),
+          tertiary: const Color(0xFF7C3AED),
+        );
     final base = ThemeData(
       colorScheme: scheme,
       useMaterial3: true,

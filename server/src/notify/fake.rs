@@ -21,6 +21,7 @@ pub struct Seen {
     pub body: &'static str,
     pub kind: &'static str,
     pub notification_id: Uuid,
+    pub route: String,
 }
 
 #[derive(Default)]
@@ -93,6 +94,7 @@ impl PushSender for FakePush {
             body: m.body,
             kind: m.kind,
             notification_id: m.notification_id,
+            route: m.route.to_string(),
         });
         let delay = *self.delay.lock().unwrap();
         if let Some(delay) = delay {

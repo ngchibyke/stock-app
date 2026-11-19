@@ -55,6 +55,7 @@ fn message(id: Uuid) -> PushMessage<'static> {
         body: "Your order was marked delivered.",
         kind: "order_delivered",
         notification_id: id,
+        route: "order:11111111-1111-1111-1111-111111111111",
     }
 }
 
@@ -183,7 +184,7 @@ async fn sends_the_exact_body() {
                     "title": "Delivered",
                     "body": "Your order was marked delivered.",
                 },
-                "data": { "kind": "order_delivered", "notification_id": id.to_string() },
+                "data": { "kind": "order_delivered", "notification_id": id.to_string(), "route": "order:11111111-1111-1111-1111-111111111111" },
             }
         })
     );

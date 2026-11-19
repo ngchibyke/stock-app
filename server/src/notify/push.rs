@@ -15,6 +15,9 @@ pub struct PushMessage<'a> {
     pub body: &'static str,
     pub kind: &'static str,
     pub notification_id: Uuid,
+    /// Where a tap goes: `order:<id>`, `chat:<id>`, `dispute:<id>` or `account`; empty
+    /// when the notice has no subject (the app opens the inbox). One id at most.
+    pub route: &'a str,
 }
 
 impl fmt::Debug for PushMessage<'_> {
@@ -23,6 +26,7 @@ impl fmt::Debug for PushMessage<'_> {
             .field("token", &"[redacted]")
             .field("kind", &self.kind)
             .field("notification_id", &self.notification_id)
+            .field("route", &self.route)
             .finish()
     }
 }

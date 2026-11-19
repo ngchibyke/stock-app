@@ -1,0 +1,634 @@
+openapi: 3.1.0
+info:
+  title: Market API (phone app)
+  version: 1.0.0
+  description: |
+    The routes the buyer and seller phone app calls. Hand-written, and checked against the
+    server's router by `server/tests/openapi.rs`: a route listed here that the server does not
+    have, or a route the app needs that is missing here, fails that test.
+
+    - Money is always whole kobo (integers). Dates are RFC 3339 UTC.
+    - Errors are `{ "error": { "code", "message" } }`; the message is safe to show. A few add
+      top-level fields (`verification_id` on `phone_unverified`, `muted_until` on `muted`).
+    - Authenticated routes take `Authorization: Bearer <token>` from sign-in or phone verification.
+    - Photos: upload with `POST /uploads`, attach the returned `key`, and show a photo at
+      `<photo_base_url>/<key>` (`photo_base_url` comes from `GET /config`).
+    - The first slices of the app (sign-in, browse, cart, checkout, orders, notifications) have
+      full schemas. Chat, disputes, reviews and the seller routes are listed with loose bodies and
+      get exact schemas when their slice is built.
+servers:
+  - url: http://10.0.2.2:8080
+    description: A local server, as seen from the Android emulator
+security:
+  - bearer: []
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Before:
+      name: before
+      in: query
+      description: The `next_cursor` of the previous page.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100 }
+  responses:
+    Error:
+      description: Any failure (the status says which)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: [phone_taken, invalid_credentials, photo_not_yours] }
+            message: { type: string }
+    Kobo: { type: integer, format: int64, description: Whole kobo }
+    Me:
+      type: object
+      required: [id, display_name, phone, role, is_seller]
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+        phone: { type: string, description: E.164 }
+        role: { type: string, enum: [user, support, owner] }
+        is_seller: { type: boolean }
+    Token:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    AppConfig:
+      type: object
+      required: [photo_base_url, min_app_version, fct_only, payment_return_url]
+      properties:
+        photo_base_url: { type: [string, "null"] }
+        min_app_version: { type: string, examples: ["1.0.0"] }
+        fct_only: { type: boolean }
+        payment_return_url: { type: string }
+    Upload:
+      type: object
+      required: [key, content_type, bytes, width, height]
+      properties:
+        key: { type: string, examples: ["photos/6f1c2c0e-....jpg"] }
+        content_type: { type: string, enum: [image/jpeg, image/png, image/webp] }
+        bytes: { type: integer }
+        width: { type: integer }
+        height: { type: integer }
+    Category:
+      type: object
+      required: [slug, name]
+      properties:
+        slug: { type: string }
+        name: { type: string }
+    FeedItem:
+      type: object
+      required: [id, name, base_price_kobo, category, condition, store_id, store_name, store_slug, rating_count, in_stock, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        base_price_kobo: { $ref: "#/components/schemas/Kobo" }
+        cover_photo_key: { type: [string, "null"] }
+        brand: { type: [string, "null"] }
+        category: { type: string }
+        condition: { type: string, enum: [new, used, refurbished] }
+        store_id: { type: string, format: uuid }
+        store_name: { type: string }
+        store_slug: { type: string }
+        rating_count: { type: integer }
+        rating_average: { type: [number, "null"], description: Null until the store has a review }
+        in_stock: { type: boolean }
+        created_at: { type: string, format: date-time }
+    FeedPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/FeedItem" } }
+        next_cursor: { type: [string, "null"] }
+    Variant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        attributes: { type: object, additionalProperties: { type: string } }
+        available_stock: { type: integer }
+        price_kobo: { type: [integer, "null"], description: Overrides the product's base price }
+        sku: { type: [string, "null"] }
+    ProductView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        store_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        brand: { type: [string, "null"] }
+        condition: { type: string }
+        photo_keys: { type: array, items: { type: string } }
+        weight_grams: { type: integer }
+        base_price_kobo: { $ref: "#/components/schemas/Kobo" }
+        is_published: { type: boolean }
+        variants: { type: array, items: { $ref: "#/components/schemas/Variant" } }
+    CartLine:
+      type: object
+      properties:
+        variant_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        product_name: { type: string }
+        attributes: { type: object }
+        store_id: { type: string, format: uuid }
+        store_name: { type: string }
+        unit_price_kobo: { $ref: "#/components/schemas/Kobo" }
+        quantity: { type: integer }
+        line_total_kobo: { $ref: "#/components/schemas/Kobo" }
+        available: { type: boolean, description: False for an unpublished product or an inactive store; excluded from the total and blocks checkout }
+    Cart:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/CartLine" } }
+        total_kobo: { $ref: "#/components/schemas/Kobo" }
+    CheckoutBody:
+      type: object
+      required: [method, address_id, deliveries]
+      properties:
+        method: { type: string, examples: [mono_directpay] }
+        address_id: { type: string, format: uuid }
+        deliveries:
+          type: array
+          items:
+            type: object
+            required: [store_id, option_id]
+            properties:
+              store_id: { type: string, format: uuid }
+              option_id: { type: string, format: uuid }
+    OrderItem:
+      type: object
+      properties:
+        product_name: { type: string }
+        attributes: { type: object }
+        unit_price_kobo: { $ref: "#/components/schemas/Kobo" }
+        quantity: { type: integer }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        store_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending_payment, paid, picked_up, out_for_delivery, delivered, completed, cancelled, refund_pending, refunded] }
+        items: { type: array, items: { $ref: "#/components/schemas/OrderItem" } }
+        items_total_kobo: { $ref: "#/components/schemas/Kobo" }
+        delivery_fee_kobo: { $ref: "#/components/schemas/Kobo" }
+        total_kobo: { $ref: "#/components/schemas/Kobo" }
+        held: { type: boolean }
+        dispute: { type: object, properties: { id: { type: string, format: uuid }, status: { type: string } } }
+        refunded_kobo: { type: integer }
+        paid_at: { type: [string, "null"], format: date-time }
+        ship_by: { type: [string, "null"], format: date-time }
+        delivered_at: { type: [string, "null"], format: date-time }
+        release_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    OrderPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Order" } }
+        next_cursor: { type: [string, "null"] }
+    Checkout:
+      type: object
+      properties:
+        checkout_id: { type: string, format: uuid }
+        reference: { type: string }
+        status: { type: string, enum: [pending, paid, failed, expired, cancelled] }
+        method: { type: string }
+        total_kobo: { $ref: "#/components/schemas/Kobo" }
+        payment_url: { type: [string, "null"], description: "The provider's hosted page; open it in a web view" }
+        expires_at: { type: string, format: date-time }
+        paid_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        orders: { type: array, items: { $ref: "#/components/schemas/Order" } }
+    TrackingStep:
+      type: object
+      properties:
+        key: { type: string }
+        label: { type: string }
+        at: { type: [string, "null"], format: date-time }
+        current: { type: boolean }
+    Tracking:
+      type: object
+      properties:
+        order_id: { type: string, format: uuid }
+        promised_date: { type: [string, "null"], description: "YYYY-MM-DD, Africa/Lagos" }
+        status: { type: string }
+        steps: { type: array, items: { $ref: "#/components/schemas/TrackingStep" } }
+        delay_note: { type: string }
+        contact: { type: object, description: "Who the buyer can call; only while out for delivery" }
+        tracking_url: { type: string, description: https only }
+        handover_code: { type: string, description: Buyer only, self-delivery, while out for delivery }
+        handover_note: { type: string }
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+        body: { type: string }
+        order_id: { type: [string, "null"], format: uuid }
+        dispute_id: { type: [string, "null"], format: uuid }
+        conversation_id: { type: [string, "null"], format: uuid }
+        route: { type: [string, "null"], description: "order:<id>, chat:<id>, dispute:<id> or account; null opens the inbox" }
+        created_at: { type: string, format: date-time }
+        read: { type: boolean }
+    Inbox:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+        unread: { type: integer }
+    Loose:
+      type: object
+      additionalProperties: true
+      description: Exact schema arrives with its slice.
+paths:
+  /config:
+    get:
+      summary: What the app needs before anyone signs in
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AppConfig" } } } }
+  /auth/sign-up:
+    post:
+      summary: Create an account; a code is texted to the phone
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, password, display_name]
+              properties:
+                phone: { type: string, examples: ["08031112222"] }
+                password: { type: string, minLength: 10, maxLength: 128 }
+                display_name: { type: string, maxLength: 80 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string, format: uuid }
+                  verification_id: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+  /auth/verify-phone:
+    post:
+      summary: Verify the code; returns a session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [verification_id, code]
+              properties:
+                verification_id: { type: string }
+                code: { type: string, examples: ["123456"] }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Token" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /auth/sign-in:
+    post:
+      summary: Sign in. An unverified account answers 403 phone_unverified with a fresh verification_id
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, password]
+              properties:
+                phone: { type: string }
+                password: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Token" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /auth/sign-out:
+    post:
+      summary: End this session
+      responses:
+        "204": { description: Signed out }
+  /me:
+    get:
+      summary: The signed-in person
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /me/addresses:
+    get:
+      summary: Saved delivery addresses
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+    post:
+      summary: Save a delivery address (FCT only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "201": { description: Created } }
+  /me/addresses/{id}:
+    delete:
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      summary: Remove a saved address
+      responses: { "204": { description: Removed } }
+  /me/notifications:
+    get:
+      summary: The inbox
+      parameters: [{ $ref: "#/components/parameters/Before" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Inbox" } } } }
+  /me/notifications/read:
+    post:
+      summary: Mark some or all notices read
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { ids: { type: array, items: { type: string, format: uuid } } } } } } }
+      responses: { "204": { description: Marked } }
+  /me/push-device:
+    put:
+      summary: Register this phone for push
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token, platform], properties: { token: { type: string }, platform: { type: string, enum: [android, ios] } } } } } }
+      responses: { "204": { description: Registered } }
+    delete:
+      summary: Stop pushes to this phone
+      responses: { "204": { description: Removed } }
+  /uploads:
+    post:
+      summary: Upload one photo (the image itself as the body)
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+      responses:
+        "201": { description: Stored, content: { application/json: { schema: { $ref: "#/components/schemas/Upload" } } } }
+        "413": { description: Over 5 MB }
+        "429": { description: Over 60 uploads an hour }
+        default: { $ref: "#/components/responses/Error" }
+  /categories:
+    get:
+      summary: The category list
+      security: []
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Category" } } } } } } }
+  /products:
+    get:
+      summary: The feed and search
+      security: []
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 80 }, description: Name or brand, any case }
+        - { name: category, in: query, schema: { type: string }, description: A slug from /categories }
+        - { name: condition, in: query, schema: { type: string, enum: [new, used, refurbished] } }
+        - { name: min_price_kobo, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: max_price_kobo, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: sort, in: query, schema: { type: string, enum: [newest, price_asc, price_desc], default: newest } }
+        - { $ref: "#/components/parameters/Before" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/FeedPage" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /products/{id}:
+    get:
+      summary: A product with its variants
+      security: []
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ProductView" } } } }
+        default: { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Edit a product (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+    delete:
+      summary: Remove a product (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "204": { description: Removed } }
+  /products/{id}/variants:
+    put:
+      summary: Replace a product's variants (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /stores/{id}:
+    get:
+      summary: A store by its slug or id
+      security: []
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+    patch:
+      summary: Edit a store (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+    delete:
+      summary: Close a store (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "204": { description: Closed } }
+  /stores:
+    post:
+      summary: Open a store (seller)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "201": { description: Created } }
+  /stores/mine:
+    get:
+      summary: My stores (seller)
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+  /stores/{id}/products:
+    get:
+      summary: A store's products
+      security: []
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ProductView" } } } } } }
+    post:
+      summary: Add a product (seller); photo keys must come from POST /uploads by the same person
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/ProductView" } } } } }
+  /stores/{id}/orders:
+    get:
+      summary: A store's orders (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OrderPage" } } } } }
+  /stores/{id}/payout-account:
+    get:
+      summary: The store's payout account (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+    put:
+      summary: Set the payout account (seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /stores/{id}/reviews:
+    get:
+      summary: A store's reviews
+      security: []
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+  /seller/redeem:
+    post:
+      summary: Redeem an access code to become a seller
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } } }
+      responses: { "200": { description: OK } }
+  /cart:
+    get:
+      summary: The cart
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Cart" } } } } }
+    delete:
+      summary: Empty the cart
+      responses: { "204": { description: Emptied } }
+  /cart/items:
+    put:
+      summary: Set a line's quantity (0 removes it)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [variant_id, quantity], properties: { variant_id: { type: string, format: uuid }, quantity: { type: integer, minimum: 0 } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Cart" } } } } }
+  /checkout/delivery-options:
+    post:
+      summary: Delivery options per store for an address
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [address_id], properties: { address_id: { type: string, format: uuid } } } } } }
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+  /checkout:
+    post:
+      summary: Place the order. Send an Idempotency-Key so a retry never creates two checkouts
+      parameters: [{ name: Idempotency-Key, in: header, schema: { type: string, maxLength: 64 } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CheckoutBody" } } } }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Checkout" } } } }
+        default: { $ref: "#/components/responses/Error" }
+  /checkout/{id}:
+    get:
+      summary: A checkout, for polling until it settles
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Checkout" } } } } }
+  /orders:
+    get:
+      summary: My orders (as a buyer)
+      parameters: [{ $ref: "#/components/parameters/Before" }, { $ref: "#/components/parameters/Limit" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OrderPage" } } } } }
+  /orders/{id}:
+    get:
+      summary: One order
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } } } }
+  /orders/{id}/tracking:
+    get:
+      summary: The tracking screen's data
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Tracking" } } } } }
+  /orders/{id}/cancel:
+    post:
+      summary: Cancel before it ships
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /orders/{id}/received:
+    post:
+      summary: Confirm delivery (releases the money to the seller)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /orders/{id}/ready:
+    post:
+      summary: Seller marks a courier order ready
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /orders/{id}/picked-up:
+    post:
+      summary: Seller marks a self-delivery order picked up
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /orders/{id}/out-for-delivery:
+    post:
+      summary: Seller marks a self-delivery order out for delivery
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /orders/{id}/delivered:
+    post:
+      summary: Seller marks it delivered (with the buyer's handover code, if used)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /orders/{id}/dispute:
+    post:
+      summary: Report a problem
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "201": { description: Created } }
+  /orders/{id}/review:
+    post:
+      summary: Review a completed order
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /disputes/{id}:
+    get:
+      summary: A dispute as a buyer or seller sees it
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+  /disputes/{id}/response:
+    post:
+      summary: The seller's answer
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /disputes/{id}/return-received:
+    post:
+      summary: The seller confirms a returned item arrived
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK } }
+  /disputes/{id}/withdraw:
+    post:
+      summary: The buyer withdraws a report (final)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /reviews/{id}/reply:
+    post:
+      summary: The seller replies to a review
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /chats:
+    get:
+      summary: My conversations
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+    post:
+      summary: Open (or get) the conversation about an order or product
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /chats/ws:
+    get:
+      summary: The live chat socket (WebSocket upgrade)
+      responses: { "101": { description: Switching protocols } }
+  /chats/{id}/messages:
+    get:
+      summary: Messages, newest page first
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } } }
+    post:
+      summary: Send a message (send a client_message_id so a retry never duplicates)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/Loose" } } } }
+      responses: { "200": { description: OK } }
+  /chats/{id}/read:
+    post:
+      summary: Mark the conversation read
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "204": { description: Marked } }

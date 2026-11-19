@@ -140,6 +140,10 @@ impl TestApp {
             )),
             statements: None,
             photos: Some(photos.clone()),
+            app_config: Arc::new(server::app_config::AppConfig {
+                photo_base_url: Some("https://photos.test".into()),
+                min_app_version: "1.0.0".into(),
+            }),
         };
         Self {
             router: build_app(state.clone()),

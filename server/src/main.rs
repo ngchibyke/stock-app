@@ -128,6 +128,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let app_config = Arc::new(server::app_config::AppConfig {
+        photo_base_url: config.s3.as_ref().map(|c| c.photo_base_url.clone()),
+        min_app_version: config.min_app_version.clone(),
+    });
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -147,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
         // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
         statements: None,
         photos,
+        app_config,
     };
 
     match command {

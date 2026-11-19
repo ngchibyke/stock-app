@@ -49,6 +49,8 @@ struct Item {
     order_id: Option<Uuid>,
     dispute_id: Option<Uuid>,
     conversation_id: Option<Uuid>,
+    /// Where a tap goes (see [`Kind::route`]); null means open the inbox.
+    route: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     read: bool,
@@ -126,6 +128,7 @@ async fn list(
                 order_id: r.order_id,
                 dispute_id: r.dispute_id,
                 conversation_id: r.conversation_id,
+                route: kind.route(r.order_id, r.dispute_id, r.conversation_id),
                 created_at: r.created_at,
                 read: r.is_read,
             })

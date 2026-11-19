@@ -70,6 +70,9 @@ struct Claimed {
     push_attempts: i32,
     pushed_devices: Vec<Uuid>,
     push_until: OffsetDateTime,
+    order_id: Option<Uuid>,
+    dispute_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
 }
 
 /// What a notice's sends came to.
@@ -97,7 +100,8 @@ pub async fn run_once_with_lease(state: &AppState, lease: Duration) -> Result<St
              ORDER BY next_push_at, id LIMIT $1 FOR UPDATE SKIP LOCKED) \
          RETURNING n.id, n.user_id, n.kind, \
                    n.created_at < now() - make_interval(hours => $2) AS stale, \
-                   n.push_attempts, n.pushed_devices, n.push_until",
+                   n.push_attempts, n.pushed_devices, n.push_until, \
+                   n.order_id, n.dispute_id, n.conversation_id",
     )
     .bind(CLAIM)
     .bind(STALE_HOURS)
@@ -261,6 +265,9 @@ async fn send_to_devices(
             Outcome::Sent
         });
     }
+    let route = kind
+        .route(n.order_id, n.dispute_id, n.conversation_id)
+        .unwrap_or_default();
     let mut retry = false;
     for (device_id, token_enc) in devices {
         let Ok(token) = state.cipher.decrypt(&token_enc) else {
@@ -275,6 +282,7 @@ async fn send_to_devices(
             body: kind.body(),
             kind: kind.as_str(),
             notification_id: n.id,
+            route: &route,
         };
         match state.push.send(&message).await {
             Ok(()) => pushed.push(device_id),

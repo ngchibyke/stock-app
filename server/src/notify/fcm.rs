@@ -275,6 +275,7 @@ impl PushSender for FcmPush {
                 "data": {
                     "kind": m.kind,
                     "notification_id": m.notification_id.to_string(),
+                    "route": m.route,
                 },
             }
         });

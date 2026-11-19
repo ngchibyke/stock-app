@@ -2,6 +2,7 @@
 //! the title and body come from the kind when they are read or pushed.
 
 use serde::Serialize;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +64,34 @@ impl Kind {
         Kind::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
+    /// Where a tap on this notice goes, as an in-app address the phone app knows:
+    /// `order:<id>`, `chat:<id>`, `dispute:<id>`, or `account` for a notice about the
+    /// person themselves. It carries only the subject's id (spec section 10: a push is
+    /// fixed copy and two ids). `None` when a kind that needs a subject has none, which
+    /// the app treats as "open the inbox".
+    pub fn route(
+        self,
+        order: Option<Uuid>,
+        dispute: Option<Uuid>,
+        conversation: Option<Uuid>,
+    ) -> Option<String> {
+        match self {
+            Kind::OrderPaid
+            | Kind::OrderPickedUp
+            | Kind::OrderOutForDelivery
+            | Kind::OrderDelivered
+            | Kind::ConfirmReminder
+            | Kind::ReleaseTomorrow
+            | Kind::RefundStarted
+            | Kind::FundsReleased => order.map(|id| format!("order:{id}")),
+            Kind::ChatMessage => conversation.map(|id| format!("chat:{id}")),
+            Kind::DisputeOpened | Kind::ReturnRequested | Kind::DisputeDecided => {
+                dispute.map(|id| format!("dispute:{id}"))
+            }
+            Kind::ModerationWarning | Kind::ModerationMuted => Some("account".to_string()),
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Kind::OrderPaid => "Paid \u{2014} please ship",
@@ -119,6 +148,38 @@ impl Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_routes_to_its_subject() {
+        let (o, d, c) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        for k in Kind::ALL {
+            let r = k.route(Some(o), Some(d), Some(c)).expect("a route");
+            let prefix = r.split(':').next().unwrap();
+            assert!(
+                ["order", "chat", "dispute", "account"].contains(&prefix),
+                "{k:?}: {r}"
+            );
+        }
+        assert_eq!(
+            Kind::OrderPaid.route(Some(o), None, None),
+            Some(format!("order:{o}"))
+        );
+        assert_eq!(
+            Kind::ChatMessage.route(None, None, Some(c)),
+            Some(format!("chat:{c}"))
+        );
+        assert_eq!(
+            Kind::DisputeDecided.route(None, Some(d), None),
+            Some(format!("dispute:{d}"))
+        );
+        assert_eq!(
+            Kind::ModerationMuted.route(None, None, None),
+            Some("account".into())
+        );
+        // A subject kind with no subject has no route; the app then opens the inbox.
+        assert_eq!(Kind::OrderPaid.route(None, Some(d), Some(c)), None);
+        assert_eq!(Kind::ChatMessage.route(Some(o), Some(d), None), None);
+    }
 
     #[test]
     fn kinds_have_the_exact_copy() {
