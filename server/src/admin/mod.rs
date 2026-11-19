@@ -38,6 +38,7 @@ pub mod orders;
 pub mod payouts;
 pub mod routes;
 pub mod shipments;
+pub mod statement;
 pub mod stores;
 pub mod users;
 pub mod views;

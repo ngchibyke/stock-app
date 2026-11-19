@@ -90,6 +90,9 @@ pub struct TestApp {
     pub fake: Arc<FakeProvider>,
     /// The installed courier provider (always a fake).
     pub courier: Arc<server::couriers::fake::FakeCourier>,
+    /// A fake statement source. Not installed until [`TestApp::use_statement`]: with one
+    /// installed, the statement job runs on every tick.
+    pub statement: Arc<server::statement::fake::FakeStatement>,
     /// The installed tone check (always a fake; answers clean by default).
     pub tone: Arc<server::moderation::fake::FakeTone>,
     /// The push double the state sends through.
@@ -113,6 +116,7 @@ impl TestApp {
         let courier = Arc::new(server::couriers::fake::FakeCourier::new());
         let tone = Arc::new(server::moderation::fake::FakeTone::new());
         let push = Arc::new(server::notify::fake::FakePush::new());
+        let statement = Arc::new(server::statement::fake::FakeStatement::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -131,6 +135,7 @@ impl TestApp {
                     session_check: std::time::Duration::from_millis(200),
                 },
             )),
+            statements: None,
         };
         Self {
             router: build_app(state.clone()),
@@ -141,8 +146,15 @@ impl TestApp {
             courier,
             tone,
             push,
+            statement,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Installs [`statement`](Self::statement) as the app's statement source.
+    pub fn use_statement(&mut self) {
+        self.state.statements = Some(self.statement.clone());
+        self.router = build_app(self.state.clone());
     }
 
     /// Serves the app on a real local port, for WebSocket tests.

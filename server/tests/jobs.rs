@@ -1797,7 +1797,8 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "poll_shipments",
             "refunds",
             "reverify_checkouts",
-            "ship_deadline"
+            "ship_deadline",
+            "statement_check"
         ]
     );
     assert!(jobs.iter().all(|(_, ok)| *ok));

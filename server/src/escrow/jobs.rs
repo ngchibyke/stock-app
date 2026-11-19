@@ -67,6 +67,10 @@
 //! 13. `confirm_reminders`: `delivered` orders, not held and unpaid, whose
 //!     buyer is due a "did it arrive?" or "payment releases tomorrow" notice
 //!     -> [`notify::reminders::run`](crate::notify::reminders::run).
+//! 14. `statement_check`: the provider's statement for each of the last three
+//!     finished days, from 03:00 Lagos time, against the ledger -> a
+//!     `statement_checks` row, and `statement.mismatch` when they differ. Does
+//!     nothing without a statement source. See [`statement`](crate::statement).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -121,6 +125,7 @@ use crate::{
     error::AppError,
     notify::reminders,
     settings,
+    statement::job as statement_job,
 };
 
 /// How often the loop runs the jobs.
@@ -189,6 +194,7 @@ pub struct JobReport {
     pub chat_held: u32,
     pub disputes_advanced: u32,
     pub reminders_sent: u32,
+    pub statements_checked: u32,
     pub failed: u32,
 }
 
@@ -216,7 +222,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 13] = [
+    let jobs: [(&str, Job); 14] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -230,6 +236,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (held::CHAT_HELD, Job::ChatHeld),
         (dispute_jobs::DISPUTE_DEADLINES, Job::DisputeDeadlines),
         (reminders::CONFIRM_REMINDERS, Job::ConfirmReminders),
+        (statement_job::STATEMENT_CHECK, Job::StatementCheck),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -258,6 +265,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::ChatHeld => &mut report.chat_held,
             Job::DisputeDeadlines => &mut report.disputes_advanced,
             Job::ConfirmReminders => &mut report.reminders_sent,
+            Job::StatementCheck => &mut report.statements_checked,
         };
         *slot += stats.done;
     }
@@ -290,6 +298,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 chat_held = r.chat_held,
                 disputes_advanced = r.disputes_advanced,
                 reminders_sent = r.reminders_sent,
+                statements_checked = r.statements_checked,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -338,6 +347,7 @@ enum Job {
     ChatHeld,
     DisputeDeadlines,
     ConfirmReminders,
+    StatementCheck,
 }
 
 impl Job {
@@ -356,6 +366,7 @@ impl Job {
             Job::ChatHeld => held::run(state, cancel).await,
             Job::DisputeDeadlines => dispute_jobs::run(state, cancel).await,
             Job::ConfirmReminders => reminders::run(state, cancel).await,
+            Job::StatementCheck => statement_job::run(state, cancel).await,
         }
     }
 }

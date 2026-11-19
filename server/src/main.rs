@@ -135,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
         tone,
         push,
         chat_hub: chat_hub.clone(),
+        // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
+        statements: None,
     };
 
     match command {

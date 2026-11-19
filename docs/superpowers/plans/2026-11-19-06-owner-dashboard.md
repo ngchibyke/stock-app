@@ -137,7 +137,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 **Files:** `server/src/admin/statement.rs`, `server/tests/admin_statement.rs`.
 
-- Compare the day's provider statement (collections, payouts, fees) against ledger totals, and store the result as an alert when they differ by more than a settings-driven tolerance. Blocked on Mono's statement endpoint: if the sandbox has none, write the trait and fake now and leave the Mono adapter as a documented go-live item.
+- Compare the day's provider statement (collected, paid out, refunded, fees) against the same four sums from the ledger, per Lagos calendar day, and store each check in `statement_checks`. A difference above the tolerance is a `statement.mismatch` alert. *(Built: the `StatementSource` trait, a fake, the comparison, a daily job (the last three finished days, from 03:00 Lagos, an unanswered day retried after an hour) and `GET`/`POST /admin/statement-checks`. Not built: the Mono adapter, because Mono's statement endpoint is unconfirmed, so production runs with `AppState::statements = None` and the job does nothing. The tolerance is a constant (100 kobo) until real statements show what it should be; moving it to `platform_settings` is deferred.)*
 - [ ] **Steps 1–5:** failing tests with the fake, implement, commit `feat: reconcile the daily provider statement`.
 
 ### Task 10: Dashboard scaffold and sign-in
