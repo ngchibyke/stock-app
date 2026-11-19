@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import { type ReactElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
+import { AuthContext, type Role } from "../auth";
 import { ToastProvider } from "../ui/Toasts";
 
 export type Reply = [number, unknown] | [number];
@@ -34,13 +35,22 @@ export function mockApi(handlers: Record<string, Handler>): Call[] {
   return calls;
 }
 
-export function renderPage(ui: ReactElement, route = "/") {
+/** Renders a page as a signed-in `role` (the Owner by default). */
+export function renderPage(ui: ReactElement, route = "/", role: Role = "owner") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+  const auth = {
+    user: { id: "me", display_name: "Test Admin", phone: "+2348000000000", role },
+    loading: false,
+    signIn: async () => {},
+    signOut: async () => {},
+  };
   return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <ToastProvider>{ui}</ToastProvider>
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <AuthContext.Provider value={auth}>
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[route]}>
+          <ToastProvider>{ui}</ToastProvider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }

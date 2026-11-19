@@ -4,7 +4,7 @@ import { spring } from "../motion";
 import { IconButton } from "./Button";
 
 /** A panel that springs in from the right. Esc and a click outside close it. */
-export function Drawer({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: ReactNode }) {
+export function Drawer({ open, title, onClose, children, wide = false }: { open: boolean; title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -16,7 +16,7 @@ export function Drawer({ open, title, onClose, children }: { open: boolean; titl
       {open && (
         <motion.div className="drawer-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
           <motion.aside
-            className="drawer"
+            className={`drawer ${wide ? "wide" : ""}`}
             role="dialog"
             aria-label={title}
             initial={{ x: "100%" }}

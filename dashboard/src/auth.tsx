@@ -11,7 +11,7 @@ export interface Me {
   role: Role;
 }
 
-interface AuthState {
+export interface AuthState {
   user: Me | null;
   /** True while a stored session is being checked on first load. */
   loading: boolean;
@@ -19,7 +19,7 @@ interface AuthState {
   signOut: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthState | null>(null);
+export const AuthContext = createContext<AuthState | null>(null);
 
 export function useAuth(): AuthState {
   const ctx = useContext(AuthContext);

@@ -5,7 +5,9 @@ import { Shell } from "./Shell";
 import { Alerts } from "./pages/Alerts";
 import { Audit } from "./pages/Audit";
 import { Codes } from "./pages/Codes";
+import { Disputes } from "./pages/Disputes";
 import { Home } from "./pages/Home";
+import { Moderation } from "./pages/Moderation";
 import { MoneyPage } from "./pages/Money";
 import { Orders } from "./pages/Orders";
 import { Settings } from "./pages/Settings";
@@ -25,6 +27,8 @@ export function App() {
             <Route element={<RequireAuth />}>
               <Route element={<Shell />}>
                 <Route index element={<Home />} />
+                <Route path="disputes" element={<Disputes />} />
+                <Route path="moderation" element={<Moderation />} />
                 <Route element={<RequireOwner />}>
                   <Route path="orders" element={<Orders />} />
                   <Route path="money" element={<MoneyPage />} />
