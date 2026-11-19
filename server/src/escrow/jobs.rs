@@ -35,8 +35,12 @@
 //!    lease expired, for orders not held and payments not flagged ->
 //!    [`send_payout`] (the 8-attempt cap lives there).
 //!    `pending` payouts not polled for an hour -> [`settle_payout`] (the
-//!    24h-pending -> `manual` rule lives there). A payout that ends `failed`
-//!    goes to `manual` with an audit row.
+//!    24h-pending -> `manual` rule lives there). `successful` payouts the
+//!    provider settled in the last [`SUCCESS_REPOLL_WINDOW`], not polled for
+//!    [`SUCCESS_REPOLL_EVERY`] -> [`settle_payout`], which books a bank
+//!    reversal (and audits `payout.reversed_after_success`); they are claimed
+//!    after every send. A payout that ends `failed` goes to `manual` with an
+//!    audit row.
 //! 7. `refunds`: `requested` refunds not under a send claim, past their
 //!    `next_attempt_at` -> [`send_refund`] with the same RF reference. After
 //!    [`MAX_REFUND_ATTEMPTS`] sends the refund goes to `manual` with an audit
@@ -63,6 +67,10 @@
 //! 13. `confirm_reminders`: `delivered` orders, not held and unpaid, whose
 //!     buyer is due a "did it arrive?" or "payment releases tomorrow" notice
 //!     -> [`notify::reminders::run`](crate::notify::reminders::run).
+//! 14. `statement_check`: the provider's statement for each of the last three
+//!     finished days, from 03:00 Lagos time, against the ledger -> a
+//!     `statement_checks` row, and `statement.mismatch` when they differ. Does
+//!     nothing without a statement source. See [`statement`](crate::statement).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -117,6 +125,7 @@ use crate::{
     error::AppError,
     notify::reminders,
     settings,
+    statement::job as statement_job,
 };
 
 /// How often the loop runs the jobs.
@@ -142,6 +151,11 @@ const SHIP_DEADLINE_SCOPE: &str = "o.delivery_method IS NOT NULL \
 pub const SHIP_DEADLINE_PER_TICK: i64 = 20;
 /// A pending payout is polled at most this often.
 const PENDING_POLL_EVERY: &str = "1 hour";
+/// A payout the provider settled as successful is asked about again for this
+/// long: a bank can reverse a transfer days later, and only a webhook caught it.
+const SUCCESS_REPOLL_WINDOW: &str = "14 days";
+/// How often a successful payout inside that window is asked about.
+const SUCCESS_REPOLL_EVERY: &str = "6 hours";
 pub use super::refund::MAX_REFUND_ATTEMPTS;
 // Job names (`job_runs.job`, `job_row_failures.job`).
 const EXPIRE: &str = "expire_checkouts";
@@ -180,6 +194,7 @@ pub struct JobReport {
     pub chat_held: u32,
     pub disputes_advanced: u32,
     pub reminders_sent: u32,
+    pub statements_checked: u32,
     pub failed: u32,
 }
 
@@ -207,7 +222,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 13] = [
+    let jobs: [(&str, Job); 14] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -221,6 +236,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (held::CHAT_HELD, Job::ChatHeld),
         (dispute_jobs::DISPUTE_DEADLINES, Job::DisputeDeadlines),
         (reminders::CONFIRM_REMINDERS, Job::ConfirmReminders),
+        (statement_job::STATEMENT_CHECK, Job::StatementCheck),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -249,6 +265,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::ChatHeld => &mut report.chat_held,
             Job::DisputeDeadlines => &mut report.disputes_advanced,
             Job::ConfirmReminders => &mut report.reminders_sent,
+            Job::StatementCheck => &mut report.statements_checked,
         };
         *slot += stats.done;
     }
@@ -281,6 +298,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 chat_held = r.chat_held,
                 disputes_advanced = r.disputes_advanced,
                 reminders_sent = r.reminders_sent,
+                statements_checked = r.statements_checked,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -329,6 +347,7 @@ enum Job {
     ChatHeld,
     DisputeDeadlines,
     ConfirmReminders,
+    StatementCheck,
 }
 
 impl Job {
@@ -347,6 +366,7 @@ impl Job {
             Job::ChatHeld => held::run(state, cancel).await,
             Job::DisputeDeadlines => dispute_jobs::run(state, cancel).await,
             Job::ConfirmReminders => reminders::run(state, cancel).await,
+            Job::StatementCheck => statement_job::run(state, cancel).await,
         }
     }
 }
@@ -770,15 +790,20 @@ async fn payouts(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
                      AND o.held_at IS NULL AND NOT c.provider_flagged) \
                     OR (p.status = 'pending' \
                         AND COALESCE(p.last_polled_at, p.pending_since, p.updated_at) \
-                            <= now() - interval '{PENDING_POLL_EVERY}')) \
+                            <= now() - interval '{PENDING_POLL_EVERY}') \
+                    OR (p.status = 'successful' AND p.settled_by = 'provider' \
+                        AND p.settled_at > now() - interval '{SUCCESS_REPOLL_WINDOW}' \
+                        AND COALESCE(p.last_polled_at, p.settled_at) \
+                            <= now() - interval '{SUCCESS_REPOLL_EVERY}')) \
                AND {not_pushed} \
-             ORDER BY CASE p.status \
+             ORDER BY (p.status = 'successful'), CASE p.status \
                  WHEN 'pending' THEN COALESCE(p.last_polled_at, p.pending_since, p.updated_at) \
+                 WHEN 'successful' THEN COALESCE(p.last_polled_at, p.settled_at) \
                  WHEN 'sending' THEN p.sending_until \
                  ELSE COALESCE(p.next_attempt_at, p.send_after, p.created_at) END \
                  NULLS FIRST, p.id \
              LIMIT $1 FOR UPDATE OF p SKIP LOCKED) \
-         UPDATE payouts p SET last_polled_at = CASE WHEN due.status = 'pending' \
+         UPDATE payouts p SET last_polled_at = CASE WHEN due.status IN ('pending', 'successful') \
                                                     THEN now() ELSE p.last_polled_at END \
          FROM due WHERE p.id = due.id \
          RETURNING p.id, p.reference, due.status::text",
@@ -797,7 +822,7 @@ async fn payouts(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
         if cancel.is_cancelled() {
             break;
         }
-        let result = if status == "pending" {
+        let result = if status == "pending" || status == "successful" {
             settle_payout(state, &reference).await.map(|_| ())
         } else {
             send_payout(state, id).await.map(|_| ())

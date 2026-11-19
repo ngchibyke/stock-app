@@ -25,6 +25,7 @@ pub mod phone;
 pub mod products;
 pub mod reviews;
 pub mod settings;
+pub mod statement;
 pub mod stores;
 
 use axum::{Json, Router, extract::MatchedPath, http::Request, routing::get};
@@ -60,6 +61,9 @@ pub struct AppState {
     pub push: Arc<dyn notify::push::PushSender>,
     /// Live pushes to open sockets.
     pub chat_hub: Arc<chat::hub::ChatHub>,
+    /// The provider's daily statement, for reconciliation. `None` until a
+    /// provider adapter exists (see [`statement`]).
+    pub statements: Option<Arc<dyn statement::StatementSource>>,
 }
 
 async fn health() -> Json<Value> {

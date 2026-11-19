@@ -54,6 +54,23 @@ Disputes and notifications (part 5):
 - **Push:** notices go out through Firebase Cloud Messaging with the fixed copy and two ids, and nothing else: no order, name, amount or message text reaches a lock screen. A signed-out session gets no push, a dead token is disabled, and an outage is retried with backoff without re-sending to devices that already got it.
 - **Flagged payments:** a buyer can no longer release an order whose payment the provider flagged.
 
+## Owner dashboard
+
+`dashboard/` is the owner and support web app (React, Vite, TypeScript; every screen is animated with the `motion` library and respects the system's reduced-motion setting). It is a static build that talks to this API with the normal bearer session. Owner sees everything; Support sees disputes and moderation only.
+
+```bash
+cd dashboard
+npm install
+npm run dev      # http://localhost:5173, proxies /auth, /me and /admin to the API on :8080
+npm test         # unit and component tests
+npm run build    # static files in dashboard/dist
+npm run e2e      # browser tests against the real server (needs Postgres; see below)
+```
+
+**Hosting.** Serve `dashboard/dist` and the API from **one origin** behind a reverse proxy (the server has no CORS): send `/auth`, `/me` and `/admin` to the API and everything else to the static files, with `index.html` as the fallback for unknown paths. Add a strict `Content-Security-Policy`, for example `default-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'`, and serve it over HTTPS only. The session token lives in `sessionStorage` and in memory, and the app never renders statement or chat text as HTML.
+
+**Browser tests.** `npm run e2e` builds and starts the real server on port 8099 against `E2E_DATABASE_URL` (default `postgres://market:market@localhost:5432/market`), creates a test Owner, and drives the built app in Chromium. No payment, courier or chat provider is configured, so these cover sign-in, access codes, staff, settings, users and the audit log. The dispute and money screens are covered by component tests and by the server's own suite. Set `E2E_CHROMIUM` to use an existing Chromium, otherwise run `npx playwright install chromium` once.
+
 ## Roadmap
 
 | Part | What it adds |
@@ -63,7 +80,7 @@ Disputes and notifications (part 5):
 | 3 | Delivery and tracking: FCT addresses, Shipbubble couriers, self-delivery, handover codes, tracking timeline (done) |
 | 4 | Moderated chat and reviews (done) |
 | 5 | Disputes and notifications (done) |
-| 6 | Owner web dashboard |
+| 6 | Owner web dashboard (done) |
 | 7 | Flutter phone app (Android and iPhone) |
 | 8 | Data export, deletion and retention |
 
@@ -117,7 +134,7 @@ These are tracked in the roadmap:
 - The ship-deadline job is on (migration 0030) and only refunds or strikes orders paid at or after `platform_settings.ship_deadline_enforce_from`, which that migration sets to the moment it ran. After deploying, check the owner's reconciliation view: `orders_attention` lists paid orders with no delivery method (the job never touches them), and `shipments_attention` lists ready courier orders whose pickup is overdue.
 - Confirm with Mono which unit (kobo or naira) each product's `amount` fields use (`MONO_DIRECTPAY_AMOUNT_UNIT`, `MONO_DISBURSE_AMOUNT_UNIT`), then run a sandbox smoke test of a payment, a payout and a webhook before switching to live keys.
 - DPO review of whether the Owner should keep seeing buyer display names on order reads. Support already does not, and every staff read is audited.
-- Do not switch courier delivery on for real stores until an owner re-book path exists (plan 6). Today an empty Shipbubble wallet can fail ready orders for good: they stay paid with the buyer's money held until someone acts.
+- Do not switch courier delivery on for real stores until the sandbox answers below are in. The owner re-book path now exists (plan 6), but a stale quote still needs a re-quote, which waits on those answers. Today an empty Shipbubble wallet can fail ready orders for good: they stay paid with the buyer's money held until someone acts.
 - Run a Shipbubble sandbox smoke test before live keys: the amount unit (`SHIPBUBBLE_AMOUNT_UNIT`, naira or kobo), the webhook signing key per environment and the exact bytes signed, address validation, the status field on `shipment.cancelled`, whether a used `request_token` can book again, what a 429 means, and what an insufficient wallet returns (it may look like any other 400).
 - Two more sandbox checks are a gate on courier go-live: book a token whose `pickup_date` passed 1 and 2 days ago (the seller has 48 hours to mark ready, and booking replays the token from the quote; if it is refused, quote again at booking or quote for the end of the ready window), and find out whether a cancelled label credits the wallet. The ledger books every courier charge to `courier_costs` and posts no credit on a cancel until this answer is in; if the wallet is credited, post the reverse under `("courier_refund", shipment_id)`.
 - Set `SHIPBUBBLE_CONTACT_EMAIL` (a platform operations address, sent when a contact has no email) and fund the Shipbubble wallet. The server refuses an `sb_prod` key outside production and a production start without the amount unit.
@@ -135,4 +152,5 @@ These are tracked in the roadmap:
 - DPO: retention of dispute statements and evidence photos (which may hold personal data of third parties), inbox rows and push devices; Support's access to statements inside open disputes; and staff free-text notes, which are kept in the audit log for every admin action, now including return requests and dispute decisions.
 - Evidence photos on a dispute are not checked and can carry phone numbers, as in reviews. The upload plan must check that a key belongs to the uploader.
 - Owner decisions on disputes: whether the seller's 48 hours should pause on Sundays and holidays (today they are calendar hours, like the ship deadline); whether a withdrawn report should ever be reopenable; and whether a dispute on a courier order still in transit should cancel the courier.
+- The daily statement check (plan 6) has no Mono adapter: confirm whether Mono offers a statement API, and its shape and units, then write `StatementSource` for it and set the tolerance (`server/src/statement`). Until then production installs no source and the job does nothing.
 - Set `FCM_SERVICE_ACCOUNT_FILE` to the Firebase service-account file, kept outside the repository. Production refuses to start without it.

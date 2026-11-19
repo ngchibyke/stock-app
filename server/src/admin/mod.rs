@@ -27,12 +27,20 @@
 //! **Double payment.** Mark-paid on a payout the provider may have paid asks
 //! the provider first (see [`money::mark_paid`]).
 
+pub mod alerts;
+pub mod audit_view;
 pub mod disputes;
 pub mod holidays;
 pub mod moderation;
 pub mod money;
+pub mod order_search;
 pub mod orders;
+pub mod payouts;
 pub mod routes;
+pub mod shipments;
+pub mod statement;
+pub mod stores;
+pub mod users;
 pub mod views;
 
 use axum::{extract::FromRequestParts, http::request::Parts};

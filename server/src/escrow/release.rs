@@ -1456,6 +1456,15 @@ pub async fn settle_payout_from(
             .await?;
             mark_failed(&mut tx, p.id, "reversed").await?;
             close_reversed_attempt(&mut tx, &p, reference).await?;
+            audit::record(
+                &mut tx,
+                None,
+                "payout.reversed_after_success",
+                "payout",
+                Some(p.id),
+                json!({ "payout_id": p.id, "amount_kobo": p.amount_kobo }),
+            )
+            .await?;
             tracing::warn!("payout reversed after success");
             "failed".into()
         }
