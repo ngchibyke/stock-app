@@ -81,7 +81,7 @@ npm run e2e      # browser tests against the real server (needs Postgres; see be
 | 4 | Moderated chat and reviews (done) |
 | 5 | Disputes and notifications (done) |
 | 6 | Owner web dashboard (done) |
-| 7 | Flutter phone app (Android and iPhone) |
+| 7 | Flutter phone app (Android and iPhone), in progress |
 | 8 | Data export, deletion and retention |
 
 The design is in [docs/superpowers/specs/2026-10-22-abuja-marketplace-design.md](docs/superpowers/specs/2026-10-22-abuja-marketplace-design.md). The build plan and the items each later part must handle are in [docs/superpowers/plans/2026-10-23-00-roadmap.md](docs/superpowers/plans/2026-10-23-00-roadmap.md).
