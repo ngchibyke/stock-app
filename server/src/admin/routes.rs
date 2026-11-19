@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .merge(super::alerts::router())
         .merge(super::audit_view::router())
         .merge(super::shipments::router())
+        .merge(super::payouts::router())
         .merge(super::disputes::router())
 }
 

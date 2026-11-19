@@ -129,7 +129,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 **Files:** `server/src/admin/payouts.rs` and the escrow jobs module, `server/tests/admin_repoll.rs`.
 
-- A job (and `POST /admin/payouts/{id}/repoll`) re-reads recent successful payouts from the provider and raises an alert when one shows reversed. Same `PayoutProvider` trait, so the fake provider drives the tests.
+- The payouts job also re-reads payouts the provider settled as successful in the last 14 days, every 6 hours, after every send in its queue. `POST /admin/payouts/{id}/repoll` (Owner) asks now. Both go through `settle_payout`, which already booked a reversal; this task adds the polling, an audit row `payout.reversed_after_success` (an acknowledgeable alert in `/admin/alerts`) and the route. The fake provider drives the tests.
 - [ ] **Step 1:** Failing tests with an explicit `now`: a payout reversed after success raises one alert; an unchanged payout raises none.
 - [ ] **Steps 2–5:** implement and commit `feat: re-poll payouts for bank reversals`.
 

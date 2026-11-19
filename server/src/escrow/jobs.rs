@@ -35,8 +35,12 @@
 //!    lease expired, for orders not held and payments not flagged ->
 //!    [`send_payout`] (the 8-attempt cap lives there).
 //!    `pending` payouts not polled for an hour -> [`settle_payout`] (the
-//!    24h-pending -> `manual` rule lives there). A payout that ends `failed`
-//!    goes to `manual` with an audit row.
+//!    24h-pending -> `manual` rule lives there). `successful` payouts the
+//!    provider settled in the last [`SUCCESS_REPOLL_WINDOW`], not polled for
+//!    [`SUCCESS_REPOLL_EVERY`] -> [`settle_payout`], which books a bank
+//!    reversal (and audits `payout.reversed_after_success`); they are claimed
+//!    after every send. A payout that ends `failed` goes to `manual` with an
+//!    audit row.
 //! 7. `refunds`: `requested` refunds not under a send claim, past their
 //!    `next_attempt_at` -> [`send_refund`] with the same RF reference. After
 //!    [`MAX_REFUND_ATTEMPTS`] sends the refund goes to `manual` with an audit
@@ -142,6 +146,11 @@ const SHIP_DEADLINE_SCOPE: &str = "o.delivery_method IS NOT NULL \
 pub const SHIP_DEADLINE_PER_TICK: i64 = 20;
 /// A pending payout is polled at most this often.
 const PENDING_POLL_EVERY: &str = "1 hour";
+/// A payout the provider settled as successful is asked about again for this
+/// long: a bank can reverse a transfer days later, and only a webhook caught it.
+const SUCCESS_REPOLL_WINDOW: &str = "14 days";
+/// How often a successful payout inside that window is asked about.
+const SUCCESS_REPOLL_EVERY: &str = "6 hours";
 pub use super::refund::MAX_REFUND_ATTEMPTS;
 // Job names (`job_runs.job`, `job_row_failures.job`).
 const EXPIRE: &str = "expire_checkouts";
@@ -770,15 +779,20 @@ async fn payouts(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
                      AND o.held_at IS NULL AND NOT c.provider_flagged) \
                     OR (p.status = 'pending' \
                         AND COALESCE(p.last_polled_at, p.pending_since, p.updated_at) \
-                            <= now() - interval '{PENDING_POLL_EVERY}')) \
+                            <= now() - interval '{PENDING_POLL_EVERY}') \
+                    OR (p.status = 'successful' AND p.settled_by = 'provider' \
+                        AND p.settled_at > now() - interval '{SUCCESS_REPOLL_WINDOW}' \
+                        AND COALESCE(p.last_polled_at, p.settled_at) \
+                            <= now() - interval '{SUCCESS_REPOLL_EVERY}')) \
                AND {not_pushed} \
-             ORDER BY CASE p.status \
+             ORDER BY (p.status = 'successful'), CASE p.status \
                  WHEN 'pending' THEN COALESCE(p.last_polled_at, p.pending_since, p.updated_at) \
+                 WHEN 'successful' THEN COALESCE(p.last_polled_at, p.settled_at) \
                  WHEN 'sending' THEN p.sending_until \
                  ELSE COALESCE(p.next_attempt_at, p.send_after, p.created_at) END \
                  NULLS FIRST, p.id \
              LIMIT $1 FOR UPDATE OF p SKIP LOCKED) \
-         UPDATE payouts p SET last_polled_at = CASE WHEN due.status = 'pending' \
+         UPDATE payouts p SET last_polled_at = CASE WHEN due.status IN ('pending', 'successful') \
                                                     THEN now() ELSE p.last_polled_at END \
          FROM due WHERE p.id = due.id \
          RETURNING p.id, p.reference, due.status::text",
@@ -797,7 +811,7 @@ async fn payouts(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
         if cancel.is_cancelled() {
             break;
         }
-        let result = if status == "pending" {
+        let result = if status == "pending" || status == "successful" {
             settle_payout(state, &reference).await.map(|_| ())
         } else {
             send_payout(state, id).await.map(|_| ())

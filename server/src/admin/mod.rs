@@ -35,6 +35,7 @@ pub mod moderation;
 pub mod money;
 pub mod order_search;
 pub mod orders;
+pub mod payouts;
 pub mod routes;
 pub mod shipments;
 pub mod stores;

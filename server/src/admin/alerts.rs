@@ -36,8 +36,9 @@ const NOTE_MAX: usize = 500;
 /// A handover code that has locked this many times raises an alert.
 pub const LOCKOUTS_BEFORE_ALERT: i64 = 3;
 const STATES: [&str; 3] = ["open", "acked", "all"];
-const AUDIT_ALERTS: [&str; 3] = [
+const AUDIT_ALERTS: [&str; 4] = [
     "payout.provider_outcome_after_close",
+    "payout.reversed_after_success",
     "payout.amount_mismatch",
     WALLET_ALERT,
 ];
