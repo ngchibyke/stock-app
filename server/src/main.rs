@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         require_payment_provider(&config.app_env, config.mono.is_some())?;
         require_moderation(&config.app_env, config.claude.is_some())?;
         require_push(&config.app_env, config.fcm.is_some())?;
+        require_photo_storage(&config.app_env, config.s3.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -119,6 +120,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let photos: Option<Arc<dyn server::uploads::ObjectStore>> = match config.s3.clone() {
+        Some(cfg) => Some(Arc::new(server::uploads::S3Store::new(cfg)?)),
+        None => {
+            tracing::warn!("S3_* not set: photo uploads are unavailable");
+            None
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -137,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
         chat_hub: chat_hub.clone(),
         // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
         statements: None,
+        photos,
     };
 
     match command {
@@ -234,6 +244,16 @@ fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Res
 
 /// Production refuses to start without push: buyers and sellers would miss
 /// every notice unless they happened to open the inbox.
+/// Production refuses to start with nowhere to keep photos: sellers could not list anything.
+fn require_photo_storage(app_env: &str, configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !configured {
+        bail!(
+            "APP_ENV is production but photo storage is not configured (set the S3_* variables and PHOTO_BASE_URL)"
+        );
+    }
+    Ok(())
+}
+
 fn require_push(app_env: &str, fcm_configured: bool) -> anyhow::Result<()> {
     if app_env == "production" && !fcm_configured {
         bail!("APP_ENV is production but push is not configured (set FCM_SERVICE_ACCOUNT_FILE)");

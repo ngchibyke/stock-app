@@ -62,7 +62,21 @@ fn with(mut body: Value, key: &str, value: Value) -> Value {
     body
 }
 
+/// Swaps every photo key in a body for a photo the caller really uploaded: a key must be
+/// one the person uploaded to be attached to anything.
+async fn with_real_photos(app: &TestApp, token: &str, mut body: Value) -> Value {
+    if let Some(keys) = body.get_mut("photo_keys").and_then(Value::as_array_mut) {
+        for key in keys.iter_mut() {
+            if key.is_string() && !key.as_str().unwrap().trim().is_empty() {
+                *key = json!(app.upload_photo(token).await);
+            }
+        }
+    }
+    body
+}
+
 async fn create(app: &TestApp, token: &str, store_id: Uuid, body: Value) -> TestResponse {
+    let body = with_real_photos(app, token, body).await;
     app.request(
         Method::POST,
         &format!("/stores/{store_id}/products"),

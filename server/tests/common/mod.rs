@@ -93,6 +93,8 @@ pub struct TestApp {
     /// A fake statement source. Not installed until [`TestApp::use_statement`]: with one
     /// installed, the statement job runs on every tick.
     pub statement: Arc<server::statement::fake::FakeStatement>,
+    /// Where uploaded photos land.
+    pub photos: Arc<server::uploads::MemoryStore>,
     /// The installed tone check (always a fake; answers clean by default).
     pub tone: Arc<server::moderation::fake::FakeTone>,
     /// The push double the state sends through.
@@ -117,6 +119,7 @@ impl TestApp {
         let tone = Arc::new(server::moderation::fake::FakeTone::new());
         let push = Arc::new(server::notify::fake::FakePush::new());
         let statement = Arc::new(server::statement::fake::FakeStatement::new());
+        let photos = Arc::new(server::uploads::MemoryStore::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -136,6 +139,7 @@ impl TestApp {
                 },
             )),
             statements: None,
+            photos: Some(photos.clone()),
         };
         Self {
             router: build_app(state.clone()),
@@ -147,6 +151,7 @@ impl TestApp {
             tone,
             push,
             statement,
+            photos,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -155,6 +160,36 @@ impl TestApp {
     pub fn use_statement(&mut self) {
         self.state.statements = Some(self.statement.clone());
         self.router = build_app(self.state.clone());
+    }
+
+    /// Uploads a small real image as `token`'s user through `POST /uploads`; returns its key.
+    pub async fn upload_photo(&self, token: &str) -> String {
+        let res = self
+            .send_raw(
+                Method::POST,
+                "/uploads",
+                &[
+                    ("content-type", "image/png"),
+                    ("authorization", &format!("Bearer {token}")),
+                ],
+                tiny_png(),
+            )
+            .await;
+        assert_eq!(res.status, 201, "upload photo: {}", res.json);
+        res.json["key"].as_str().unwrap().to_string()
+    }
+
+    /// Swaps every non-blank string in `body["photo_keys"]` for a photo `token`'s user really
+    /// uploaded, since only a key the person uploaded can be attached to anything.
+    pub async fn real_photos(&self, token: &str, mut body: Value) -> Value {
+        if let Some(keys) = body.get_mut("photo_keys").and_then(Value::as_array_mut) {
+            for key in keys.iter_mut() {
+                if key.as_str().is_some_and(|k| !k.trim().is_empty()) {
+                    *key = json!(self.upload_photo(token).await);
+                }
+            }
+        }
+        body
     }
 
     /// Serves the app on a real local port, for WebSocket tests.
@@ -511,6 +546,7 @@ impl TestApp {
             .iter()
             .map(|(attrs, stock)| json!({ "attributes": attrs, "stock": stock }))
             .collect();
+        let photo = self.upload_photo(seller_token).await;
         let res = self
             .request(
                 Method::POST,
@@ -520,7 +556,7 @@ impl TestApp {
                     "description": "Handmade shirt",
                     "category": "fashion",
                     "condition": "new",
-                    "photo_keys": ["photos/a.jpg"],
+                    "photo_keys": [photo],
                     "weight_grams": 300,
                     "base_price_kobo": price_kobo,
                     "variants": variants
@@ -832,4 +868,13 @@ impl TestApp {
             seller_token: listing.seller_token,
         }
     }
+}
+
+/// A 2x2 PNG, made with the same crate the server decodes with.
+pub fn tiny_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30])))
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("encode png");
+    out
 }

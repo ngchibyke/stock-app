@@ -221,6 +221,7 @@ pub async fn post_review(
             "photo_keys must not contain empty entries".into(),
         ));
     }
+    crate::uploads::service::require_owned(&state.db, user, &new.photo_keys).await?;
     let body = clean_text(new.body.as_deref(), new.use_suggestion, MAX_REVIEW_CHARS)?;
 
     let row: Option<(Uuid, bool, bool)> = sqlx::query_as(

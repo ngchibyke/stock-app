@@ -20,6 +20,7 @@ fn report(body: &str) -> Value {
 }
 
 async fn open(app: &TestApp, o: &ShippedOrder, body: Value) -> TestResponse {
+    let body = app.real_photos(&o.buyer_token, body).await;
     app.request(
         Method::POST,
         &format!("/orders/{}/dispute", o.order_id),
@@ -72,10 +73,12 @@ async fn buyer_opens_dispute_and_order_is_held(pool: PgPool) {
     assert_eq!(res.json["status"], "awaiting_seller");
     assert_eq!(res.json["reason"], "damaged");
     assert_eq!(res.json["buyer_statement"]["body"], COMPLAINT);
-    assert_eq!(
-        res.json["buyer_statement"]["photo_keys"],
-        json!(["evidence/1.jpg"])
-    );
+    // The key is the one the buyer uploaded.
+    let keys = res.json["buyer_statement"]["photo_keys"]
+        .as_array()
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].as_str().unwrap().starts_with("photos/"));
     assert!(res.json["seller_statement"].is_null());
     assert_eq!(hold(&app, o.order_id).await, (true, Some("dispute".into())));
 
@@ -522,6 +525,7 @@ async fn dispute_blocked_behind_release_is_refused(pool: PgPool) {
         let app_router = server::build_app(app.state.clone());
         let path = format!("/orders/{}/dispute", o.order_id);
         let token = o.buyer_token.clone();
+        let payload = app.real_photos(&token, report(COMPLAINT)).await;
         tokio::spawn(async move {
             use tower::ServiceExt;
             let req = axum::http::Request::builder()
@@ -529,7 +533,7 @@ async fn dispute_blocked_behind_release_is_refused(pool: PgPool) {
                 .uri(path)
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
-                .body(axum::body::Body::from(report(COMPLAINT).to_string()))
+                .body(axum::body::Body::from(payload.to_string()))
                 .unwrap();
             let res = app_router.oneshot(req).await.unwrap();
             let status = res.status().as_u16();
@@ -597,10 +601,16 @@ async fn open_id(app: &TestApp, o: &ShippedOrder) -> String {
 }
 
 async fn respond(app: &TestApp, id: &str, token: &str, body: &str) -> TestResponse {
+    let payload = app
+        .real_photos(
+            token,
+            json!({ "body": body, "photo_keys": ["evidence/s1.jpg"] }),
+        )
+        .await;
     app.request(
         Method::POST,
         &format!("/disputes/{id}/response"),
-        Some(json!({ "body": body, "photo_keys": ["evidence/s1.jpg"] })),
+        Some(payload),
         Some(token),
     )
     .await
@@ -1058,7 +1068,11 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     // 2. The buyer reports damage, with a photo.
     let res = post(
         format!("/orders/{order}/dispute"),
-        json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+        app.real_photos(
+            &buyer,
+            json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+        )
+        .await,
         buyer.clone(),
     )
     .await;

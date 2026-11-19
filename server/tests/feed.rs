@@ -124,7 +124,12 @@ async fn a_card_carries_what_the_app_needs_and_no_seller_details(pool: PgPool) {
     let item = get(&app, "/products").await.json["items"][0].clone();
     assert_eq!(item["name"], "Ankara bag");
     assert_eq!(item["base_price_kobo"], 750_000);
-    assert_eq!(item["cover_photo_key"], "photos/a.jpg");
+    assert!(
+        item["cover_photo_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("photos/")
+    );
     assert_eq!(item["brand"], "Zuri");
     assert_eq!(item["condition"], "used");
     assert_eq!(item["store_name"], "Alpha Threads");

@@ -26,7 +26,11 @@ async fn open_id(app: &TestApp, o: &ShippedOrder) -> String {
             Method::POST,
             &format!("/orders/{}/dispute", o.order_id),
             Some(
-                json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+                app.real_photos(
+                    &o.buyer_token,
+                    json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+                )
+                .await,
             ),
             Some(&o.buyer_token),
         )

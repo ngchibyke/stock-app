@@ -101,6 +101,7 @@ impl Sale {
     }
 
     async fn review(&self, order: Uuid, body: Value) -> TestResponse {
+        let body = self.app.real_photos(&self.buyer, body).await;
         self.post(&self.buyer, order, body).await
     }
 
@@ -281,7 +282,9 @@ async fn photo_limit(pool: PgPool) {
     s.posted(order, json!({ "stars": 5, "photo_keys": ["p/a.jpg"] }))
         .await;
     let list = s.public_list().await;
-    assert_eq!(list.json["reviews"][0]["photo_keys"], json!(["p/a.jpg"]));
+    let keys = list.json["reviews"][0]["photo_keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].as_str().unwrap().starts_with("photos/"));
 }
 
 #[sqlx::test]

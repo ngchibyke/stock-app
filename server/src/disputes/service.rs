@@ -341,6 +341,8 @@ pub async fn open(
     .await
     .map_err(busy_err("order_busy", "lock order"))?
     .ok_or(AppError::NotFound)?;
+    // After the order lookup, so a stranger gets 404 and learns nothing about the order.
+    crate::uploads::service::require_owned(&state.db, buyer, &s.photo_keys).await?;
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM disputes WHERE order_id = $1)")
             .bind(order_id)
@@ -572,6 +574,7 @@ pub async fn respond(
 ) -> Result<DisputeView, AppError> {
     let order_id = order_of(state, dispute_id, Some(seller)).await?;
     check_statement(&s)?;
+    crate::uploads::service::require_owned(&state.db, seller, &s.photo_keys).await?;
     let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
     if d.responded {
         return Err(AppError::Conflict("already_responded"));

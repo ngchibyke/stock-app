@@ -458,6 +458,7 @@ pub async fn create_product(
     validate_brand(&input.brand)?;
     validate_condition(&input.condition)?;
     validate_photos(&input.photo_keys)?;
+    crate::uploads::service::require_owned(db, owner, &input.photo_keys).await?;
     validate_positive(input.weight_grams.into(), "weight_grams")?;
     validate_dimensions(input.length_cm, input.width_cm, input.height_cm)?;
     validate_price(input.base_price_kobo, "base_price_kobo")?;
@@ -523,7 +524,7 @@ pub async fn update_product(
     let category = patch.category.unwrap_or(cur.category);
     let brand = patch.brand.or(cur.brand);
     let condition = patch.condition.unwrap_or(cur.condition);
-    let photo_keys = patch.photo_keys.unwrap_or(cur.photo_keys);
+    let photo_keys = patch.photo_keys.unwrap_or_else(|| cur.photo_keys.clone());
     let weight = patch.weight_grams.unwrap_or(cur.weight_grams);
     let (l, w, h) = (
         patch.length_cm.or(cur.length_cm),
@@ -539,6 +540,14 @@ pub async fn update_product(
     validate_brand(&brand)?;
     validate_condition(&condition)?;
     validate_photos(&photo_keys)?;
+    // Only keys being newly attached are checked; photos already on the product stay,
+    // including ones from before uploads were tracked.
+    let added: Vec<String> = photo_keys
+        .iter()
+        .filter(|k| !cur.photo_keys.contains(k))
+        .cloned()
+        .collect();
+    crate::uploads::service::require_owned(db, owner, &added).await?;
     validate_positive(weight.into(), "weight_grams")?;
     validate_dimensions(l, w, h)?;
     validate_price(base, "base_price_kobo")?;

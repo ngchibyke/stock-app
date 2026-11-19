@@ -50,7 +50,18 @@ async fn setup(app: &TestApp) -> (String, Uuid) {
     (token, store_id)
 }
 
-async fn create(app: &TestApp, token: &str, store_id: Uuid, body: Value) -> common::TestResponse {
+async fn create(
+    app: &TestApp,
+    token: &str,
+    store_id: Uuid,
+    mut body: Value,
+) -> common::TestResponse {
+    // A photo key must be one the person uploaded.
+    if let Some(keys) = body.get_mut("photo_keys").and_then(Value::as_array_mut) {
+        for key in keys.iter_mut() {
+            *key = json!(app.upload_photo(token).await);
+        }
+    }
     app.request(
         Method::POST,
         &format!("/stores/{store_id}/products"),

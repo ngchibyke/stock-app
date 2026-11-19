@@ -27,6 +27,7 @@ pub mod reviews;
 pub mod settings;
 pub mod statement;
 pub mod stores;
+pub mod uploads;
 
 use axum::{Json, Router, extract::MatchedPath, http::Request, routing::get};
 use std::sync::Arc;
@@ -64,6 +65,9 @@ pub struct AppState {
     /// The provider's daily statement, for reconciliation. `None` until a
     /// provider adapter exists (see [`statement`]).
     pub statements: Option<Arc<dyn statement::StatementSource>>,
+    /// Where uploaded photos are stored. `None` when no object store is configured:
+    /// `POST /uploads` then answers 503.
+    pub photos: Option<Arc<dyn uploads::ObjectStore>>,
 }
 
 async fn health() -> Json<Value> {
@@ -108,6 +112,7 @@ pub fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .merge(auth::routes::router())
+        .merge(uploads::routes::router())
         .merge(access_codes::routes::router())
         .merge(stores::routes::router())
         .merge(products::routes::router())
