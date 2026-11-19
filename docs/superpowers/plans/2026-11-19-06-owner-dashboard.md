@@ -93,7 +93,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 ### Task 4: Order search and detail with ledger
 
-**Files:** `server/src/admin/orders.rs`, `server/tests/admin_orders.rs`.
+**Files:** `server/src/admin/order_search.rs` (new; `orders.rs` keeps hold and unhold), `server/tests/admin_orders.rs`.
 
 - `GET /admin/orders?status=&store_id=&from=&to=&cursor=` (Owner). `GET /admin/orders/{id}` (Owner): the order, items, payment, delivery events, refunds, payout, dispute id if any, and the **ledger postings** grouped by posting key with a running sum that must be zero.
 - [ ] **Step 1:** Failing tests: filters, keyset paging, a completed order's postings sum to zero, a partial-refund order shows both posting keys.

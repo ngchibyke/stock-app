@@ -31,6 +31,7 @@ pub mod disputes;
 pub mod holidays;
 pub mod moderation;
 pub mod money;
+pub mod order_search;
 pub mod orders;
 pub mod routes;
 pub mod stores;
