@@ -15,6 +15,8 @@ export interface AuthState {
   user: Me | null;
   /** True while a stored session is being checked on first load. */
   loading: boolean;
+  /** True after the person chose to sign out: the sign-in page must not remember where they were. */
+  signedOut?: boolean;
   signIn: (phone: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -32,6 +34,7 @@ const isStaff = (role: Role) => role === "owner" || role === "support";
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Me | null>(null);
   const [loading, setLoading] = useState<boolean>(() => getToken() !== null);
+  const [signedOut, setSignedOut] = useState(false);
 
   const clear = useCallback(() => {
     setToken(null);
@@ -68,6 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         auth: false,
       });
       setToken(token);
+      setSignedOut(false);
       try {
         const me = await api.get<Me>("/me");
         if (!isStaff(me.role)) {
@@ -91,19 +95,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // The session may already be gone; either way we are out.
     }
+    setSignedOut(true);
     clear();
   }, [clear]);
 
-  const value = useMemo(() => ({ user, loading, signIn, signOut }), [user, loading, signIn, signOut]);
+  const value = useMemo(() => ({ user, loading, signedOut, signIn, signOut }), [user, loading, signedOut, signIn, signOut]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 /** Everything inside needs a signed-in staff member. */
 export function RequireAuth() {
-  const { user, loading } = useAuth();
+  const { user, loading, signedOut } = useAuth();
   const location = useLocation();
   if (loading) return null;
-  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  // After a deliberate sign-out nothing is remembered, so the next person to sign in
+  // (a different account, say) starts at the overview rather than the last person's page.
+  if (!user) return <Navigate to="/login" replace state={signedOut ? undefined : { from: location.pathname }} />;
   return <Outlet />;
 }
 

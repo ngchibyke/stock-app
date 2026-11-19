@@ -167,7 +167,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 ### Task 14: End-to-end, hosting and docs
 
-- Playwright runs the happy path against a server started with fake providers: sign in as Owner, create a code, open a dispute fixture, decide it, see the audit row.
+- Playwright runs against the **real** server and the built app. *(Built: the server cannot create a paid order without a payment provider, so a dispute fixture is not possible end to end; the browser tests cover sign-in, access codes, staff and the Support view, settings, the audit log, theme and reduced motion. Disputes and money screens are covered by component tests.)*
 - Add a `dashboard` job to `.github/workflows/ci.yml` (install, lint, test, build). Add a short hosting section to the README (static files behind the reverse proxy, the CSP header, same-origin or CORS for the API).
 - Update the roadmap row for part 6 and the README roadmap table.
 - [ ] Commit `docs: document the owner dashboard`.

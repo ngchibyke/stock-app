@@ -68,15 +68,15 @@ export function Login() {
             <span>Phone number</span>
             <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" autoComplete="username" placeholder="0803 123 4567" required />
           </label>
-          <label className="field">
-            <span>Password</span>
+          <div className="field">
+            <label htmlFor="login-password">Password</label>
             <div style={{ position: "relative" }}>
-              <input type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required style={{ paddingRight: 42 }} />
+              <input id="login-password" type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required style={{ paddingRight: 42 }} />
               <button type="button" className="icon-btn" aria-label={show ? "Hide password" : "Show password"} style={{ position: "absolute", right: 3, top: 2 }} onClick={() => setShow((s) => !s)}>
                 <Icon name="eye" size={18} active={show} interactive={false} />
               </button>
             </div>
-          </label>
+          </div>
         </motion.div>
         {error && (
           <motion.div className="error-note" role="alert" style={{ marginTop: 14 }} initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>

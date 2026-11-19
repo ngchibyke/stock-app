@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setToken } from "./api";
-import { AuthProvider, RequireAuth, RequireOwner } from "./auth";
+import { AuthProvider, RequireAuth, RequireOwner, useAuth } from "./auth";
 import { Login } from "./pages/Login";
 
 const json = (status: number, body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status }));
@@ -81,13 +81,53 @@ describe("guards", () => {
   });
 });
 
+function SignOutButton() {
+  const { signOut } = useAuth();
+  return <button onClick={() => void signOut()}>sign me out</button>;
+}
+
+describe("sign-out", () => {
+  it("forgets where the person was, so the next sign-in starts at the overview", async () => {
+    setToken("tok");
+    mockServer("owner");
+    render(
+      <MemoryRouter initialEntries={["/owner-only"]}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route element={<RequireAuth />}>
+              <Route path="/" element={<div>home page</div>} />
+              <Route path="/owner-only" element={<><div>owner page</div><SignOutButton /></>} />
+            </Route>
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "sign me out" }));
+    await user.type(await screen.findByLabelText("Phone number"), "08031112222");
+    await user.type(screen.getByLabelText("Password", { exact: true }), "right-password");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText("home page")).toBeInTheDocument();
+  });
+
+  it("still returns to the page you were on when a session simply expires", async () => {
+    setToken("tok");
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) =>
+      String(input).endsWith("/me") ? json(401, { error: { code: "unauthorized", message: "gone" } }) : json(404, {}),
+    );
+    app("/owner-only");
+    expect(await screen.findByRole("form", { name: "Sign in" })).toBeInTheDocument();
+  });
+});
+
 describe("sign-in", () => {
   it("signs a staff member in and goes to the page they asked for", async () => {
     mockServer("owner");
     const user = userEvent.setup();
     app("/owner-only");
     await user.type(await screen.findByLabelText("Phone number"), "08031112222");
-    await user.type(screen.getByLabelText("Password"), "right-password");
+    await user.type(screen.getByLabelText("Password", { exact: true }), "right-password");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByText("owner page")).toBeInTheDocument();
   });
@@ -97,7 +137,7 @@ describe("sign-in", () => {
     const user = userEvent.setup();
     app("/");
     await user.type(await screen.findByLabelText("Phone number"), "08031112222");
-    await user.type(screen.getByLabelText("Password"), "nope");
+    await user.type(screen.getByLabelText("Password", { exact: true }), "nope");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("do not match");
   });
@@ -107,7 +147,7 @@ describe("sign-in", () => {
     const user = userEvent.setup();
     app("/");
     await user.type(await screen.findByLabelText("Phone number"), "08031112222");
-    await user.type(screen.getByLabelText("Password"), "right-password");
+    await user.type(screen.getByLabelText("Password", { exact: true }), "right-password");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("not an Owner or Support");
     await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/auth/sign-out"))).toBe(true));

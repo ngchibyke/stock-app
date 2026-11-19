@@ -130,11 +130,11 @@ export function Shell() {
         </div>
       </motion.aside>
       <main className="main">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.div key={location.pathname} variants={pageVariants} initial="initial" animate="enter" exit="exit">
-            <Outlet />
-          </motion.div>
-        </AnimatePresence>
+        {/* Enter-only on purpose: an exit animation (AnimatePresence mode="wait") recreated the page
+            under the person's hands and threw away unsaved form state. */}
+        <motion.div key={location.pathname} variants={pageVariants} initial="initial" animate="enter">
+          <Outlet />
+        </motion.div>
       </main>
     </div>
   );
