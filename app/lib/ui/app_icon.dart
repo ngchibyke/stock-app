@@ -186,8 +186,9 @@ class _AppIconState extends State<AppIcon> with SingleTickerProviderStateMixin {
   @override
   void didUpdateWidget(AppIcon old) {
     super.didUpdateWidget(old);
-    if (widget.trigger != old.trigger || (widget.active && !old.active))
+    if (widget.trigger != old.trigger || (widget.active && !old.active)) {
       _play();
+    }
   }
 
   @override

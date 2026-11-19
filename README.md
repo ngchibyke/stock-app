@@ -71,6 +71,19 @@ npm run e2e      # browser tests against the real server (needs Postgres; see be
 
 **Browser tests.** `npm run e2e` builds and starts the real server on port 8099 against `E2E_DATABASE_URL` (default `postgres://market:market@localhost:5432/market`), creates a test Owner, and drives the built app in Chromium. No payment, courier or chat provider is configured, so these cover sign-in, access codes, staff, settings, users and the audit log. The dispute and money screens are covered by component tests and by the server's own suite. Set `E2E_CHROMIUM` to use an existing Chromium, otherwise run `npx playwright install chromium` once.
 
+## Phone app
+
+`app/` is the Flutter app for buyers and sellers (Android and iPhone, Abuja only). It talks to this API with the normal bearer session and keeps the token in the phone's secure storage. The plan, with its slices and the server work it needs, is in [docs/superpowers/plans/2026-11-19-07-flutter-app.md](docs/superpowers/plans/2026-11-19-07-flutter-app.md). Built so far: the design system (every icon, button and card answers touch with motion, and respects the system's reduce-motion setting), the API client, sign-up with the SMS code, sign-in, the account screen, and the routing.
+
+```bash
+cd app
+flutter pub get
+flutter test
+flutter analyze
+# against a local server (the default host is the Android emulator's view of your machine):
+flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080
+```
+
 ## Roadmap
 
 | Part | What it adds |
