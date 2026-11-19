@@ -18,6 +18,8 @@ use crate::{
 // `/stores/{key}` reuses the store routes' param name: the key is a store id for POST, a slug for GET.
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/products", get(super::feed::feed))
+        .route("/categories", get(super::feed::categories))
         .route("/stores/{key}/products", get(list).post(create))
         .route("/products/{id}", get(show).patch(update).delete(remove))
         .route("/products/{id}/variants", put(replace_variants))
