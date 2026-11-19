@@ -756,7 +756,7 @@ mod tests {
         // The secret never shows in a debug print.
         assert!(!format!("{cfg:?}").contains("super-secret"));
         // Any one missing is an error naming it.
-        for missing in 0..S3_ALL.len() {
+        for (missing, (name, _)) in S3_ALL.iter().enumerate() {
             let partial: Vec<(&str, &str)> = S3_ALL
                 .iter()
                 .enumerate()
@@ -764,7 +764,7 @@ mod tests {
                 .map(|(_, p)| *p)
                 .collect();
             let err = load(&partial).unwrap_err().to_string();
-            assert!(err.contains(S3_ALL[missing].0), "{err}");
+            assert!(err.contains(name), "{err}");
         }
     }
 
