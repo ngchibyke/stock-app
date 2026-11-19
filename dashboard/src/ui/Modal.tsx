@@ -103,6 +103,8 @@ interface ConfirmProps {
   onConfirm: (note: string) => Promise<void>;
   /** Extra fields shown above the note. */
   children?: ReactNode;
+  /** While set, the confirm button is disabled and this says why. */
+  blockedReason?: string;
 }
 
 /** A confirmation that asks for a note, shows a busy button, and shakes if refused. */
@@ -116,6 +118,7 @@ export function ConfirmDialog({
   onClose,
   onConfirm,
   children,
+  blockedReason,
 }: ConfirmProps) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -154,7 +157,7 @@ export function ConfirmDialog({
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant={danger ? "danger" : "primary"} loading={busy} onClick={submit}>
+          <Button variant={danger ? "danger" : "primary"} loading={busy} disabled={!!blockedReason} onClick={submit}>
             {confirmLabel}
           </Button>
         </>
@@ -167,6 +170,7 @@ export function ConfirmDialog({
       >
         <div className="summary">{summary}</div>
         {children}
+        {blockedReason && <p className="hint" role="note">{blockedReason}</p>}
         {needNote && (
           <label className="field">
             <span>{noteLabel}</span>

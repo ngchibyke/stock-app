@@ -1,9 +1,11 @@
 // The app frame: a collapsible sidebar whose active item is a pill that slides
 // between links, icons that animate on hover, and a page that rises in on each
 // route change.
+import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { api } from "./api";
 import { type Role, useAuth } from "./auth";
 import { pageVariants, spring } from "./motion";
 import { ThemeToggle } from "./theme";
@@ -21,13 +23,17 @@ export interface NavItem {
 /** Screens add themselves here as they are built. */
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: "home", roles: ["owner", "support"], group: "Market" },
+  { to: "/orders", label: "Orders", icon: "orders", roles: ["owner"], group: "Money" },
+  { to: "/money", label: "Reconciliation", icon: "money", roles: ["owner"], group: "Money" },
+  { to: "/alerts", label: "Alerts", icon: "alert", roles: ["owner"], group: "Money" },
   { to: "/codes", label: "Access codes", icon: "key", roles: ["owner"], group: "People" },
   { to: "/users", label: "Users", icon: "users", roles: ["owner"], group: "People" },
   { to: "/stores", label: "Stores", icon: "store", roles: ["owner"], group: "People" },
   { to: "/settings", label: "Settings", icon: "settings", roles: ["owner"], group: "Configure" },
+  { to: "/audit", label: "Audit log", icon: "audit", roles: ["owner"], group: "Configure" },
 ];
 
-function Link({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
+function Link({ item, collapsed, badge }: { item: NavItem; collapsed: boolean; badge?: number }) {
   return (
     <NavLink to={item.to} end={item.to === "/"} className={({ isActive }) => `nav-link ${isActive ? "on" : ""}`} title={collapsed ? item.label : undefined}>
       {({ isActive }) => (
@@ -41,6 +47,13 @@ function Link({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
           >
             {item.label}
           </motion.span>
+          <AnimatePresence>
+            {!!badge && badge > 0 && (
+              <motion.span className="nav-badge" initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} transition={spring.bouncy} aria-label={`${badge} open`}>
+                {badge > 99 ? "99+" : badge}
+              </motion.span>
+            )}
+          </AnimatePresence>
         </motion.span>
       )}
     </NavLink>
@@ -51,6 +64,14 @@ export function Shell() {
   const { user, signOut } = useAuth();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const owner = user?.role === "owner";
+  // The sidebar's alert count: refreshed every minute and after every acknowledgement.
+  const alerts = useQuery({
+    queryKey: ["alerts", "open"],
+    queryFn: () => api.get<{ items: unknown[] }>("/admin/alerts", { state: "open", limit: 100 }),
+    enabled: owner,
+    refetchInterval: 60_000,
+  });
   if (!user) return null;
   const items = NAV.filter((n) => n.roles.includes(user.role));
   const groups = [...new Set(items.map((n) => n.group))];
@@ -71,7 +92,7 @@ export function Shell() {
               {items
                 .filter((n) => n.group === g)
                 .map((n) => (
-                  <Link key={n.to} item={n} collapsed={collapsed} />
+                  <Link key={n.to} item={n} collapsed={collapsed} badge={n.to === "/alerts" ? alerts.data?.items.length : undefined} />
                 ))}
             </div>
           ))}
