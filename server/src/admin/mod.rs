@@ -28,6 +28,7 @@
 //! the provider first (see [`money::mark_paid`]).
 
 pub mod alerts;
+pub mod audit_view;
 pub mod disputes;
 pub mod holidays;
 pub mod moderation;
