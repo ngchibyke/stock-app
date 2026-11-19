@@ -103,8 +103,8 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 **Files:** `server/src/admin/alerts.rs`, migration `0037_alert_acks.sql`, `server/tests/admin_alerts.rs`.
 
-- Move the 30-day `audit_log` window for late-provider-outcome and payout-amount-mismatch alerts behind `GET /admin/alerts?state=open|acked`. Add `POST /admin/alerts/{id}/ack` with a note. An unacknowledged alert never ages out of the open list.
-- Also add acknowledgement for the sticky `orders_attention` and `shipments_attention` rows, and a repeated-handover-lockout alert after the third lockout for one order.
+- Move the 30-day `audit_log` window for late-provider-outcome and payout-amount-mismatch alerts behind `GET /admin/alerts?state=open|acked`. Add `POST /admin/alerts/ack` with `{alert_key, note}`. *(Built: keyed by body, not path, because the keys contain colons. The list is capped at `limit` with no cursor, like the reconciliation sections.)* An unacknowledged alert never ages out of the open list.
+- Also add acknowledgement for the sticky `orders_attention` and `shipments_attention` rows, and a repeated-handover-lockout alert after the third lockout for one order (a new lockout makes a new key, so it returns after an acknowledgement). *(Built: shipment attention rows carry an `alert_key` in `/admin/reconciliation` and are acknowledged with it; they are not in `/admin/alerts`.)*
 - [ ] **Step 1:** Failing tests: an alert 40 days old is still open until acked; ack needs a note; double ack 409; Support gets 403.
 - [ ] **Steps 2–5:** implement and commit `feat: acknowledge reconciliation alerts`.
 

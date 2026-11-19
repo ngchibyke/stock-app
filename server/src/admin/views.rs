@@ -311,8 +311,10 @@ pub struct Reconciliation {
 /// How long a shipment may wait in `cancel_pending` before it is listed.
 pub const CANCEL_STUCK_AFTER: &str = "1 hour";
 
-/// How far back the audit-log alert sections of [`Reconciliation`] look.
-/// The alerts have no acknowledgement: they age out instead.
+/// How far back the alert sections of [`Reconciliation`] that come from the
+/// audit log look when they have no acknowledgement of their own: price above
+/// quote and unknown courier labels. The late-outcome, amount-mismatch and
+/// wallet alerts never age out; they stay until acknowledged (plan 6).
 pub const ALERT_WINDOW_DAYS: i32 = 30;
 
 /// How long a scheduled payout may wait on a person before the
@@ -322,6 +324,8 @@ pub const BLOCKED_AFTER_DAYS: i32 = 7;
 /// A `payout.provider_outcome_after_close` alert.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct LateProviderOutcome {
+    /// Key for `POST /admin/alerts/ack`.
+    pub alert_key: String,
     pub payout_id: Option<Uuid>,
     /// `owner_settled` or `retired_attempt`.
     pub reference_kind: Option<String>,
@@ -334,6 +338,7 @@ pub struct LateProviderOutcome {
 /// A `payout.amount_mismatch` alert.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct PayoutAmountMismatch {
+    pub alert_key: String,
     pub payout_id: Option<Uuid>,
     pub expected_kobo: Option<i64>,
     pub reported_kobo: Option<i64>,
@@ -347,6 +352,7 @@ pub struct PayoutAmountMismatch {
 /// `unknown_label`.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ShipmentAttention {
+    pub alert_key: String,
     pub id: Option<Uuid>,
     pub order_id: Option<Uuid>,
     pub store_id: Option<Uuid>,
@@ -378,6 +384,7 @@ pub struct ShipmentAttention {
 /// it, and another order holds the same courier quote, so one token may book twice).
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct OrderAttention {
+    pub alert_key: String,
     pub order_id: Uuid,
     pub store_id: Uuid,
     pub attention: String,
@@ -388,6 +395,7 @@ pub struct OrderAttention {
 /// A `courier.wallet_alert` audit row.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct WalletAlert {
+    pub alert_key: String,
     pub shipment_id: Option<Uuid>,
     /// `possible_low_balance`: a booking refused with a 400, which is what an
     /// empty wallet returns, though other refusals look the same. Otherwise a
@@ -434,28 +442,28 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .await
     .context("list attention refunds")?;
     let late_provider_outcomes = sqlx::query_as::<_, LateProviderOutcome>(
-        "SELECT subject_id AS payout_id, detail->>'reference_kind' AS reference_kind, \
+        "SELECT 'audit:' || id AS alert_key, subject_id AS payout_id, \
+                detail->>'reference_kind' AS reference_kind, \
                 detail->>'outcome' AS outcome, at \
          FROM audit_log \
          WHERE action = 'payout.provider_outcome_after_close' \
-           AND at > now() - make_interval(days => $2) \
+           AND NOT EXISTS (SELECT 1 FROM alert_acks k WHERE k.alert_key = 'audit:' || id) \
          ORDER BY at DESC, id DESC LIMIT $1",
     )
     .bind(MAX_LIMIT)
-    .bind(ALERT_WINDOW_DAYS)
     .fetch_all(db)
     .await
     .context("list late provider outcomes")?;
     let payout_amount_mismatches = sqlx::query_as::<_, PayoutAmountMismatch>(
-        "SELECT subject_id AS payout_id, (detail->>'expected_kobo')::bigint AS expected_kobo, \
+        "SELECT 'audit:' || id AS alert_key, subject_id AS payout_id, \
+                (detail->>'expected_kobo')::bigint AS expected_kobo, \
                 (detail->>'reported_kobo')::bigint AS reported_kobo, at \
          FROM audit_log \
          WHERE action = 'payout.amount_mismatch' \
-           AND at > now() - make_interval(days => $2) \
+           AND NOT EXISTS (SELECT 1 FROM alert_acks k WHERE k.alert_key = 'audit:' || id) \
          ORDER BY at DESC, id DESC LIMIT $1",
     )
     .bind(MAX_LIMIT)
-    .bind(ALERT_WINDOW_DAYS)
     .fetch_all(db)
     .await
     .context("list payout amount mismatches")?;
@@ -474,6 +482,7 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
              FROM audit_log \
              WHERE action = $5 AND at > now() - make_interval(days => $2) \
              ORDER BY detail->>'provider_order_id', at DESC, id DESC) \
+         SELECT t.*, 'shipment:' || COALESCE(t.id::text, t.provider_order_id, '') || ':' || t.status || ':' || COALESCE(t.attention, '') AS alert_key FROM ( \
          SELECT s.id, s.order_id, o.store_id, s.status::text AS status, \
                 o.status::text AS order_status, s.provider_order_id, \
                 NULL::text AS courier_state, s.quoted_kobo, \
@@ -506,7 +515,9 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
                 NULL, 'unknown_label', false, NULL, u.at \
          FROM unknown u \
          WHERE NOT EXISTS (SELECT 1 FROM shipments s WHERE s.provider_order_id = u.label) \
-         ORDER BY updated_at, id LIMIT $1"
+         ) t \
+         WHERE NOT EXISTS (SELECT 1 FROM alert_acks k WHERE k.alert_key = 'shipment:' || COALESCE(t.id::text, t.provider_order_id, '') || ':' || t.status || ':' || COALESCE(t.attention, '')) \
+         ORDER BY t.updated_at, t.id LIMIT $1"
     ))
     .bind(MAX_LIMIT)
     .bind(ALERT_WINDOW_DAYS)
@@ -518,13 +529,16 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .await
     .context("list attention shipments")?;
     let orders_attention = sqlx::query_as::<_, OrderAttention>(
-        "SELECT o.id AS order_id, o.store_id, 'no_delivery_method' AS attention, o.paid_at \
-         FROM orders o WHERE o.status = 'paid' AND o.delivery_method IS NULL \
-         UNION ALL \
-         SELECT o.id, o.store_id, 'quote_reused', o.paid_at \
-         FROM orders o WHERE o.status = 'paid' AND EXISTS ( \
-             SELECT 1 FROM audit_log a WHERE a.action = $2 AND a.subject_type = 'order' \
-                AND a.subject_id = o.id) \
+        "SELECT * FROM ( \
+           SELECT 'order:' || o.id || ':no_delivery_method' AS alert_key, \
+                  o.id AS order_id, o.store_id, 'no_delivery_method' AS attention, o.paid_at \
+           FROM orders o WHERE o.status = 'paid' AND o.delivery_method IS NULL \
+           UNION ALL \
+           SELECT 'order:' || o.id || ':quote_reused', o.id, o.store_id, 'quote_reused', o.paid_at \
+           FROM orders o WHERE o.status = 'paid' AND EXISTS ( \
+               SELECT 1 FROM audit_log a WHERE a.action = $2 AND a.subject_type = 'order' \
+                  AND a.subject_id = o.id)) t \
+         WHERE NOT EXISTS (SELECT 1 FROM alert_acks k WHERE k.alert_key = t.alert_key) \
          ORDER BY paid_at, order_id LIMIT $1",
     )
     .bind(MAX_LIMIT)
@@ -533,13 +547,14 @@ pub async fn reconciliation(db: &PgPool, owner: bool) -> Result<Reconciliation, 
     .await
     .context("list orders without a delivery method")?;
     let wallet_alerts = sqlx::query_as::<_, WalletAlert>(
-        "SELECT subject_id AS shipment_id, detail->>'event' AS event, at \
+        "SELECT 'audit:' || id AS alert_key, subject_id AS shipment_id, \
+                detail->>'event' AS event, at \
          FROM audit_log \
-         WHERE action = $3 AND at > now() - make_interval(days => $2) \
+         WHERE action = $2 \
+           AND NOT EXISTS (SELECT 1 FROM alert_acks k WHERE k.alert_key = 'audit:' || id) \
          ORDER BY at DESC, id DESC LIMIT $1",
     )
     .bind(MAX_LIMIT)
-    .bind(ALERT_WINDOW_DAYS)
     .bind(WALLET_ALERT)
     .fetch_all(db)
     .await
