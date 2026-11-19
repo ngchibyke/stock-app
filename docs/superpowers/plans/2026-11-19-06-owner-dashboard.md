@@ -120,9 +120,9 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 **Files:** `server/src/admin/shipments.rs`, `server/tests/admin_rebook.rs`.
 
-- `POST /admin/shipments/{id}/rebook` (Owner) for `booking_failed`, `booking_unknown` and `cancel_failed`, using the existing booking path with a fresh quote when the old token expired. Idempotent on the shipment, audited, and it refuses while a booking call is in flight.
+- `POST /admin/shipments/{id}/rebook` (Owner) for `booking_failed` and `booking_unknown`, and `POST /admin/shipments/{id}/retry-cancel` for `cancel_failed`. *(Built, narrower than first planned: a re-book never calls the courier. It puts the shipment back to `booking_pending` and the job loop books it through the guarded path. `booking_unknown` needs `confirm_not_booked: true` and no label on the row. A `quote_expired` or `pickup_moved` failure returns 409 `requote_needed`: a new quote waits for the sandbox answers in the README, so it is not built.)* Audited with a note, and it refuses while a booking call is in flight.
 - This is the gate named in the README: courier delivery for real stores stays off until this exists **and** the sandbox answers are in. Tests use the Shipbubble wiremock from `tests/shipbubble_adapter.rs`.
-- [ ] **Step 1:** Failing tests: each failed state re-books; an expired token re-quotes and flags a price difference above the tolerance; a second call while booking is 409.
+- [ ] **Step 1:** Failing tests: each failed state re-books; a stale-quote failure is 409 `requote_needed`; an unknown booking needs the confirmation; a call while booking is 409.
 - [ ] **Steps 2–5:** implement and commit `feat: owner re-book for failed courier shipments`.
 
 ### Task 8: Re-poll payouts for bank reversals
