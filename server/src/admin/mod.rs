@@ -33,6 +33,7 @@ pub mod moderation;
 pub mod money;
 pub mod orders;
 pub mod routes;
+pub mod users;
 pub mod views;
 
 use axum::{extract::FromRequestParts, http::request::Parts};

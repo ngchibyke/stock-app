@@ -70,7 +70,7 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 - `GET /admin/users?q=&role=&state=&cursor=&limit=` (Staff). `q` matches the blind index of a normalized phone (exact) or a case-insensitive display-name prefix. Support sees only users who appear in an open dispute (join through `disputes`), which matches spec §11.
 - `GET /admin/users/{id}` (Owner). Role, created date, strikes, mute state, ban state, store ids, order counts. Decrypted name and phone, with an `admin_read` audit row.
-- [ ] **Step 1:** Failing tests: Owner finds a user by phone and by name prefix; Support is limited to dispute parties; the list never contains a phone; the single view writes an audit row; bad cursor → 400.
+- [ ] **Step 1:** Failing tests: Owner finds a user by phone and by name prefix; Support is limited to dispute parties; the list never contains a phone; the single view writes an audit row; bad cursor → 422.
 - [ ] **Steps 2–5:** run → FAIL, implement, run → PASS, commit `feat: search and view users from the dashboard`.
 
 ### Task 2: Staff accounts
