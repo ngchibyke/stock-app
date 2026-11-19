@@ -1,0 +1,114 @@
+// The app frame: a collapsible sidebar whose active item is a pill that slides
+// between links, icons that animate on hover, and a page that rises in on each
+// route change.
+import { AnimatePresence, motion } from "motion/react";
+import { useState } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { type Role, useAuth } from "./auth";
+import { pageVariants, spring } from "./motion";
+import { ThemeToggle } from "./theme";
+import { Icon, type IconName } from "./ui/Icon";
+import { IconButton } from "./ui/Button";
+
+export interface NavItem {
+  to: string;
+  label: string;
+  icon: IconName;
+  roles: Role[];
+  group: string;
+}
+
+/** Screens add themselves here as they are built. */
+export const NAV: NavItem[] = [
+  { to: "/", label: "Overview", icon: "home", roles: ["owner", "support"], group: "Market" },
+];
+
+function Link({ item, collapsed }: { item: NavItem; collapsed: boolean }) {
+  return (
+    <NavLink to={item.to} end={item.to === "/"} className={({ isActive }) => `nav-link ${isActive ? "on" : ""}`} title={collapsed ? item.label : undefined}>
+      {({ isActive }) => (
+        <motion.span style={{ display: "contents" }} initial="rest" whileHover="hover" whileTap="tap">
+          {isActive && <motion.span layoutId="nav-pill" className="nav-pill" transition={spring.snappy} />}
+          <Icon name={item.icon} size={20} active={isActive} interactive={false} />
+          <motion.span
+            animate={{ opacity: collapsed ? 0 : 1, x: collapsed ? -6 : 0 }}
+            transition={{ duration: 0.18 }}
+            aria-hidden={collapsed}
+          >
+            {item.label}
+          </motion.span>
+        </motion.span>
+      )}
+    </NavLink>
+  );
+}
+
+export function Shell() {
+  const { user, signOut } = useAuth();
+  const location = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
+  if (!user) return null;
+  const items = NAV.filter((n) => n.roles.includes(user.role));
+  const groups = [...new Set(items.map((n) => n.group))];
+
+  return (
+    <div className="shell">
+      <motion.aside className="side" animate={{ width: collapsed ? 68 : 236 }} transition={spring.snappy} aria-label="Main">
+        <div className="brand">
+          <motion.span className="brand-mark" whileHover={{ rotate: 12, scale: 1.08 }} whileTap={{ scale: 0.9 }} transition={spring.bouncy}>
+            <Icon name="store" size={18} interactive={false} />
+          </motion.span>
+          {!collapsed && <span>Market</span>}
+        </div>
+        <nav>
+          {groups.map((g) => (
+            <div key={g}>
+              {!collapsed && <div className="nav-group">{g}</div>}
+              {items
+                .filter((n) => n.group === g)
+                .map((n) => (
+                  <Link key={n.to} item={n} collapsed={collapsed} />
+                ))}
+            </div>
+          ))}
+        </nav>
+        <div className="side-foot">
+          <div className="row" style={{ justifyContent: collapsed ? "center" : "space-between" }}>
+            <ThemeToggle />
+            <IconButton icon="menu" label={collapsed ? "Expand menu" : "Collapse menu"} onClick={() => setCollapsed((c) => !c)} />
+          </div>
+          <div className="me">
+            <span className="avatar">{user.display_name.slice(0, 1).toUpperCase()}</span>
+            {!collapsed && (
+              <span style={{ minWidth: 0 }}>
+                <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{user.display_name}</strong>
+                <span className="muted" style={{ textTransform: "capitalize", fontSize: 12 }}>
+                  {user.role}
+                </span>
+              </span>
+            )}
+          </div>
+          <motion.button
+            type="button"
+            className="nav-link"
+            style={{ background: "none", border: 0, cursor: "pointer", font: "inherit", fontWeight: 600 }}
+            onClick={() => void signOut()}
+            initial="rest"
+            whileHover="hover"
+            whileTap="tap"
+          >
+            <Icon name="logout" size={20} interactive={false} />
+            {!collapsed && <span>Sign out</span>}
+          </motion.button>
+        </div>
+      </motion.aside>
+      <main className="main">
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div key={location.pathname} variants={pageVariants} initial="initial" animate="enter" exit="exit">
+            <Outlet />
+          </motion.div>
+        </AnimatePresence>
+      </main>
+    </div>
+  );
+}
