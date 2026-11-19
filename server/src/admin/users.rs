@@ -9,7 +9,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -17,12 +17,21 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    Owner, Staff, parse_id,
+    LOCK_TIMEOUT, Owner, Staff, parse_id,
     views::{self},
 };
 use crate::{
-    AppState, audit, crypto::blind_index, error::AppError, extract::AppQuery,
-    orders::views::Cursor, phone::normalize_ng_phone,
+    AppState, audit,
+    auth::{
+        password::{blocking, hash_password, validate_password},
+        routes::{insert_user, validate_display_name},
+    },
+    checkout::service::busy_err,
+    crypto::blind_index,
+    error::AppError,
+    extract::{AppJson, AppQuery},
+    orders::views::Cursor,
+    phone::normalize_ng_phone,
 };
 
 const ROLES: [&str; 3] = ["user", "support", "owner"];
@@ -32,6 +41,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/users", get(list))
         .route("/admin/users/{id}", get(view))
+        .route("/admin/staff", get(staff_list).post(staff_add))
+        .route("/admin/staff/{id}/remove", post(staff_remove))
 }
 
 #[derive(Deserialize)]
@@ -274,4 +285,124 @@ async fn view(
         deleted: row.deleted,
         created_at: row.created_at,
     }))
+}
+
+// ------------------------------------------------------------ staff accounts
+
+#[derive(Serialize, sqlx::FromRow)]
+struct StaffRow {
+    id: Uuid,
+    display_name: String,
+    role: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+/// Owner only: everyone with a staff role.
+async fn staff_list(
+    State(state): State<AppState>,
+    Owner(owner): Owner,
+) -> Result<Json<views::Items<StaffRow>>, AppError> {
+    let items: Vec<StaffRow> = sqlx::query_as(
+        "SELECT id, display_name, role::text AS role, created_at FROM users \
+         WHERE role IN ('support', 'owner') AND deleted_at IS NULL \
+         ORDER BY created_at, id",
+    )
+    .fetch_all(&state.db)
+    .await
+    .context("list staff")?;
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    views::record_view(&mut conn, owner.id, "staff", items.len()).await?;
+    Ok(Json(views::Items { items }))
+}
+
+#[derive(Deserialize)]
+struct NewStaff {
+    phone: String,
+    name: String,
+    password: String,
+}
+
+/// Owner only: creates a verified Support account. The Owner chooses the first
+/// password and passes it on themself; the server never stores or logs it.
+async fn staff_add(
+    State(state): State<AppState>,
+    Owner(owner): Owner,
+    AppJson(body): AppJson<NewStaff>,
+) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), AppError> {
+    let phone = normalize_ng_phone(&body.phone)?;
+    let name = validate_display_name(&body.name)?;
+    validate_password(&body.password)?;
+    let password = body.password;
+    let hash = blocking(move || hash_password(&password)).await??;
+
+    let mut tx = state.db.begin().await.context("begin")?;
+    let id = insert_user(&mut tx, &state, &phone, &name, &hash).await?;
+    sqlx::query("UPDATE users SET role = 'support', phone_verified_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("make support")?;
+    audit::record(
+        &mut tx,
+        Some(owner.id),
+        "admin.staff_added",
+        "user",
+        Some(id),
+        serde_json::json!({ "role": "support" }),
+    )
+    .await?;
+    tx.commit().await.context("commit")?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(serde_json::json!({ "id": id })),
+    ))
+}
+
+/// Owner only: returns a staff member to an ordinary user and signs them out
+/// everywhere, in one transaction. An owner cannot remove themself.
+async fn staff_remove(
+    State(state): State<AppState>,
+    Owner(owner): Owner,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = parse_id(&id)?;
+    if id == owner.id {
+        return Err(AppError::Conflict("cannot_remove_self"));
+    }
+    let mut tx = state.db.begin().await.context("begin")?;
+    sqlx::query(LOCK_TIMEOUT)
+        .execute(&mut *tx)
+        .await
+        .context("set lock_timeout")?;
+    let role: String = sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(busy_err("user_busy", "lock user"))?
+        .ok_or(AppError::NotFound)?;
+    if role == "user" {
+        return Err(AppError::Conflict("not_staff"));
+    }
+    sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("demote")?;
+    sqlx::query("UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .context("revoke sessions")?;
+    audit::record(
+        &mut tx,
+        Some(owner.id),
+        "admin.staff_removed",
+        "user",
+        Some(id),
+        serde_json::json!({ "was": role }),
+    )
+    .await?;
+    tx.commit().await.context("commit")?;
+    Ok(Json(serde_json::json!({ "id": id, "role": "user" })))
 }

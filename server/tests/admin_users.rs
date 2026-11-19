@@ -164,3 +164,152 @@ async fn filters_by_role_and_ban_state(pool: PgPool) {
     let bad = get(&app, "/admin/users?role=king", &owner).await;
     assert_eq!(bad.status, 422);
 }
+
+// ------------------------------------------------------------ staff accounts
+
+async fn add_staff(app: &TestApp, token: &str, phone: &str) -> common::TestResponse {
+    app.request(
+        Method::POST,
+        "/admin/staff",
+        Some(serde_json::json!({
+            "phone": phone, "name": "Ada Support", "password": "a-long-enough-pass1"
+        })),
+        Some(token),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn owner_adds_support_who_can_then_sign_in(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let owner = app.make_owner().await;
+
+    let res = add_staff(&app, &owner, "08031112222").await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id = res.json["id"].as_str().unwrap().to_string();
+
+    let (role, verified): (String, bool) = sqlx::query_as(
+        "SELECT role::text, phone_verified_at IS NOT NULL FROM users WHERE id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((role.as_str(), verified), ("support", true));
+
+    let sign_in = app.sign_in("08031112222", "a-long-enough-pass1").await;
+    assert_eq!(sign_in.status, 200, "{}", sign_in.json);
+
+    let list = get(&app, "/admin/staff", &owner).await;
+    assert_eq!(list.status, 200);
+    assert!(ids(&list.json).contains(&id));
+
+    let (audited,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM audit_log WHERE action = 'admin.staff_added' AND subject_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+}
+
+#[sqlx::test]
+async fn adding_staff_needs_the_owner_and_a_free_phone(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.make_owner().await;
+    let support = app.make_support().await;
+    app.sign_up_verified("08031112222").await;
+
+    assert_eq!(add_staff(&app, &support, "08031113333").await.status, 403);
+    let dup = add_staff(&app, &owner, "08031112222").await;
+    assert_eq!(dup.status, 409, "{}", dup.json);
+    assert_eq!(dup.json["error"]["code"], "phone_taken");
+
+    let weak = app
+        .request(
+            Method::POST,
+            "/admin/staff",
+            Some(serde_json::json!({"phone": "08031113333", "name": "X", "password": "short"})),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(weak.status, 422);
+}
+
+#[sqlx::test]
+async fn removing_staff_revokes_their_sessions(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let owner = app.make_owner().await;
+    let id = add_staff(&app, &owner, "08031112222").await.json["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let token = app.sign_in("08031112222", "a-long-enough-pass1").await.json["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(get(&app, "/admin/disputes", &token).await.status, 200);
+
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/admin/staff/{id}/remove"),
+            None,
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert_eq!(get(&app, "/admin/disputes", &token).await.status, 401);
+
+    let (role,): (String,) = sqlx::query_as("SELECT role::text FROM users WHERE id = $1::uuid")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role, "user");
+
+    // Not staff any more.
+    let again = app
+        .request(
+            Method::POST,
+            &format!("/admin/staff/{id}/remove"),
+            None,
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(again.status, 409);
+    assert_eq!(again.json["error"]["code"], "not_staff");
+}
+
+#[sqlx::test]
+async fn owner_cannot_remove_themself_and_support_cannot_remove(pool: PgPool) {
+    let app = TestApp::new(pool.clone()).await;
+    let owner = app.make_owner().await;
+    let support = app.make_support().await;
+    let (owner_id,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM users WHERE role = 'owner'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let me = app
+        .request(
+            Method::POST,
+            &format!("/admin/staff/{owner_id}/remove"),
+            None,
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(me.status, 409);
+    assert_eq!(me.json["error"]["code"], "cannot_remove_self");
+
+    let by_support = app
+        .request(
+            Method::POST,
+            &format!("/admin/staff/{owner_id}/remove"),
+            None,
+            Some(&support),
+        )
+        .await;
+    assert_eq!(by_support.status, 403);
+}

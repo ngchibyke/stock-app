@@ -77,9 +77,9 @@ dashboard/          # NEW web app (Tasks 10–14)
 
 **Files:** `server/src/admin/users.rs`, migration `0036_staff_and_suspension.sql`, `server/tests/admin_users.rs`.
 
-- `POST /admin/staff` (Owner) creates a Support account from a phone and name and sets a one-time password the person must change at first sign-in (reuse the CLI's password hashing and the `create-owner` code path, extracted to a function both call).
-- `POST /admin/staff/{id}/remove` (Owner): sets the role back to `buyer`, revokes sessions in the same transaction, refuses `last_owner`.
-- [ ] **Step 1:** Failing tests: create, duplicate phone 409, Support cannot create (403), remove revokes sessions, last owner 409, self-removal 409.
+- `POST /admin/staff` (Owner) creates a Support account from a phone and name and sets the first password, which the Owner passes on. *(Built: the auth module has no change-password route, so a forced change at first sign-in is not built. Add one with that route.)* The route also gives `GET /admin/staff`, and reuses `insert_user`.
+- `POST /admin/staff/{id}/remove` (Owner): sets the role back to `buyer`, revokes sessions in the same transaction, refuses `cannot_remove_self` (409). *(Built: `last_owner` cannot happen, because the caller is always an owner, so removing another owner is allowed.)*
+- [ ] **Step 1:** Failing tests: create, duplicate phone 409, Support cannot create (403), remove revokes sessions, self-removal 409, already-removed 409 `not_staff`.
 - [ ] **Steps 2–5:** implement and commit `feat: let the owner add and remove support staff`.
 
 ### Task 3: Stores: search, view, suspend
