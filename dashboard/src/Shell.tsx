@@ -21,6 +21,10 @@ export interface NavItem {
 /** Screens add themselves here as they are built. */
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: "home", roles: ["owner", "support"], group: "Market" },
+  { to: "/codes", label: "Access codes", icon: "key", roles: ["owner"], group: "People" },
+  { to: "/users", label: "Users", icon: "users", roles: ["owner"], group: "People" },
+  { to: "/stores", label: "Stores", icon: "store", roles: ["owner"], group: "People" },
+  { to: "/settings", label: "Settings", icon: "settings", roles: ["owner"], group: "Configure" },
 ];
 
 function Link({ item, collapsed }: { item: NavItem; collapsed: boolean }) {

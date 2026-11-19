@@ -187,3 +187,29 @@ export function Toggle({ checked, onChange, label }: { checked: boolean; onChang
     </button>
   );
 }
+
+/** A pill-shaped filter: the highlight slides to the chosen option. */
+export function Segmented<T extends string>({
+  value,
+  onChange,
+  options,
+  id,
+  label,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string }[];
+  id: string;
+  label: string;
+}) {
+  return (
+    <div className="seg" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button key={o.value} type="button" className={o.value === value ? "on" : ""} aria-pressed={o.value === value} onClick={() => onChange(o.value)}>
+          {o.value === value && <motion.span layoutId={`seg-${id}`} className="seg-pill" transition={spring.snappy} />}
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}

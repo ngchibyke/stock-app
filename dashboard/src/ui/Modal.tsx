@@ -41,6 +41,8 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     document.addEventListener("keydown", onKey);
     // Focus the first field, else the panel.
     const t = setTimeout(() => {
+      // Never steal focus from a field the person has already started typing in.
+      if (panel.current?.contains(document.activeElement)) return;
       const field = panel.current?.querySelector<HTMLElement>("input, textarea, select");
       (field ?? panel.current)?.focus();
     }, 30);
