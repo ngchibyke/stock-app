@@ -27,3 +27,20 @@ pub const NEW_CONVERSATIONS_PER_DAY: i64 = 20;
 pub const MAX_DISPUTE_CHARS: usize = 2000;
 /// Most photos on one dispute statement.
 pub const MAX_DISPUTE_PHOTOS: usize = 5;
+
+// ---- Photo uploads (plan 7a) ----
+
+/// Largest raw upload, in bytes.
+pub const MAX_UPLOAD_BYTES: i64 = 5 * 1024 * 1024;
+/// Longest side of an uploaded photo, in pixels. (4096 x 4096 is under 17 million pixels.)
+pub const MAX_UPLOAD_EDGE: u32 = 4096;
+/// Longest side of a stored photo: bigger ones are scaled down.
+pub const OUTPUT_LONGEST_EDGE: u32 = 2048;
+/// JPEG quality of a stored photo.
+pub const OUTPUT_JPEG_QUALITY: u8 = 85;
+/// Upload slots one person may ask for per hour.
+pub const UPLOADS_PER_HOUR: i64 = 30;
+/// How long a signed upload URL lives, in seconds.
+pub const UPLOAD_URL_TTL_SECS: u64 = 600;
+/// A pending or failed upload older than this is deleted, with its object.
+pub const STALE_UPLOAD_HOURS: i32 = 24;

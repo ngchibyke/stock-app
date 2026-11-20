@@ -71,6 +71,9 @@
 //!     finished days, from 03:00 Lagos time, against the ledger -> a
 //!     `statement_checks` row, and `statement.mismatch` when they differ. Does
 //!     nothing without a statement source. See [`statement`](crate::statement).
+//! 15. `purge_uploads`: photo uploads still `pending` or `failed` after 24 hours
+//!     are deleted with their objects
+//!     -> [`uploads::jobs::run`](crate::uploads::jobs::run).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -126,6 +129,7 @@ use crate::{
     notify::reminders,
     settings,
     statement::job as statement_job,
+    uploads::jobs as upload_jobs,
 };
 
 /// How often the loop runs the jobs.
@@ -195,6 +199,7 @@ pub struct JobReport {
     pub disputes_advanced: u32,
     pub reminders_sent: u32,
     pub statements_checked: u32,
+    pub uploads_purged: u32,
     pub failed: u32,
 }
 
@@ -222,7 +227,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 14] = [
+    let jobs: [(&str, Job); 15] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -237,6 +242,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (dispute_jobs::DISPUTE_DEADLINES, Job::DisputeDeadlines),
         (reminders::CONFIRM_REMINDERS, Job::ConfirmReminders),
         (statement_job::STATEMENT_CHECK, Job::StatementCheck),
+        (upload_jobs::PURGE_UPLOADS, Job::PurgeUploads),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -266,6 +272,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::DisputeDeadlines => &mut report.disputes_advanced,
             Job::ConfirmReminders => &mut report.reminders_sent,
             Job::StatementCheck => &mut report.statements_checked,
+            Job::PurgeUploads => &mut report.uploads_purged,
         };
         *slot += stats.done;
     }
@@ -299,6 +306,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 disputes_advanced = r.disputes_advanced,
                 reminders_sent = r.reminders_sent,
                 statements_checked = r.statements_checked,
+                uploads_purged = r.uploads_purged,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -348,6 +356,7 @@ enum Job {
     DisputeDeadlines,
     ConfirmReminders,
     StatementCheck,
+    PurgeUploads,
 }
 
 impl Job {
@@ -367,6 +376,7 @@ impl Job {
             Job::DisputeDeadlines => dispute_jobs::run(state, cancel).await,
             Job::ConfirmReminders => reminders::run(state, cancel).await,
             Job::StatementCheck => statement_job::run(state, cancel).await,
+            Job::PurgeUploads => upload_jobs::run(state, cancel).await,
         }
     }
 }

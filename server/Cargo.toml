@@ -12,6 +12,8 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 dotenvy = "0.15"
 hmac = "0.12"
+# Decoding and re-encoding uploaded photos (plan 7a): JPEG, PNG and WebP only, so nothing else is compiled in.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jsonwebtoken = "9.3"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -44,6 +46,21 @@ socket2 = "0.6"
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]
+opt-level = 3
+# Photo decoding is heavy CPU work; unoptimized it can exceed the finalize time limit.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.moxcms]
 opt-level = 3
 
 [profile.release]
