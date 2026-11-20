@@ -113,6 +113,8 @@ pub fn build_app(state: AppState) -> Router {
         .merge(stores::routes::router())
         .merge(products::routes::router())
         .merge(catalog::categories::router())
+        .merge(catalog::browse::router())
+        .merge(catalog::stores::router())
         .merge(settings::routes::router())
         .merge(payout_accounts::routes::router())
         .merge(cart::routes::router())
