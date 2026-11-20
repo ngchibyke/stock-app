@@ -5,6 +5,9 @@
 //! 2026-10-31). Shapes the docs do not show (the FCT `state` values, the
 //! `status.changed` webhook body, error bodies) are marked "assumed".
 
+mod dead_port;
+
+use dead_port::DeadPort;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue};
@@ -418,10 +421,9 @@ async fn book_is_sent_once_and_timeout_is_timeout() {
 #[tokio::test]
 async fn book_connect_failure_is_unavailable() {
     // A port nothing listens on: connection refused, nothing was sent.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let c = ShipbubbleCourier::new(config(&format!("http://127.0.0.1:{port}"))).unwrap();
+    // Held, so no parallel test's mock server can be handed the port and answer.
+    let dead = DeadPort::new();
+    let c = ShipbubbleCourier::new(config(&format!("http://{}", dead.addr))).unwrap();
     let err = c.book("tok", "a", "b").await.unwrap_err();
     assert!(matches!(err, CourierError::Unavailable), "{err:?}");
 }

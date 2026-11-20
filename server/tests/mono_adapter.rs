@@ -4,6 +4,9 @@
 //! (docs.mono.co, checked 2026-10-25). Shapes Mono does not document are
 //! marked "unconfirmed" in `src/payments/mono.rs` and in the fixtures here.
 
+mod dead_port;
+
+use dead_port::DeadPort;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue};
@@ -523,9 +526,9 @@ async fn rejected_message_never_carries_account_numbers() {
 #[tokio::test]
 async fn connect_failure_is_unavailable() {
     // A port nothing listens on: the request is never sent.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Held, so no parallel test's mock server can be handed the port and answer.
+    let dead = DeadPort::new();
+    let base = format!("http://{}", dead.addr);
     let mono = MonoProvider::new(config(&base)).unwrap();
     assert!(matches!(
         mono.verify_payment("CHK1ABCDEFGHIJKLMNOPQRST").await,

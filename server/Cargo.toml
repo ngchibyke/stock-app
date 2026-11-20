@@ -37,6 +37,8 @@ tracing-test = { version = "0.2", features = ["no-env-filter"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-tungstenite = "0.29"
 wiremock = "0.6"
+# A bound port that refuses connections (tests/dead_port); already in the lockfile via tokio.
+socket2 = "0.6"
 
 # Argon2 is deliberately slow; keep it fast enough in debug test builds.
 [profile.dev.package.argon2]
