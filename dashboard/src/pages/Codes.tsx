@@ -7,8 +7,10 @@ import { spring } from "../motion";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
 import { DataTable } from "../ui/Table";
-import { Card, CopyChip, EmptyState, ErrorNote, Skeleton, StatusBadge } from "../ui/kit";
+import { Card, CopyChip, EmptyState, ErrorNote, StatusBadge } from "../ui/kit";
 import { ConfirmDialog } from "../ui/Modal";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonTable } from "../ui/Skeleton";
 
 export interface AccessCode {
   id: string;
@@ -43,19 +45,19 @@ export function Codes() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Access codes</h1>
-          <p>Sellers need a code to open a store. Share it once; it is never shown again.</p>
-        </div>
-        <Button variant="primary" icon="plus" onClick={() => setCreating(true)}>
-          New code
-        </Button>
-      </div>
+      <PageHeader
+        title="Access codes"
+        subtitle="Sellers need a code to open a store. Share it once; it is never shown again."
+        actions={
+          <Button variant="primary" icon="plus" onClick={() => setCreating(true)}>
+            New code
+          </Button>
+        }
+      />
       <Card className="" >
-        {q.isPending && <Skeleton lines={4} />}
+        {q.isPending && <SkeletonTable rows={4} cols={6} label="Loading access codes" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
-        {q.data && q.data.length === 0 && <EmptyState icon="key" title="No codes yet" hint="Create one to invite a seller." />}
+        {q.data && q.data.length === 0 && <EmptyState icon="key" title="No codes yet" hint="Create one to invite a seller." action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>Create the first code</Button>} />}
         {q.data && q.data.length > 0 && (
           <DataTable
             label="Access codes"

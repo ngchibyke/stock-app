@@ -71,9 +71,24 @@ export const glyphs = {
   info: { behaviour: "pop", paths: ["M12 11v5.5", "M12 7.6v.1"], extra: <circle cx="12" cy="12" r="8.5" /> },
   warn: { behaviour: "wiggle", paths: ["M12 4 2.8 19.5h18.4z", "M12 10v4.5", "M12 17.2v.1"] },
   undo: { behaviour: "turn", paths: ["M9 8H15a5 5 0 0 1 0 10H8", "M12 4.5 8.5 8 12 11.5"] },
+  more: { behaviour: "pop", paths: [], extra: <><circle cx="5.5" cy="12" r="1.5" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" /><circle cx="18.5" cy="12" r="1.5" fill="currentColor" stroke="none" /></> },
+  arrow: { behaviour: "slide", paths: ["M5 12h14", "m13 6 6 6-6 6"] },
+  external: { behaviour: "tilt", paths: ["M14 4h6v6", "M20 4 10.5 13.5", "M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"] },
+  filter: { behaviour: "pulse", paths: ["M4 5h16l-6 7.5V19l-4 1.5v-8z"] },
+  trash: { behaviour: "wiggle", paths: ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13", "M10 11v6M14 11v6"] },
+  edit: { behaviour: "tilt", paths: ["M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z", "m13.5 6.5 4 4"] },
+  lock: { behaviour: "bounce", paths: ["M6 11h12v9H6z", "M8.5 11V8a3.5 3.5 0 0 1 7 0v3"], extra: <circle cx="12" cy="15.5" r="1.1" fill="currentColor" stroke="none" /> },
+  inbox: { behaviour: "bounce", paths: ["M4 13 6.5 5h11L20 13", "M4 13v6h16v-6h-5l-1.5 2.5h-3L9 13z"] },
+  command: { behaviour: "pulse", paths: ["M9 9h6v6H9z", "M9 9V6.5A2.5 2.5 0 1 0 6.5 9H9", "M15 9V6.5A2.5 2.5 0 1 1 17.5 9H15", "M9 15v2.5A2.5 2.5 0 1 1 6.5 15H9", "M15 15v2.5a2.5 2.5 0 1 0 2.5-2.5H15"] },
+  sparkle: { behaviour: "pop", paths: ["m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z", "M19 17v4M17 19h4"] },
+  calendar: { behaviour: "bounce", paths: ["M4 6h16v14H4z", "M4 10h16", "M8 3v4M16 3v4"] },
+  bolt: { behaviour: "pulse", paths: ["M13 3 5 13.5h6L10 21l8-10.5h-6z"] },
+  download: { behaviour: "bounce", paths: ["M12 4v11", "m7 11 5 5 5-5", "M5 20h14"] },
 } satisfies Record<string, Glyph>;
 
 export type IconName = keyof typeof glyphs;
+/** Every icon, for the kit page. */
+export const Glyphs = glyphs;
 
 interface IconProps {
   name: IconName;

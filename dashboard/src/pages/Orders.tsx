@@ -11,7 +11,9 @@ import { Drawer } from "../ui/Drawer";
 import { Icon } from "../ui/Icon";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable, LoadMore } from "../ui/Table";
-import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, Skeleton, StatusBadge } from "../ui/kit";
+import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, StatusBadge } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 
 export interface OrderRow {
   order_id: string;
@@ -80,12 +82,7 @@ export function Orders() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Orders</h1>
-          <p>Every order, its money, and the ledger behind it.</p>
-        </div>
-      </div>
+      <PageHeader title="Orders" subtitle="Every order, its money, and the ledger behind it." />
       <div className="toolbar">
         <select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value as typeof status)} style={{ width: "auto" }}>
           {STATUSES.map((s) => (
@@ -102,9 +99,9 @@ export function Orders() {
         </label>
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={6} />}
+        {list.isPending && <SkeletonTable rows={8} cols={5} label="Loading orders" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." />}
+        {list.data && rows.length === 0 && ((status || from || to) ? <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." action={<Button icon="refresh" onClick={() => { setStatus(""); setFrom(""); setTo(""); }}>Clear filters</Button>} /> : <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." />)}
         {rows.length > 0 && (
           <DataTable
             label="Orders"
@@ -114,8 +111,8 @@ export function Orders() {
             columns={[
               { key: "id", header: "Order", cell: (o) => <span className="mono">{o.order_id.slice(0, 8)}</span> },
               { key: "status", header: "Status", cell: (o) => <span className="row"><StatusBadge status={o.status} />{o.held && <Badge tone="warn">held</Badge>}</span> },
-              { key: "items", header: "Items", cell: (o) => <Money kobo={o.items_total_kobo} /> },
-              { key: "del", header: "Delivery", cell: (o) => <Money kobo={o.delivery_fee_kobo} /> },
+              { key: "items", header: "Items", className: "num", cell: (o) => <Money kobo={o.items_total_kobo} /> },
+              { key: "del", header: "Delivery", className: "num", cell: (o) => <Money kobo={o.delivery_fee_kobo} /> },
               { key: "created", header: "Placed", cell: (o) => dateTime(o.created_at) },
             ]}
           />
@@ -171,7 +168,7 @@ function OrderDrawer({ id, onClose }: { id: string | null; onClose: () => void }
   return (
     <>
       <Drawer open={id !== null} title={o ? `Order ${o.order_id.slice(0, 8)}` : "Order"} onClose={onClose}>
-        {q.isPending && <Skeleton lines={8} />}
+        {q.isPending && <SkeletonDetail rows={8} label="Loading the order" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {d && o && (
           <>

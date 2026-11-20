@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { type ComponentProps, type ReactNode } from "react";
 import { spring } from "../motion";
 import { Icon, type IconName } from "./Icon";
+import { Tooltip } from "./Tooltip";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
 
@@ -67,7 +68,7 @@ export function Button({
   );
 }
 
-/** A round icon-only button with a tooltip and a ripple of its own. */
+/** A round icon-only button with a tooltip and a bounce of its own. */
 export function IconButton({
   icon,
   label,
@@ -82,20 +83,21 @@ export function IconButton({
   disabled?: boolean;
 }) {
   return (
-    <motion.button
-      type="button"
-      className={`icon-btn btn-${variant}`}
-      aria-label={label}
-      data-tip={label}
-      onClick={onClick}
-      disabled={disabled}
-      initial="rest"
-      whileHover="hover"
-      whileTap="tap"
-      variants={{ rest: { scale: 1 }, hover: { scale: 1.1 }, tap: { scale: 0.9 } }}
-      transition={spring.bouncy}
-    >
-      <Icon name={icon} size={18} interactive={false} />
-    </motion.button>
+    <Tooltip label={label}>
+      <motion.button
+        type="button"
+        className={`icon-btn btn-${variant}`}
+        aria-label={label}
+        onClick={onClick}
+        disabled={disabled}
+        initial="rest"
+        whileHover="hover"
+        whileTap="tap"
+        variants={{ rest: { scale: 1 }, hover: { scale: 1.1 }, tap: { scale: 0.9 } }}
+        transition={spring.bouncy}
+      >
+        <Icon name={icon} size={18} interactive={false} />
+      </motion.button>
+    </Tooltip>
   );
 }

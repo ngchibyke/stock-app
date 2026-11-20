@@ -1,6 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { ApiError, api, getToken, request, setToken, setUnauthorizedHandler } from "./api";
+import { SkeletonShell } from "./ui/Skeleton";
 
 export type Role = "owner" | "support" | "user";
 
@@ -107,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 export function RequireAuth() {
   const { user, loading, signedOut } = useAuth();
   const location = useLocation();
-  if (loading) return null;
+  if (loading) return <SkeletonShell />;
   // After a deliberate sign-out nothing is remembered, so the next person to sign in
   // (a different account, say) starts at the overview rather than the last person's page.
   if (!user) return <Navigate to="/login" replace state={signedOut ? undefined : { from: location.pathname }} />;

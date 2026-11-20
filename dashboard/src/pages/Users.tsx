@@ -6,7 +6,10 @@ import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
 import { ConfirmDialog, Modal } from "../ui/Modal";
 import { DataTable, LoadMore, SearchBox } from "../ui/Table";
-import { Badge, Card, EmptyState, ErrorNote, Segmented, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { Badge, Card, EmptyState, ErrorNote, Segmented, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
+import { Avatar } from "../ui/Controls";
 
 interface UserRow {
   id: string;
@@ -43,12 +46,7 @@ export function Users() {
   const [tab, setTab] = useState<"people" | "staff">("people");
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Users</h1>
-          <p>Find a person, see their standing, and act on their account.</p>
-        </div>
-      </div>
+      <PageHeader title="Users" subtitle="Find a person, see their standing, and act on their account." />
       <div style={{ marginTop: 14 }}>
         <Tabs id="users" value={tab} onChange={setTab} tabs={[{ value: "people", label: "People" }, { value: "staff", label: "Staff" }]} />
       </div>
@@ -80,9 +78,9 @@ function People() {
         <Segmented id="urole" label="Role" value={role} onChange={setRole} options={[{ value: "", label: "Any role" }, { value: "user", label: "People" }, { value: "support", label: "Support" }, { value: "owner", label: "Owner" }]} />
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={5} />}
+        {list.isPending && <SkeletonTable rows={6} cols={5} label="Loading users" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." />}
+        {list.data && rows.length === 0 && ((text || state || role) ? <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." action={<Button icon="refresh" onClick={() => { setText(""); setState(""); setRole(""); }}>Clear filters</Button>} /> : <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." />)}
         {rows.length > 0 && (
           <DataTable
             label="Users"
@@ -90,7 +88,7 @@ function People() {
             rowKey={(u) => u.id}
             onRowClick={(u) => setOpen(u.id)}
             columns={[
-              { key: "name", header: "Name", cell: (u) => <strong>{u.display_name}</strong> },
+              { key: "name", header: "Name", cell: (u) => <span className="row" style={{ flexWrap: "nowrap" }}><Avatar name={u.display_name} size={28} /><strong>{u.display_name}</strong></span> },
               { key: "role", header: "Role", cell: (u) => (u.role === "user" ? (u.is_seller ? <Badge tone="info">seller</Badge> : <span className="muted">shopper</span>) : <Badge tone="info">{u.role}</Badge>) },
               { key: "state", header: "State", cell: (u) => (u.deleted ? <StatusBadge status="deleted" /> : u.banned ? <StatusBadge status="banned" /> : u.muted ? <StatusBadge status="muted" /> : <StatusBadge status="active" />) },
               { key: "since", header: "Joined", cell: (u) => day(u.created_at) },
@@ -117,7 +115,7 @@ function UserDrawer({ id, onClose }: { id: string | null; onClose: () => void })
   return (
     <>
       <Drawer open={id !== null} title={u?.display_name ?? "User"} onClose={onClose}>
-        {detail.isPending && <Skeleton lines={5} />}
+        {detail.isPending && <SkeletonDetail rows={6} label="Loading the user" />}
         {detail.isError && <ErrorNote error={detail.error} />}
         {u && (
           <>
@@ -194,7 +192,7 @@ function Staff() {
         </Button>
       </div>
       <Card>
-        {q.isPending && <Skeleton lines={3} />}
+        {q.isPending && <SkeletonTable rows={2} cols={3} label="Loading staff" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {q.data && (
           <DataTable
@@ -202,7 +200,7 @@ function Staff() {
             rows={q.data.items}
             rowKey={(s) => s.id}
             columns={[
-              { key: "name", header: "Name", cell: (s) => <strong>{s.display_name}</strong> },
+              { key: "name", header: "Name", cell: (s) => <span className="row" style={{ flexWrap: "nowrap" }}><Avatar name={s.display_name} size={28} /><strong>{s.display_name}</strong></span> },
               { key: "role", header: "Role", cell: (s) => <Badge tone="info">{s.role}</Badge> },
               { key: "since", header: "Added", cell: (s) => day(s.created_at) },
               { key: "act", header: "", className: "actions", cell: (s) => <Button variant="ghost" icon="ban" onClick={() => setRemoving(s)}>Remove</Button> },

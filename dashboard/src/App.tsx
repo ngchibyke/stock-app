@@ -7,6 +7,7 @@ import { Audit } from "./pages/Audit";
 import { Codes } from "./pages/Codes";
 import { Disputes } from "./pages/Disputes";
 import { Home } from "./pages/Home";
+import { Kit } from "./pages/Kit";
 import { Moderation } from "./pages/Moderation";
 import { MoneyPage } from "./pages/Money";
 import { Orders } from "./pages/Orders";
@@ -27,6 +28,8 @@ export function App() {
             <Route element={<RequireAuth />}>
               <Route element={<Shell />}>
                 <Route index element={<Home />} />
+                {/* The kit page is for building the dashboard, so only the dev server has it. */}
+                {import.meta.env.DEV && <Route path="kit" element={<Kit />} />}
                 <Route path="disputes" element={<Disputes />} />
                 <Route path="moderation" element={<Moderation />} />
                 <Route element={<RequireOwner />}>
