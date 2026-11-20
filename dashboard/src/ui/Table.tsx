@@ -35,6 +35,7 @@ export function DataTable<T>({
                 {c.header}
               </th>
             ))}
+            {onRowClick && <th className="row-go" aria-hidden="true" />}
           </tr>
         </thead>
         <tbody>
@@ -46,7 +47,7 @@ export function DataTable<T>({
               transition={{ duration: duration.base, ease: ease.out, delay: Math.min(i * 0.025, 0.3) }}
               whileTap={onRowClick ? { scale: 0.995 } : undefined}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
-              style={onRowClick ? { cursor: "pointer" } : undefined}
+              className={onRowClick ? "clickable" : undefined}
               tabIndex={onRowClick ? 0 : undefined}
               onKeyDown={onRowClick ? (e) => (e.key === "Enter" ? onRowClick(row) : undefined) : undefined}
             >
@@ -55,6 +56,11 @@ export function DataTable<T>({
                   {c.cell(row)}
                 </td>
               ))}
+              {onRowClick && (
+                <td className="row-go" aria-hidden="true">
+                  <Icon name="arrow" size={16} interactive={false} />
+                </td>
+              )}
             </motion.tr>
           ))}
         </tbody>

@@ -3,16 +3,17 @@
 // route change.
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
 import { useMediaQuery } from "./hooks";
 import { NAV, type NavItem } from "./nav";
 import { pageVariants, spring } from "./motion";
-import { ThemeToggle } from "./theme";
+import { ThemeToggle, useTheme } from "./theme";
 import { Icon } from "./ui/Icon";
 import { IconButton } from "./ui/Button";
+import { type Command, CommandPalette } from "./ui/CommandPalette";
 
 function Link({ item, collapsed, badge }: { item: NavItem; collapsed: boolean; badge?: number }) {
   return (
@@ -50,6 +51,30 @@ export function Shell() {
   // Mid-size screens start with the slim rail so the page keeps its room.
   const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.("(max-width: 1100px)").matches);
   const owner = user?.role === "owner";
+  const navigate = useNavigate();
+  const [, toggleTheme] = useTheme();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  // Ctrl or ⌘ + K opens the command palette from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+  const commands = useMemo<Command[]>(() => {
+    if (!user) return [];
+    const go = NAV.filter((n) => n.roles.includes(user.role)).map<Command>((n) => ({ id: `go-${n.to}`, label: n.label, group: `Go to · ${n.group}`, icon: n.icon, run: () => navigate(n.to) }));
+    return [
+      ...go,
+      { id: "theme", label: "Switch light or dark theme", group: "Actions", icon: "sparkle", keywords: "appearance mode colour", run: toggleTheme },
+      { id: "signout", label: "Sign out", group: "Actions", icon: "logout", keywords: "log out leave", run: () => void signOut() },
+    ];
+  }, [user, navigate, toggleTheme, signOut]);
   // The sidebar's alert count: refreshed every minute and after every acknowledgement.
   const alerts = useQuery({
     queryKey: ["alerts", "open"],
@@ -88,6 +113,9 @@ export function Shell() {
             <Icon name="store" size={16} interactive={false} />
           </span>
           <strong className="topbar-title">Market</strong>
+          <span style={{ marginLeft: "auto" }}>
+            <IconButton icon="search" label="Search" onClick={() => setPaletteOpen(true)} />
+          </span>
           <span className="avatar" aria-hidden="true">
             {user.display_name.slice(0, 1).toUpperCase()}
           </span>
@@ -119,6 +147,15 @@ export function Shell() {
             </span>
           )}
         </div>
+        <button type="button" className="side-search" onClick={() => setPaletteOpen(true)} aria-label="Search screens and actions" title={slim ? "Search" : undefined}>
+          <Icon name="search" size={16} interactive={false} />
+          {!slim && (
+            <>
+              <span>Search</span>
+              <kbd className="kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
+            </>
+          )}
+        </button>
         <nav>
           {groups.map((g) => (
             <div key={g}>
@@ -161,6 +198,7 @@ export function Shell() {
           </motion.button>
         </div>
       </motion.aside>
+      <CommandPalette open={paletteOpen} onClose={closePalette} commands={commands} />
       <main className="main">
         {/* Enter-only on purpose: an exit animation (AnimatePresence mode="wait") recreated the page
             under the person's hands and threw away unsaved form state. */}

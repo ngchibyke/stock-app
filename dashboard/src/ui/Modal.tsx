@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { spring } from "../motion";
 import { Button } from "./Button";
 import { IconButton } from "./Button";
+import { useOverlay } from "./overlay";
 
 interface ModalProps {
   open: boolean;
@@ -10,48 +11,17 @@ interface ModalProps {
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  /** One line under the title saying what this dialog is for. */
+  description?: string;
+  size?: "sm" | "md" | "lg";
 }
 
-/** A dialog: blurred backdrop, a spring-in panel, Esc and backdrop click close it. */
-export function Modal({ open, title, onClose, children, footer }: ModalProps) {
+/** A dialog: blurred backdrop, a spring-in panel, Esc and backdrop click close it, focus stays inside. */
+export function Modal({ open, title, onClose, children, footer, description, size = "md" }: ModalProps) {
   const titleId = useId();
+  const descId = useId();
   const panel = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const previous = document.activeElement as HTMLElement | null;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-      if (e.key === "Tab" && panel.current) {
-        const items = panel.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        );
-        if (items.length === 0) return;
-        const first = items[0];
-        const last = items[items.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    // Focus the first field, else the panel.
-    const t = setTimeout(() => {
-      // Never steal focus from a field the person has already started typing in.
-      if (panel.current?.contains(document.activeElement)) return;
-      const field = panel.current?.querySelector<HTMLElement>("input, textarea, select");
-      (field ?? panel.current)?.focus();
-    }, 30);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("keydown", onKey);
-      previous?.focus?.();
-    };
-  }, [open, onClose]);
+  useOverlay(open, panel, onClose);
 
   return (
     <AnimatePresence>
@@ -66,10 +36,11 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         >
           <motion.div
             ref={panel}
-            className="modal"
+            className={`modal modal-${size}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
+            aria-describedby={description ? descId : undefined}
             tabIndex={-1}
             initial={{ opacity: 0, y: 24, scale: 0.94 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -77,7 +48,14 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
             transition={spring.snappy}
           >
             <header className="modal-head">
-              <h2 id={titleId}>{title}</h2>
+              <div>
+                <h2 id={titleId}>{title}</h2>
+                {description && (
+                  <p id={descId} className="muted" style={{ marginTop: 2 }}>
+                    {description}
+                  </p>
+                )}
+              </div>
               <IconButton icon="x" label="Close" onClick={onClose} />
             </header>
             <div className="modal-body">{children}</div>

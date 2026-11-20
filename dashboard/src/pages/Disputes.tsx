@@ -106,7 +106,7 @@ export function Disputes() {
             columns={[
               { key: "o", header: "Order", cell: (d) => <span className="mono">{d.order_id.slice(0, 8)}</span> },
               { key: "r", header: "Reason", cell: (d) => <strong style={{ textTransform: "capitalize" }}>{words(d.reason)}</strong> },
-              { key: "a", header: "Items", cell: (d) => <Money kobo={d.items_total_kobo} /> },
+              { key: "a", header: "Items", className: "num", cell: (d) => <Money kobo={d.items_total_kobo} /> },
               { key: "w", header: "Opened", cell: (d) => ago(d.opened_at) },
               { key: "c", header: tab === "awaiting_seller" ? "Seller has" : "Status", cell: (d) => (d.status === "awaiting_seller" ? <Countdown until={d.seller_respond_by} /> : <StatusBadge status={d.status} />) },
             ]}

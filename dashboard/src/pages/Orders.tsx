@@ -111,8 +111,8 @@ export function Orders() {
             columns={[
               { key: "id", header: "Order", cell: (o) => <span className="mono">{o.order_id.slice(0, 8)}</span> },
               { key: "status", header: "Status", cell: (o) => <span className="row"><StatusBadge status={o.status} />{o.held && <Badge tone="warn">held</Badge>}</span> },
-              { key: "items", header: "Items", cell: (o) => <Money kobo={o.items_total_kobo} /> },
-              { key: "del", header: "Delivery", cell: (o) => <Money kobo={o.delivery_fee_kobo} /> },
+              { key: "items", header: "Items", className: "num", cell: (o) => <Money kobo={o.items_total_kobo} /> },
+              { key: "del", header: "Delivery", className: "num", cell: (o) => <Money kobo={o.delivery_fee_kobo} /> },
               { key: "created", header: "Placed", cell: (o) => dateTime(o.created_at) },
             ]}
           />
