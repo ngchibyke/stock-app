@@ -89,9 +89,19 @@ async fn reset_changes_the_password_and_the_code_works_once(pool: PgPool) {
     let done = confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await;
     assert_eq!(done.status, 204, "body: {}", done.json);
     assert_eq!(app.sign_in(PHONE, NEW_PASSWORD).await.status, 200);
-    assert_err(&app.sign_in(PHONE, TEST_PASSWORD).await, 401, "invalid_credentials");
+    assert_err(
+        &app.sign_in(PHONE, TEST_PASSWORD).await,
+        401,
+        "invalid_credentials",
+    );
 
-    let again = confirm(&app, &res.json["verification_id"], &code, "another-new-pass-77").await;
+    let again = confirm(
+        &app,
+        &res.json["verification_id"],
+        &code,
+        "another-new-pass-77",
+    )
+    .await;
     assert_err(&again, 422, "code_invalid");
     assert_eq!(app.sign_in(PHONE, NEW_PASSWORD).await.status, 200);
 }
@@ -104,13 +114,23 @@ async fn reset_code_is_single_use_and_attempt_limited(pool: PgPool) {
     let code = app.last_code(PHONE);
 
     for _ in 0..5 {
-        let bad = confirm(&app, &res.json["verification_id"], wrong_code(&code), NEW_PASSWORD).await;
+        let bad = confirm(
+            &app,
+            &res.json["verification_id"],
+            wrong_code(&code),
+            NEW_PASSWORD,
+        )
+        .await;
         assert_err(&bad, 422, "code_invalid");
     }
     // The real code no longer works after five wrong guesses.
     let locked = confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await;
     assert_err(&locked, 422, "code_invalid");
-    assert_err(&app.sign_in(PHONE, NEW_PASSWORD).await, 401, "invalid_credentials");
+    assert_err(
+        &app.sign_in(PHONE, NEW_PASSWORD).await,
+        401,
+        "invalid_credentials",
+    );
 }
 
 #[sqlx::test]
@@ -129,7 +149,10 @@ async fn unknown_verification_id_and_expired_code_look_the_same(pool: PgPool) {
         .unwrap();
     let expired = confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await;
     assert_err(&expired, 422, "code_invalid");
-    assert_eq!(unknown.json["error"]["message"], expired.json["error"]["message"]);
+    assert_eq!(
+        unknown.json["error"]["message"],
+        expired.json["error"]["message"]
+    );
 }
 
 #[sqlx::test]
@@ -146,18 +169,34 @@ async fn reset_code_does_not_verify_a_phone_and_the_reverse(pool: PgPool) {
     let other = "08055550000";
     let signup = app.sign_up(other, TEST_PASSWORD).await;
     let signup_code = app.last_code(other);
-    let as_reset = confirm(&app, &signup.json["verification_id"], &signup_code, NEW_PASSWORD).await;
-    assert_err(&as_reset, 422, "code_invalid");
-    let verified: bool = sqlx::query_scalar(
-        "SELECT phone_verified_at IS NOT NULL FROM users WHERE id = $1",
+    let as_reset = confirm(
+        &app,
+        &signup.json["verification_id"],
+        &signup_code,
+        NEW_PASSWORD,
     )
-    .bind(signup.json["user_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    .await;
+    assert_err(&as_reset, 422, "code_invalid");
+    let verified: bool =
+        sqlx::query_scalar("SELECT phone_verified_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(
+                signup.json["user_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<uuid::Uuid>()
+                    .unwrap(),
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(!verified);
     // ...and its own code still verifies it.
-    assert_eq!(app.verify(&signup.json["verification_id"], &signup_code).await.status, 200);
+    assert_eq!(
+        app.verify(&signup.json["verification_id"], &signup_code)
+            .await
+            .status,
+        200
+    );
 }
 
 #[sqlx::test]
@@ -167,13 +206,18 @@ async fn reset_revokes_every_session(pool: PgPool) {
     let second = app.sign_in(PHONE, TEST_PASSWORD).await;
     let token_two = second.json["token"].as_str().unwrap().to_string();
     for t in [&token_one, &token_two] {
-        assert_eq!(app.request(Method::GET, "/me", None, Some(t)).await.status, 200);
+        assert_eq!(
+            app.request(Method::GET, "/me", None, Some(t)).await.status,
+            200
+        );
     }
 
     let res = request_reset(&app, PHONE).await;
     let code = app.last_code(PHONE);
     assert_eq!(
-        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await.status,
+        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD)
+            .await
+            .status,
         204
     );
     for t in [&token_one, &token_two] {
@@ -183,7 +227,11 @@ async fn reset_revokes_every_session(pool: PgPool) {
             "an old session must die"
         );
     }
-    assert_err(&app.sign_in(PHONE, TEST_PASSWORD).await, 401, "invalid_credentials");
+    assert_err(
+        &app.sign_in(PHONE, TEST_PASSWORD).await,
+        401,
+        "invalid_credentials",
+    );
     assert_eq!(app.sign_in(PHONE, NEW_PASSWORD).await.status, 200);
 }
 
@@ -192,14 +240,24 @@ async fn reset_clears_the_lockout(pool: PgPool) {
     let app = TestApp::new(pool).await;
     app.sign_up_verified(PHONE).await;
     for _ in 0..10 {
-        assert_err(&app.sign_in(PHONE, "wrong-password-1").await, 401, "invalid_credentials");
+        assert_err(
+            &app.sign_in(PHONE, "wrong-password-1").await,
+            401,
+            "invalid_credentials",
+        );
     }
-    assert_err(&app.sign_in(PHONE, TEST_PASSWORD).await, 429, "too_many_attempts");
+    assert_err(
+        &app.sign_in(PHONE, TEST_PASSWORD).await,
+        429,
+        "too_many_attempts",
+    );
 
     let res = request_reset(&app, PHONE).await;
     let code = app.last_code(PHONE);
     assert_eq!(
-        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await.status,
+        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD)
+            .await
+            .status,
         204
     );
     assert_eq!(app.sign_in(PHONE, NEW_PASSWORD).await.status, 200);
@@ -216,7 +274,11 @@ async fn deleted_account_cannot_reset(pool: PgPool) {
     let sent_before = app.otp.sent_count();
     let res = request_reset(&app, PHONE).await;
     assert_eq!(res.status, 202);
-    assert_eq!(app.otp.sent_count(), sent_before, "no code for a deleted account");
+    assert_eq!(
+        app.otp.sent_count(),
+        sent_before,
+        "no code for a deleted account"
+    );
 }
 
 #[sqlx::test]
@@ -256,7 +318,9 @@ async fn weak_new_password_is_refused_and_the_code_survives(pool: PgPool) {
     let weak = confirm(&app, &res.json["verification_id"], &code, "short").await;
     assert_err(&weak, 422, "validation_failed");
     assert_eq!(
-        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await.status,
+        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD)
+            .await
+            .status,
         204,
         "a refused password must not burn the code"
     );
@@ -275,7 +339,9 @@ async fn a_throttled_request_leaves_the_live_code_alone(pool: PgPool) {
     assert_eq!(second.status, 202);
     assert_eq!(app.otp.sent_count(), sent);
     assert_eq!(
-        confirm(&app, &first.json["verification_id"], &code, NEW_PASSWORD).await.status,
+        confirm(&app, &first.json["verification_id"], &code, NEW_PASSWORD)
+            .await
+            .status,
         204
     );
 }
@@ -287,7 +353,11 @@ async fn reset_is_rate_limited(pool: PgPool) {
     for _ in 0..10 {
         assert_eq!(request_reset(&app, "08099998888").await.status, 202);
     }
-    assert_err(&request_reset(&app, "08099998888").await, 429, "too_many_attempts");
+    assert_err(
+        &request_reset(&app, "08099998888").await,
+        429,
+        "too_many_attempts",
+    );
     // Another phone is unaffected.
     assert_eq!(request_reset(&app, "08077776666").await.status, 202);
 }
@@ -305,7 +375,9 @@ async fn reset_is_audited_without_phone_or_code(pool: PgPool) {
     let res = request_reset(&app, PHONE).await;
     let code = app.last_code(PHONE);
     assert_eq!(
-        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD).await.status,
+        confirm(&app, &res.json["verification_id"], &code, NEW_PASSWORD)
+            .await
+            .status,
         204
     );
 

@@ -143,13 +143,12 @@ async fn confirm_reset(
     let hash = blocking(move || hash_password(&password)).await??;
 
     // Every way a code can be bad (wrong, expired, locked, unknown, another purpose) reads alike.
-    let user_id = match verify_reset_otp(&state.db, req.verification_id.trim(), req.code.trim())
-        .await
-    {
-        Ok(id) => id,
-        Err(AppError::Unprocessable(..)) => return Err(code_invalid()),
-        Err(other) => return Err(other),
-    };
+    let user_id =
+        match verify_reset_otp(&state.db, req.verification_id.trim(), req.code.trim()).await {
+            Ok(id) => id,
+            Err(AppError::Unprocessable(..)) => return Err(code_invalid()),
+            Err(other) => return Err(other),
+        };
 
     let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
     let phone_idx: Option<Vec<u8>> = sqlx::query_scalar(
