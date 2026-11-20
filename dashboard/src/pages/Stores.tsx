@@ -6,7 +6,9 @@ import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable, LoadMore, SearchBox } from "../ui/Table";
-import { Card, CopyChip, EmptyState, ErrorNote, Segmented, Skeleton, StatusBadge } from "../ui/kit";
+import { Card, CopyChip, EmptyState, ErrorNote, Segmented, StatusBadge } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 
 interface StoreRow {
   id: string;
@@ -46,18 +48,13 @@ export function Stores() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Stores</h1>
-          <p>Open a store to see its standing, or suspend it.</p>
-        </div>
-      </div>
+      <PageHeader title="Stores" subtitle="Open a store to see its standing, or suspend it." />
       <div className="toolbar">
         <SearchBox value={text} onChange={setText} placeholder="Search a store name" />
         <Segmented id="sstatus" label="Status" value={status} onChange={setStatus} options={[{ value: "", label: "All" }, { value: "active", label: "Active" }, { value: "pending", label: "Pending" }, { value: "suspended", label: "Suspended" }]} />
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={5} />}
+        {list.isPending && <SkeletonTable rows={6} cols={4} label="Loading stores" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
         {list.data && rows.length === 0 && <EmptyState icon="store" title="No stores match" />}
         {rows.length > 0 && (
@@ -92,7 +89,7 @@ function StoreDrawer({ id, onClose }: { id: string | null; onClose: () => void }
   return (
     <>
       <Drawer open={id !== null} title={s?.name ?? "Store"} onClose={onClose}>
-        {detail.isPending && <Skeleton lines={5} />}
+        {detail.isPending && <SkeletonDetail rows={5} label="Loading the store" />}
         {detail.isError && <ErrorNote error={detail.error} />}
         {s && (
           <>

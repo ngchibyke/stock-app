@@ -11,7 +11,9 @@ import { Drawer } from "../ui/Drawer";
 import { Icon } from "../ui/Icon";
 import { Modal } from "../ui/Modal";
 import { DataTable } from "../ui/Table";
-import { Badge, Card, EmptyState, ErrorNote, Money, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { Badge, Card, EmptyState, ErrorNote, Money, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 
 interface QueueRow {
   id: string;
@@ -87,17 +89,12 @@ export function Disputes() {
   const rows = q.data?.items ?? [];
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Disputes</h1>
-          <p>Oldest first. Open one to see both sides, the order and the chat.</p>
-        </div>
-      </div>
+      <PageHeader title="Disputes" subtitle="Oldest first. Open one to see both sides, the order and the chat." />
       <div style={{ marginTop: 14 }}>
         <Tabs id="disputes" value={tab} onChange={setTab} tabs={TABS} />
       </div>
       <Card className="" >
-        {q.isPending && <Skeleton lines={5} />}
+        {q.isPending && <SkeletonTable rows={4} cols={5} label="Loading disputes" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {q.data && rows.length === 0 && <EmptyState icon="dispute" title="Nothing here" hint="No disputes in this state." />}
         {rows.length > 0 && (
@@ -159,7 +156,7 @@ function DisputeDrawer({ id, onClose }: { id: string | null; onClose: () => void
   return (
     <>
       <Drawer wide open={id !== null} title={d ? `Dispute · ${words(d.reason)}` : "Dispute"} onClose={onClose}>
-        {q.isPending && <Skeleton lines={8} />}
+        {q.isPending && <SkeletonDetail rows={8} label="Loading the dispute" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {s && d && (
           <>

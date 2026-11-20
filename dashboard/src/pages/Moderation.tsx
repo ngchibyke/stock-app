@@ -9,6 +9,8 @@ import { Drawer } from "../ui/Drawer";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable, LoadMore } from "../ui/Table";
 import { Badge, Card, CopyChip, EmptyState, ErrorNote, Segmented, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonTable } from "../ui/Skeleton";
 
 interface Flag {
   id: string;
@@ -40,12 +42,7 @@ export function Moderation() {
   const owner = user?.role === "owner";
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Moderation</h1>
-          <p>Messages the filters caught, people waiting on a ban decision, and reviews to hide.</p>
-        </div>
-      </div>
+      <PageHeader title="Moderation" subtitle="Messages the filters caught, people waiting on a ban decision, and reviews to hide." />
       <div style={{ marginTop: 14 }}>
         <Tabs id="mod" value={tab} onChange={setTab} tabs={[{ value: "flags", label: "Flagged messages" }, { value: "bans", label: "Ban review" }, { value: "reviews", label: "Reviews" }]} />
       </div>
@@ -74,7 +71,7 @@ function Flags({ owner }: { owner: boolean }) {
         <Segmented id="fsev" label="Severity" value={severity} onChange={setSeverity} options={[{ value: "", label: "Any" }, { value: "mild", label: "Mild" }, { value: "serious", label: "Serious" }, { value: "unreviewable", label: "Unreviewable" }]} />
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={5} />}
+        {list.isPending && <SkeletonTable rows={5} cols={6} label="Loading flags" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
         {list.data && rows.length === 0 && <EmptyState icon="flag" title="Nothing flagged" hint="No messages in this state." />}
         {rows.length > 0 && (
@@ -179,7 +176,7 @@ function BanReview({ owner }: { owner: boolean }) {
   const unmute = useAction({ run: (id: string) => api.post(`/admin/moderation/users/${id}/unmute`), success: "Unmuted.", invalidate: inv });
   return (
     <Card>
-      {q.isPending && <Skeleton lines={4} />}
+      {q.isPending && <SkeletonTable rows={3} cols={4} label="Loading the review queue" />}
       {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
       {q.data && q.data.items.length === 0 && <EmptyState icon="check" title="Nobody is waiting" hint="People who pass the strike threshold appear here for your decision." />}
       {q.data && q.data.items.length > 0 && (

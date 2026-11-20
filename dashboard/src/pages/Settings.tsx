@@ -5,7 +5,9 @@ import { ApiError, api, formatKobo } from "../api";
 import { useAction } from "../hooks";
 import { spring } from "../motion";
 import { Button } from "../ui/Button";
-import { Card, ErrorNote, Skeleton, Toggle } from "../ui/kit";
+import { Card, ErrorNote, Toggle } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonForm } from "../ui/Skeleton";
 
 export interface Settings {
   platform_cut_bps: number;
@@ -153,13 +155,8 @@ export function Settings() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Settings</h1>
-          <p>Changes apply to new orders. Existing orders keep the terms they were placed with.</p>
-        </div>
-      </div>
-      {q.isPending && <Card><Skeleton lines={6} /></Card>}
+      <PageHeader title="Settings" subtitle="Changes apply to new orders. Existing orders keep the terms they were placed with." />
+      {q.isPending && <Card><SkeletonForm fields={8} /></Card>}
       {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
       {stale && (
         <div className="error-note" role="alert" style={{ marginTop: 14 }}>

@@ -6,7 +6,9 @@ import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
 import { ConfirmDialog, Modal } from "../ui/Modal";
 import { DataTable, LoadMore, SearchBox } from "../ui/Table";
-import { Badge, Card, EmptyState, ErrorNote, Segmented, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { Badge, Card, EmptyState, ErrorNote, Segmented, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 
 interface UserRow {
   id: string;
@@ -43,12 +45,7 @@ export function Users() {
   const [tab, setTab] = useState<"people" | "staff">("people");
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Users</h1>
-          <p>Find a person, see their standing, and act on their account.</p>
-        </div>
-      </div>
+      <PageHeader title="Users" subtitle="Find a person, see their standing, and act on their account." />
       <div style={{ marginTop: 14 }}>
         <Tabs id="users" value={tab} onChange={setTab} tabs={[{ value: "people", label: "People" }, { value: "staff", label: "Staff" }]} />
       </div>
@@ -80,7 +77,7 @@ function People() {
         <Segmented id="urole" label="Role" value={role} onChange={setRole} options={[{ value: "", label: "Any role" }, { value: "user", label: "People" }, { value: "support", label: "Support" }, { value: "owner", label: "Owner" }]} />
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={5} />}
+        {list.isPending && <SkeletonTable rows={6} cols={5} label="Loading users" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
         {list.data && rows.length === 0 && <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." />}
         {rows.length > 0 && (
@@ -117,7 +114,7 @@ function UserDrawer({ id, onClose }: { id: string | null; onClose: () => void })
   return (
     <>
       <Drawer open={id !== null} title={u?.display_name ?? "User"} onClose={onClose}>
-        {detail.isPending && <Skeleton lines={5} />}
+        {detail.isPending && <SkeletonDetail rows={6} label="Loading the user" />}
         {detail.isError && <ErrorNote error={detail.error} />}
         {u && (
           <>
@@ -194,7 +191,7 @@ function Staff() {
         </Button>
       </div>
       <Card>
-        {q.isPending && <Skeleton lines={3} />}
+        {q.isPending && <SkeletonTable rows={2} cols={3} label="Loading staff" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {q.data && (
           <DataTable

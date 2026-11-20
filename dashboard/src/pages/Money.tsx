@@ -6,7 +6,9 @@ import { useAction } from "../hooks";
 import { Button } from "../ui/Button";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable } from "../ui/Table";
-import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonTable } from "../ui/Skeleton";
 
 interface Payout {
   id: string;
@@ -137,15 +139,15 @@ export function MoneyPage() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Money and reconciliation</h1>
-          <p>Everything the system cannot finish by itself, oldest first.</p>
-        </div>
-        <Button icon="refresh" onClick={() => void rec.refetch()} loading={rec.isFetching && !rec.isPending}>
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        title="Money and reconciliation"
+        subtitle="Everything the system cannot finish by itself, oldest first."
+        actions={
+          <Button icon="refresh" onClick={() => void rec.refetch()} loading={rec.isFetching && !rec.isPending}>
+            Refresh
+          </Button>
+        }
+      />
       <div style={{ marginTop: 14 }}>
         <Tabs
           id="money"
@@ -162,7 +164,7 @@ export function MoneyPage() {
         />
       </div>
       <div style={{ marginTop: 16 }}>
-        {rec.isPending && <Card><Skeleton lines={5} /></Card>}
+        {rec.isPending && <Card><SkeletonTable rows={5} cols={6} label="Loading reconciliation" /></Card>}
         {rec.isError && <ErrorNote error={rec.error} onRetry={() => void rec.refetch()} />}
         {d && tab === "payouts" && <Payouts rec={d} />}
         {d && tab === "refunds" && <Refunds rows={d.refunds} />}
@@ -484,7 +486,7 @@ function Statements() {
           Check now
         </Button>
       </div>
-      {q.isPending && <Skeleton lines={3} />}
+      {q.isPending && <SkeletonTable rows={3} cols={4} label="Loading statement checks" />}
       {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
       {q.data && q.data.items.length === 0 && <EmptyState icon="audit" title="No statement checks yet" hint="Checks run daily once a provider statement source is installed." />}
       {q.data && q.data.items.length > 0 && (

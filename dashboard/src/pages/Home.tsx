@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { useAuth } from "../auth";
-import { Card, Counter, ErrorNote, Item, Skeleton, Stagger } from "../ui/kit";
+import { Card, Counter, ErrorNote, Item, Stagger } from "../ui/kit";
+import { SkeletonStats } from "../ui/Skeleton";
 import { Icon, type IconName } from "../ui/Icon";
+import { PageHeader } from "../ui/PageHeader";
 
 interface Reconciliation {
   payouts: unknown[];
@@ -42,21 +44,11 @@ export function Home() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Good to see you, {user?.display_name.split(" ")[0]}</h1>
-          <p>{owner ? "Everything waiting on you, oldest first." : "Your desk: disputes and moderation."}</p>
-        </div>
-      </div>
-      {rec.isPending && (
-        <div className="grid">
-          {tiles.slice(0, 4).map((t) => (
-            <Card key={t.key}>
-              <Skeleton lines={2} />
-            </Card>
-          ))}
-        </div>
-      )}
+      <PageHeader
+        title={`Good to see you, ${user?.display_name.split(" ")[0]}`}
+        subtitle={owner ? "Everything waiting on you, oldest first." : "Your desk: disputes and moderation."}
+      />
+      {rec.isPending && <SkeletonStats count={8} label="Loading what is waiting on you" />}
       {rec.isError && <ErrorNote error={rec.error} onRetry={() => void rec.refetch()} />}
       {rec.data && (
         <>

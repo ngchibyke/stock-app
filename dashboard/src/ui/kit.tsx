@@ -68,15 +68,7 @@ export function Money({ kobo, signed = false }: { kobo: number | null | undefine
   return <span className={`money ${tone}`}>{formatKobo(kobo)}</span>;
 }
 
-export function Skeleton({ lines = 3 }: { lines?: number }) {
-  return (
-    <div className="skeleton" aria-hidden="true">
-      {Array.from({ length: lines }, (_, i) => (
-        <span key={i} className="skeleton-line" style={{ width: `${88 - i * 14}%` }} />
-      ))}
-    </div>
-  );
-}
+export { Skeleton } from "./Skeleton";
 
 export function EmptyState({ icon, title, hint }: { icon: IconName; title: string; hint?: string }) {
   return (

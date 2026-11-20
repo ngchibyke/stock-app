@@ -6,7 +6,9 @@ import { dateTime, words } from "../format";
 import { useDebounced } from "../hooks";
 import { Icon } from "../ui/Icon";
 import { LoadMore } from "../ui/Table";
-import { Card, CopyChip, EmptyState, ErrorNote, Skeleton } from "../ui/kit";
+import { Card, CopyChip, EmptyState, ErrorNote } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonTable } from "../ui/Skeleton";
 
 interface Row {
   id: number;
@@ -50,12 +52,7 @@ export function Audit() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Audit log</h1>
-          <p>Who did what, and when. Nobody can edit or delete these rows.</p>
-        </div>
-      </div>
+      <PageHeader title="Audit log" subtitle="Who did what, and when. Nobody can edit or delete these rows." />
       <div className="toolbar">
         <input style={{ maxWidth: 260 }} value={action} onChange={(e) => setAction(e.target.value)} placeholder="Exact action, e.g. admin.store_suspended" aria-label="Action" />
         <input style={{ maxWidth: 300 }} value={actor} onChange={(e) => setActor(e.target.value)} placeholder="Actor id (full)" aria-label="Actor id" />
@@ -63,7 +60,7 @@ export function Audit() {
         <label className="row muted">To <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={{ width: "auto" }} /></label>
       </div>
       <Card>
-        {list.isPending && <Skeleton lines={6} />}
+        {list.isPending && <SkeletonTable rows={8} cols={4} label="Loading the audit log" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
         {list.data && rows.length === 0 && <EmptyState icon="audit" title="No entries match" />}
         {rows.length > 0 && (
