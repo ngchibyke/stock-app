@@ -33,6 +33,9 @@ pub struct Config {
     /// Photo storage settings; `None` when none of the `S3_*` variables are set
     /// (production then refuses to serve; elsewhere uploads answer 503).
     pub s3: Option<S3Config>,
+    /// Which SMS provider sends sign-up and reset codes (`SMS_PROVIDER`); `None` when unset
+    /// (production then refuses to serve; elsewhere codes go to the log).
+    pub sms_provider: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -45,6 +48,7 @@ impl std::fmt::Debug for Config {
             .field("claude", &self.claude)
             .field("fcm", &self.fcm)
             .field("s3", &self.s3)
+            .field("sms_provider", &self.sms_provider)
             .finish_non_exhaustive()
     }
 }
@@ -368,6 +372,9 @@ impl Config {
             field_key,
             index_key,
             otp_dev_echo,
+            sms_provider: var("SMS_PROVIDER")
+                .map(|v| v.trim().to_lowercase())
+                .filter(|v| !v.is_empty()),
         })
     }
 }

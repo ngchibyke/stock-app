@@ -156,6 +156,15 @@ impl TestApp {
         }
     }
 
+    /// Like [`new`](Self::new) but sends sign-up and reset codes through `sender`
+    /// (for example an `SmsOtpSender` over a fake provider) instead of the recorder.
+    pub async fn with_otp_sender(pool: PgPool, sender: Arc<dyn OtpSender>) -> Self {
+        let mut app = Self::new(pool).await;
+        app.state.otp = sender;
+        app.router = build_app(app.state.clone());
+        app
+    }
+
     /// Installs [`statement`](Self::statement) as the app's statement source.
     pub fn use_statement(&mut self) {
         self.state.statements = Some(self.statement.clone());

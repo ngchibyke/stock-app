@@ -53,6 +53,9 @@ pub enum AppError {
     Unprocessable(&'static str, String),
     #[error("too many requests: {0}")]
     TooManyRequests(&'static str),
+    /// 429 `otp_throttled`: no code was sent; try again after this many seconds.
+    #[error("otp throttled")]
+    OtpThrottled { retry_after_secs: u64 },
     /// 502 `payment_provider_unavailable`: the payment provider failed or is not configured.
     #[error("payment provider unavailable")]
     ProviderUnavailable,
@@ -136,6 +139,14 @@ impl IntoResponse for AppError {
                 StatusCode::TOO_MANY_REQUESTS,
                 body(code, "Too many attempts, try again later"),
             ),
+            AppError::OtpThrottled { retry_after_secs } => {
+                let mut payload = body(
+                    "otp_throttled",
+                    "A code was sent recently. Wait a little before asking for another",
+                );
+                payload["error"]["retry_after_secs"] = json!(retry_after_secs);
+                (StatusCode::TOO_MANY_REQUESTS, payload)
+            }
             AppError::ProviderUnavailable => (
                 StatusCode::BAD_GATEWAY,
                 body(
