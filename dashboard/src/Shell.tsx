@@ -3,37 +3,18 @@
 // route change.
 import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api } from "./api";
-import { type Role, useAuth } from "./auth";
+import { useAuth } from "./auth";
+import { useMediaQuery } from "./hooks";
+import { NAV, type NavItem } from "./nav";
 import { pageVariants, spring } from "./motion";
-import { ThemeToggle } from "./theme";
-import { Icon, type IconName } from "./ui/Icon";
+import { ThemeToggle, useTheme } from "./theme";
+import { Icon } from "./ui/Icon";
 import { IconButton } from "./ui/Button";
-
-export interface NavItem {
-  to: string;
-  label: string;
-  icon: IconName;
-  roles: Role[];
-  group: string;
-}
-
-/** Screens add themselves here as they are built. */
-export const NAV: NavItem[] = [
-  { to: "/", label: "Overview", icon: "home", roles: ["owner", "support"], group: "Market" },
-  { to: "/disputes", label: "Disputes", icon: "dispute", roles: ["owner", "support"], group: "Resolve" },
-  { to: "/moderation", label: "Moderation", icon: "flag", roles: ["owner", "support"], group: "Resolve" },
-  { to: "/orders", label: "Orders", icon: "orders", roles: ["owner"], group: "Money" },
-  { to: "/money", label: "Reconciliation", icon: "money", roles: ["owner"], group: "Money" },
-  { to: "/alerts", label: "Alerts", icon: "alert", roles: ["owner"], group: "Money" },
-  { to: "/codes", label: "Access codes", icon: "key", roles: ["owner"], group: "People" },
-  { to: "/users", label: "Users", icon: "users", roles: ["owner"], group: "People" },
-  { to: "/stores", label: "Stores", icon: "store", roles: ["owner"], group: "People" },
-  { to: "/settings", label: "Settings", icon: "settings", roles: ["owner"], group: "Configure" },
-  { to: "/audit", label: "Audit log", icon: "audit", roles: ["owner"], group: "Configure" },
-];
+import { type Command, CommandPalette } from "./ui/CommandPalette";
+import { Avatar } from "./ui/Controls";
 
 function Link({ item, collapsed, badge }: { item: NavItem; collapsed: boolean; badge?: number }) {
   return (
@@ -65,8 +46,36 @@ function Link({ item, collapsed, badge }: { item: NavItem; collapsed: boolean; b
 export function Shell() {
   const { user, signOut } = useAuth();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
+  // Phones and small tablets get a top bar and a sidebar that slides over the page.
+  const mobile = useMediaQuery("(max-width: 900px)");
+  const [navOpen, setNavOpen] = useState(false);
+  // Mid-size screens start with the slim rail so the page keeps its room.
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.("(max-width: 1100px)").matches);
   const owner = user?.role === "owner";
+  const navigate = useNavigate();
+  const [, toggleTheme] = useTheme();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  // Ctrl or ⌘ + K opens the command palette from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+  const commands = useMemo<Command[]>(() => {
+    if (!user) return [];
+    const go = NAV.filter((n) => n.roles.includes(user.role)).map<Command>((n) => ({ id: `go-${n.to}`, label: n.label, group: `Go to · ${n.group}`, icon: n.icon, run: () => navigate(n.to) }));
+    return [
+      ...go,
+      { id: "theme", label: "Switch light or dark theme", group: "Actions", icon: "sparkle", keywords: "appearance mode colour", run: toggleTheme },
+      { id: "signout", label: "Sign out", group: "Actions", icon: "logout", keywords: "log out leave", run: () => void signOut() },
+    ];
+  }, [user, navigate, toggleTheme, signOut]);
   // The sidebar's alert count: refreshed every minute and after every acknowledgement.
   const alerts = useQuery({
     queryKey: ["alerts", "open"],
@@ -74,39 +83,98 @@ export function Shell() {
     enabled: owner,
     refetchInterval: 60_000,
   });
+
+  // Going to another screen, or leaving the phone layout, closes the sliding menu.
+  useEffect(() => setNavOpen(false), [location.pathname, mobile]);
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setNavOpen(false);
+    document.addEventListener("keydown", onKey);
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = overflow;
+    };
+  }, [navOpen]);
+
   if (!user) return null;
   const items = NAV.filter((n) => n.roles.includes(user.role));
   const groups = [...new Set(items.map((n) => n.group))];
+  // On a phone the menu is always the full one: there is no slim rail.
+  const slim = collapsed && !mobile;
+  const hidden = mobile && !navOpen;
 
   return (
     <div className="shell">
-      <motion.aside className="side" animate={{ width: collapsed ? 68 : 236 }} transition={spring.snappy} aria-label="Main">
+      {mobile && (
+        <header className="topbar">
+          <IconButton icon="menu" label="Open menu" onClick={() => setNavOpen(true)} />
+          <span className="brand-mark" aria-hidden="true">
+            <Icon name="store" size={16} interactive={false} />
+          </span>
+          <strong className="topbar-title">Market</strong>
+          <span style={{ marginLeft: "auto" }}>
+            <IconButton icon="search" label="Search" onClick={() => setPaletteOpen(true)} />
+          </span>
+          <Avatar name={user.display_name} />
+        </header>
+      )}
+      <AnimatePresence>
+        {mobile && navOpen && (
+          <motion.div className="scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={() => setNavOpen(false)} />
+        )}
+      </AnimatePresence>
+      <motion.aside
+        className={`side ${mobile ? "side-mobile" : ""}`}
+        initial={false}
+        animate={mobile ? { x: navOpen ? 0 : "-105%", width: 296 } : { x: 0, width: slim ? 68 : 236 }}
+        transition={spring.snappy}
+        aria-label="Main"
+        aria-hidden={hidden || undefined}
+        inert={hidden || undefined}
+        data-hidden={hidden || undefined}
+      >
         <div className="brand">
           <motion.span className="brand-mark" whileHover={{ rotate: 12, scale: 1.08 }} whileTap={{ scale: 0.9 }} transition={spring.bouncy}>
             <Icon name="store" size={18} interactive={false} />
           </motion.span>
-          {!collapsed && <span>Market</span>}
+          {!slim && <span>Market</span>}
+          {mobile && (
+            <span style={{ marginLeft: "auto" }}>
+              <IconButton icon="x" label="Close menu" onClick={() => setNavOpen(false)} />
+            </span>
+          )}
         </div>
+        <button type="button" className="side-search" onClick={() => setPaletteOpen(true)} aria-label="Search screens and actions" title={slim ? "Search" : undefined}>
+          <Icon name="search" size={16} interactive={false} />
+          {!slim && (
+            <>
+              <span>Search</span>
+              <kbd className="kbd">{/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"}</kbd>
+            </>
+          )}
+        </button>
         <nav>
           {groups.map((g) => (
             <div key={g}>
-              {!collapsed && <div className="nav-group">{g}</div>}
+              {!slim && <div className="nav-group">{g}</div>}
               {items
                 .filter((n) => n.group === g)
                 .map((n) => (
-                  <Link key={n.to} item={n} collapsed={collapsed} badge={n.to === "/alerts" ? alerts.data?.items.length : undefined} />
+                  <Link key={n.to} item={n} collapsed={slim} badge={n.to === "/alerts" ? alerts.data?.items.length : undefined} />
                 ))}
             </div>
           ))}
         </nav>
         <div className="side-foot">
-          <div className="row" style={{ justifyContent: collapsed ? "center" : "space-between" }}>
+          <div className="row" style={{ justifyContent: slim ? "center" : "space-between" }}>
             <ThemeToggle />
-            <IconButton icon="menu" label={collapsed ? "Expand menu" : "Collapse menu"} onClick={() => setCollapsed((c) => !c)} />
+            {!mobile && <IconButton icon="menu" label={slim ? "Expand menu" : "Collapse menu"} onClick={() => setCollapsed((c) => !c)} />}
           </div>
           <div className="me">
-            <span className="avatar">{user.display_name.slice(0, 1).toUpperCase()}</span>
-            {!collapsed && (
+            <Avatar name={user.display_name} />
+            {!slim && (
               <span style={{ minWidth: 0 }}>
                 <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{user.display_name}</strong>
                 <span className="muted" style={{ textTransform: "capitalize", fontSize: 12 }}>
@@ -125,10 +193,11 @@ export function Shell() {
             whileTap="tap"
           >
             <Icon name="logout" size={20} interactive={false} />
-            {!collapsed && <span>Sign out</span>}
+            {!slim && <span>Sign out</span>}
           </motion.button>
         </div>
       </motion.aside>
+      <CommandPalette open={paletteOpen} onClose={closePalette} commands={commands} />
       <main className="main">
         {/* Enter-only on purpose: an exit animation (AnimatePresence mode="wait") recreated the page
             under the person's hands and threw away unsaved form state. */}

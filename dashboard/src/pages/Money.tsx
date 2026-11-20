@@ -1,12 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, formatKobo } from "../api";
 import { dateTime, words } from "../format";
 import { useAction } from "../hooks";
-import { Button } from "../ui/Button";
+import { Button, IconButton } from "../ui/Button";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable } from "../ui/Table";
-import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, Skeleton, StatusBadge, Tabs } from "../ui/kit";
+import { Badge, Card, CopyChip, EmptyState, ErrorNote, Money, StatusBadge, Tabs } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonTable } from "../ui/Skeleton";
 
 interface Payout {
   id: string;
@@ -83,6 +86,7 @@ interface StatementCheck {
 }
 
 type Tab = "payouts" | "refunds" | "payments" | "shipments" | "orders" | "statements";
+const TABS: Tab[] = ["payouts", "refunds", "payments", "shipments", "orders", "statements"];
 
 /** A confirm dialog with the optional extras money overrides need. */
 function MoneyDialog(props: {
@@ -131,22 +135,26 @@ function MoneyDialog(props: {
 
 export function MoneyPage() {
   const rec = useQuery({ queryKey: ["reconciliation"], queryFn: () => api.get<Reconciliation>("/admin/reconciliation") });
-  const [tab, setTab] = useState<Tab>("payouts");
+  // The tab lives in the address (?tab=refunds), so the overview can link straight to it.
+  const [params, setParams] = useSearchParams();
+  const asked = params.get("tab");
+  const tab: Tab = TABS.includes(asked as Tab) ? (asked as Tab) : "payouts";
+  const setTab = (t: Tab) => setParams(t === "payouts" ? {} : { tab: t }, { replace: true });
   const d = rec.data;
   const count = (n: number | undefined) => n ?? 0;
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Money and reconciliation</h1>
-          <p>Everything the system cannot finish by itself, oldest first.</p>
-        </div>
-        <Button icon="refresh" onClick={() => void rec.refetch()} loading={rec.isFetching && !rec.isPending}>
-          Refresh
-        </Button>
-      </div>
-      <div style={{ marginTop: 14 }}>
+      <PageHeader
+        title="Money and reconciliation"
+        subtitle="Everything the system cannot finish by itself, oldest first."
+        actions={
+          <Button icon="refresh" onClick={() => void rec.refetch()} loading={rec.isFetching && !rec.isPending}>
+            Refresh
+          </Button>
+        }
+      />
+      <div>
         <Tabs
           id="money"
           value={tab}
@@ -161,8 +169,8 @@ export function MoneyPage() {
           ]}
         />
       </div>
-      <div style={{ marginTop: 16 }}>
-        {rec.isPending && <Card><Skeleton lines={5} /></Card>}
+      <div className="stack" style={{ marginTop: 16 }}>
+        {rec.isPending && <Card><SkeletonTable rows={5} cols={6} label="Loading reconciliation" /></Card>}
         {rec.isError && <ErrorNote error={rec.error} onRetry={() => void rec.refetch()} />}
         {d && tab === "payouts" && <Payouts rec={d} />}
         {d && tab === "refunds" && <Refunds rows={d.refunds} />}
@@ -201,7 +209,7 @@ function Payouts({ rec }: { rec: Reconciliation }) {
             columns={[
               { key: "o", header: "Order", cell: (p) => <span className="mono">{p.order_id.slice(0, 8)}</span> },
               { key: "s", header: "Status", cell: (p) => <span className="row"><StatusBadge status={p.status} />{p.reversed && <Badge tone="bad">reversed</Badge>}</span> },
-              { key: "a", header: "Amount", cell: (p) => <Money kobo={p.amount_kobo} /> },
+              { key: "a", header: "Amount", className: "num", cell: (p) => <Money kobo={p.amount_kobo} /> },
               { key: "b", header: "Account", cell: (p) => (p.account_last4 ? <span className="mono">••••{p.account_last4}</span> : "–") },
               { key: "e", header: "Last error", cell: (p) => <span className="muted">{p.last_error ? words(p.last_error) : "–"}</span> },
               {
@@ -210,7 +218,7 @@ function Payouts({ rec }: { rec: Reconciliation }) {
                 className: "actions",
                 cell: (p) => (
                   <span className="row" style={{ justifyContent: "flex-end" }}>
-                    <Button variant="ghost" icon="refresh" loading={repoll.busy} onClick={() => void repoll.run(p.id).catch(() => {})}>Ask provider</Button>
+                    <IconButton icon="refresh" label="Ask provider" disabled={repoll.busy} onClick={() => void repoll.run(p.id).catch(() => {})} />
                     <Button icon="undo" onClick={() => setAct({ kind: "requeue", row: p })}>Send again</Button>
                     <Button variant="primary" icon="check" onClick={() => setAct({ kind: "paid", row: p })}>Paid by hand</Button>
                   </span>
@@ -230,7 +238,7 @@ function Payouts({ rec }: { rec: Reconciliation }) {
             rowKey={(p) => p.id}
             columns={[
               { key: "o", header: "Order", cell: (p) => <span className="mono">{p.order_id.slice(0, 8)}</span> },
-              { key: "a", header: "Amount", cell: (p) => <Money kobo={p.amount_kobo} /> },
+              { key: "a", header: "Amount", className: "num", cell: (p) => <Money kobo={p.amount_kobo} /> },
               { key: "u", header: "Waiting since", cell: (p) => dateTime(p.updated_at) },
             ]}
           />
@@ -278,7 +286,7 @@ function Refunds({ rows }: { rows: Refund[] }) {
           columns={[
             { key: "o", header: "Order", cell: (x) => <span className="mono">{x.order_id.slice(0, 8)}</span> },
             { key: "s", header: "Status", cell: (x) => <StatusBadge status={x.status} /> },
-            { key: "a", header: "Amount", cell: (x) => <Money kobo={x.amount_kobo} /> },
+            { key: "a", header: "Amount", className: "num", cell: (x) => <Money kobo={x.amount_kobo} /> },
             { key: "n", header: "Tries", cell: (x) => x.attempts },
             { key: "e", header: "Last error", cell: (x) => <span className="muted">{x.last_error ? words(x.last_error) : "–"}</span> },
             { key: "x", header: "", className: "actions", cell: (x) => <Button variant="primary" icon="check" onClick={() => setRow(x)}>Refunded by hand</Button> },
@@ -313,7 +321,7 @@ function Payments({ rec }: { rec: Reconciliation }) {
       columns={[
         { key: "r", header: "Reference", cell: (c) => <CopyChip value={c.reference} /> },
         { key: "s", header: "Status", cell: (c) => <span className="row"><StatusBadge status={c.status} />{c.provider_flagged && <Badge tone="bad">flagged</Badge>}</span> },
-        { key: "t", header: "Total", cell: (c) => <Money kobo={c.total_kobo} /> },
+        { key: "t", header: "Total", className: "num", cell: (c) => <Money kobo={c.total_kobo} /> },
         { key: "p", header: "Paid", cell: (c) => dateTime(c.paid_at) },
         {
           key: "x",
@@ -484,7 +492,7 @@ function Statements() {
           Check now
         </Button>
       </div>
-      {q.isPending && <Skeleton lines={3} />}
+      {q.isPending && <SkeletonTable rows={3} cols={4} label="Loading statement checks" />}
       {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
       {q.data && q.data.items.length === 0 && <EmptyState icon="audit" title="No statement checks yet" hint="Checks run daily once a provider statement source is installed." />}
       {q.data && q.data.items.length > 0 && (

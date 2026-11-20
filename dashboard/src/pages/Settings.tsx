@@ -5,7 +5,10 @@ import { ApiError, api, formatKobo } from "../api";
 import { useAction } from "../hooks";
 import { spring } from "../motion";
 import { Button } from "../ui/Button";
-import { Card, ErrorNote, Skeleton, Toggle } from "../ui/kit";
+import { Card, ErrorNote, Toggle } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonForm } from "../ui/Skeleton";
+import { Banner } from "../ui/Controls";
 
 export interface Settings {
   platform_cut_bps: number;
@@ -153,25 +156,19 @@ export function Settings() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Settings</h1>
-          <p>Changes apply to new orders. Existing orders keep the terms they were placed with.</p>
-        </div>
-      </div>
-      {q.isPending && <Card><Skeleton lines={6} /></Card>}
+      <PageHeader title="Settings" subtitle="Changes apply to new orders. Existing orders keep the terms they were placed with." />
+      {q.isPending && <Card><SkeletonForm fields={8} /></Card>}
       {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
       {stale && (
-        <div className="error-note" role="alert" style={{ marginTop: 14 }}>
-          <span>Someone else changed the settings after you opened them. Reload to see their changes; yours are not saved.</span>
-          <button type="button" className="link" onClick={() => void reload()}>Reload</button>
-        </div>
+        <Banner tone="warn" action={<button type="button" className="link" onClick={() => void reload()}>Reload</button>}>
+          Someone else changed the settings after you opened them. Reload to see their changes; yours are not saved.
+        </Banner>
       )}
       {q.data && (
-        <>
-          <div className="muted" style={{ marginTop: 12 }}>
+        <div className="stack">
+          <Banner tone="info">
             Payment methods on: {q.data.enabled_methods.join(", ") || "none"} · Payouts via {q.data.payout_provider}
-          </div>
+          </Banner>
           {SECTIONS.map((s) => (
             <Card key={s.title} className="" >
               <h2>{s.title}</h2>
@@ -183,7 +180,7 @@ export function Settings() {
               </div>
             </Card>
           ))}
-        </>
+        </div>
       )}
       <AnimatePresence>
         {count + invalid.length > 0 && (

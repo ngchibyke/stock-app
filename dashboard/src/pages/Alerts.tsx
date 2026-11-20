@@ -8,7 +8,9 @@ import { spring } from "../motion";
 import { Button } from "../ui/Button";
 import { Icon, type IconName } from "../ui/Icon";
 import { ConfirmDialog } from "../ui/Modal";
-import { Badge, Card, EmptyState, ErrorNote, Segmented, Skeleton } from "../ui/kit";
+import { Badge, Card, EmptyState, ErrorNote, Segmented } from "../ui/kit";
+import { PageHeader } from "../ui/PageHeader";
+import { SkeletonCards } from "../ui/Skeleton";
 
 export interface Alert {
   alert_key: string;
@@ -66,19 +68,19 @@ export function Alerts() {
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Alerts</h1>
-          <p>Things the system noticed and cannot settle. They stay until you acknowledge them.</p>
-        </div>
-        <Segmented id="alerts" label="Show" value={state} onChange={setState} options={[{ value: "open", label: "Open" }, { value: "acked", label: "Acknowledged" }]} />
-      </div>
+      <PageHeader
+        title="Alerts"
+        subtitle="Things the system noticed and cannot settle. They stay until you acknowledge them."
+        actions={
+          <Segmented id="alerts" label="Show" value={state} onChange={setState} options={[{ value: "open", label: "Open" }, { value: "acked", label: "Acknowledged" }]} />
+        }
+      />
       <div style={{ marginTop: 16, display: "grid", gap: 12 }}>
-        {q.isPending && <Card><Skeleton lines={4} /></Card>}
+        {q.isPending && <SkeletonCards count={3} label="Loading alerts" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {q.data && items.length === 0 && (
           <Card>
-            <EmptyState icon="check" title={state === "open" ? "All clear" : "Nothing acknowledged yet"} hint={state === "open" ? "No open alerts." : undefined} />
+            <EmptyState icon="check" title={state === "open" ? "All clear" : "Nothing acknowledged yet"} hint={state === "open" ? "No open alerts." : undefined} action={state === "acked" ? <Button icon="alert" onClick={() => setState("open")}>Show open alerts</Button> : undefined} />
           </Card>
         )}
         <AnimatePresence initial={false} mode="popLayout">

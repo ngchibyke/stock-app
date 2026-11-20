@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { spring } from "./motion";
 import { Icon } from "./ui/Icon";
 
@@ -12,13 +12,27 @@ function initial(): Theme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+// One theme for the whole page, shared by every switch (the sidebar's, the
+// command palette's), so none of them can show a stale state.
+let current: Theme | null = null;
+const listeners = new Set<() => void>();
+const read = (): Theme => (current ??= initial());
+const subscribe = (fn: () => void) => {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+};
+function apply(theme: Theme) {
+  current = theme;
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem(KEY, theme);
+  listeners.forEach((fn) => fn());
+}
+
 export function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(initial);
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem(KEY, theme);
-  }, [theme]);
-  const toggle = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
+  const theme = useSyncExternalStore(subscribe, read, read);
+  // Applied on first use, so the page matches even before anyone toggles.
+  if (typeof document !== "undefined" && document.documentElement.dataset.theme !== theme) document.documentElement.dataset.theme = theme;
+  const toggle = useCallback(() => apply(read() === "dark" ? "light" : "dark"), []);
   return [theme, toggle];
 }
 

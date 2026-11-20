@@ -2,6 +2,9 @@
 
 use std::time::Duration;
 
+mod dead_port;
+
+use dead_port::DeadPort;
 use serde_json::{Value, json};
 use server::moderation::{
     claude::{ClaudeConfig, ClaudeTone, SYSTEM_PROMPT, Secret, verdict_schema},
@@ -181,10 +184,26 @@ async fn failures_are_unavailable() {
 
 #[tokio::test]
 async fn connection_failure_is_unavailable() {
-    let server = MockServer::start().await;
-    let checker = tone(&server);
-    drop(server);
+    // A port that refuses connections and that no other test in this process can take.
+    // (Closing a mock server and reusing its port is a race: a parallel test's server
+    // can be given that very port and answer.)
+    let dead = DeadPort::new();
+    let checker = ClaudeTone::new(tone_config(&format!("http://{}", dead.addr))).unwrap();
     assert_eq!(checker.check(TEXT).await, Err(ToneError::Unavailable));
+}
+
+#[test]
+fn a_dead_port_refuses_connections_and_stays_taken() {
+    let dead = DeadPort::new();
+    assert!(
+        std::net::TcpStream::connect_timeout(&dead.addr, Duration::from_millis(300)).is_err(),
+        "nothing should accept on a dead port"
+    );
+    // Nobody else can be handed it while the guard lives.
+    assert!(
+        std::net::TcpListener::bind(dead.addr).is_err(),
+        "the port must stay reserved"
+    );
 }
 
 #[tokio::test]

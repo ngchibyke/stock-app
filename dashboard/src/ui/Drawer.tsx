@@ -1,21 +1,21 @@
 import { AnimatePresence, motion } from "motion/react";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useRef } from "react";
 import { spring } from "../motion";
 import { IconButton } from "./Button";
+import { useOverlay } from "./overlay";
 
 /** A panel that springs in from the right. Esc and a click outside close it. */
 export function Drawer({ open, title, onClose, children, wide = false }: { open: boolean; title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  const panel = useRef<HTMLElement>(null);
+  useOverlay(open, panel, onClose, ".drawer-head button");
   return (
     <AnimatePresence>
       {open && (
         <motion.div className="drawer-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
           <motion.aside
+            ref={panel}
+            tabIndex={-1}
+            aria-modal="true"
             className={`drawer ${wide ? "wide" : ""}`}
             role="dialog"
             aria-label={title}
