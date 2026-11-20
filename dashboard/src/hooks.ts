@@ -2,6 +2,20 @@ import { type QueryKey, useMutation, useQueryClient } from "@tanstack/react-quer
 import { useEffect, useRef, useState } from "react";
 import { useToasts } from "./ui/Toasts";
 
+/** Whether a CSS media query matches now, and keeps following it. */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => (typeof window !== "undefined" && window.matchMedia ? window.matchMedia(query).matches : false));
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia(query);
+    const on = () => setMatches(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [query]);
+  return matches;
+}
+
 /** A value that follows `value` after `ms` of quiet (search boxes). */
 export function useDebounced<T>(value: T, ms = 250): T {
   const [v, setV] = useState(value);

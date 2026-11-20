@@ -97,7 +97,7 @@ a { color: var(--accent); text-decoration: none; }
 
 /* cards, badges */
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
-.badge { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font: 600 11.5px var(--font); text-transform: capitalize; }
+.badge { white-space: nowrap; display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 999px; font: 600 11.5px var(--font); text-transform: capitalize; }
 .badge-neutral { background: var(--surface-2); color: var(--muted); }
 .badge-good { background: var(--good-soft); color: var(--good); }
 .badge-warn { background: var(--warn-soft); color: var(--warn); }
@@ -293,3 +293,26 @@ textarea { resize: vertical; }
   .skel-row, .skel-stat, .skel-card, .skel-nav { animation: none; }
 }
 @keyframes bone-pulse { 50% { opacity: 0.55; } }
+
+/* phone and small tablet: a top bar, and the sidebar slides over the page */
+.topbar { display: none; }
+@media (max-width: 900px) {
+  .shell { display: block; }
+  .topbar { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: var(--z-sticky); height: 56px; padding: 0 12px; background: color-mix(in srgb, var(--surface) 90%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--line); }
+  .topbar-title { font-size: 16px; }
+  .topbar .avatar { margin-left: auto; }
+  .side-mobile { position: fixed; top: 0; bottom: 0; left: 0; height: auto; z-index: var(--z-nav); box-shadow: 0 0 60px rgba(0, 0, 0, 0.3); overflow-y: auto; }
+  .side-mobile[data-hidden] { box-shadow: none; visibility: hidden; transition: visibility 0s 0.4s; }
+  .scrim { position: fixed; inset: 0; z-index: calc(var(--z-nav) - 1); background: rgba(10, 12, 24, 0.5); backdrop-filter: blur(2px); }
+  .main { max-width: none; }
+  .page-actions { padding-top: 0; width: 100%; }
+  .page-head .btn { flex: 1 1 auto; }
+}
+@media (max-width: 600px) {
+  .modal-backdrop { place-items: end center; padding: 0; }
+  .modal { width: 100%; border-radius: 20px 20px 0 0; max-height: 92vh; }
+  .kv { grid-template-columns: 1fr; }
+  .toolbar { gap: 8px; }
+  .search { max-width: none; flex-basis: 100%; }
+  .savebar { flex-wrap: wrap; }
+}
