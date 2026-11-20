@@ -57,7 +57,7 @@ export function Codes() {
       <Card className="" >
         {q.isPending && <SkeletonTable rows={4} cols={6} label="Loading access codes" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
-        {q.data && q.data.length === 0 && <EmptyState icon="key" title="No codes yet" hint="Create one to invite a seller." />}
+        {q.data && q.data.length === 0 && <EmptyState icon="key" title="No codes yet" hint="Create one to invite a seller." action={<Button variant="primary" icon="plus" onClick={() => setCreating(true)}>Create the first code</Button>} />}
         {q.data && q.data.length > 0 && (
           <DataTable
             label="Access codes"

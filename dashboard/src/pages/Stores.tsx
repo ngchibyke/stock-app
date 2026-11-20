@@ -56,7 +56,7 @@ export function Stores() {
       <Card>
         {list.isPending && <SkeletonTable rows={6} cols={4} label="Loading stores" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="store" title="No stores match" />}
+        {list.data && rows.length === 0 && ((text || status) ? <EmptyState icon="store" title="No stores match" action={<Button icon="refresh" onClick={() => { setText(""); setStatus(""); }}>Clear filters</Button>} /> : <EmptyState icon="store" title="No stores match" />)}
         {rows.length > 0 && (
           <DataTable
             label="Stores"

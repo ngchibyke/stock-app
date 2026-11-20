@@ -80,7 +80,7 @@ function People() {
       <Card>
         {list.isPending && <SkeletonTable rows={6} cols={5} label="Loading users" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." />}
+        {list.data && rows.length === 0 && ((text || state || role) ? <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." action={<Button icon="refresh" onClick={() => { setText(""); setState(""); setRole(""); }}>Clear filters</Button>} /> : <EmptyState icon="users" title="Nobody matches" hint="Try a different name, number or filter." />)}
         {rows.length > 0 && (
           <DataTable
             label="Users"

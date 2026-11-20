@@ -73,7 +73,7 @@ function Flags({ owner }: { owner: boolean }) {
       <Card>
         {list.isPending && <SkeletonTable rows={5} cols={6} label="Loading flags" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="flag" title="Nothing flagged" hint="No messages in this state." />}
+        {list.data && rows.length === 0 && ((status !== "open" || severity) ? <EmptyState icon="flag" title="Nothing flagged" hint="No messages in this state." action={<Button icon="refresh" onClick={() => { setStatus("open"); setSeverity(""); }}>Show open flags</Button>} /> : <EmptyState icon="flag" title="Nothing flagged" hint="No messages in this state." />)}
         {rows.length > 0 && (
           <DataTable
             label="Flagged messages"

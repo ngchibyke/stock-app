@@ -80,7 +80,7 @@ export function Alerts() {
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
         {q.data && items.length === 0 && (
           <Card>
-            <EmptyState icon="check" title={state === "open" ? "All clear" : "Nothing acknowledged yet"} hint={state === "open" ? "No open alerts." : undefined} />
+            <EmptyState icon="check" title={state === "open" ? "All clear" : "Nothing acknowledged yet"} hint={state === "open" ? "No open alerts." : undefined} action={state === "acked" ? <Button icon="alert" onClick={() => setState("open")}>Show open alerts</Button> : undefined} />
           </Card>
         )}
         <AnimatePresence initial={false} mode="popLayout">

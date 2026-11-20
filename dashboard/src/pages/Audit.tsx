@@ -9,6 +9,7 @@ import { LoadMore } from "../ui/Table";
 import { Card, CopyChip, EmptyState, ErrorNote } from "../ui/kit";
 import { PageHeader } from "../ui/PageHeader";
 import { SkeletonTable } from "../ui/Skeleton";
+import { Button } from "../ui/Button";
 
 interface Row {
   id: number;
@@ -62,7 +63,7 @@ export function Audit() {
       <Card>
         {list.isPending && <SkeletonTable rows={8} cols={4} label="Loading the audit log" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="audit" title="No entries match" />}
+        {list.data && rows.length === 0 && ((action || actor || from || to) ? <EmptyState icon="audit" title="No entries match" action={<Button icon="refresh" onClick={() => { setAction(""); setActor(""); setFrom(""); setTo(""); }}>Clear filters</Button>} /> : <EmptyState icon="audit" title="No entries match" />)}
         {rows.length > 0 && (
           <div role="list" aria-label="Audit entries">
             {rows.map((r) => (

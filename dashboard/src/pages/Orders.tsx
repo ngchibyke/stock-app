@@ -101,7 +101,7 @@ export function Orders() {
       <Card>
         {list.isPending && <SkeletonTable rows={8} cols={5} label="Loading orders" />}
         {list.isError && <ErrorNote error={list.error} onRetry={() => void list.refetch()} />}
-        {list.data && rows.length === 0 && <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." />}
+        {list.data && rows.length === 0 && ((status || from || to) ? <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." action={<Button icon="refresh" onClick={() => { setStatus(""); setFrom(""); setTo(""); }}>Clear filters</Button>} /> : <EmptyState icon="orders" title="No orders match" hint="Change the status or the dates." />)}
         {rows.length > 0 && (
           <DataTable
             label="Orders"

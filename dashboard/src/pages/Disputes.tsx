@@ -63,7 +63,25 @@ const TABS: { value: Status; label: string }[] = [
 ];
 const SELLER_WINDOW_MS = 48 * 3600 * 1000;
 
-/** Time left for the seller, ticking each second, with a bar that drains. */
+const HOUR = 3_600_000;
+
+/** How worried to be about a dispute that has waited `ms` for a decision. */
+export function waitTone(ms: number): "calm" | "warn" | "bad" {
+  return ms >= 72 * HOUR ? "bad" : ms >= 24 * HOUR ? "warn" : "calm";
+}
+
+/** "5 hr ago" with a dot that goes amber after a day and red after three. */
+function Age({ iso }: { iso: string }) {
+  const tone = waitTone(Date.now() - Date.parse(iso));
+  return (
+    <span className={`age age-${tone}`}>
+      <span className="age-dot" aria-hidden="true" />
+      {ago(iso)}
+    </span>
+  );
+}
+
+/** Time left for the seller, with a bar that drains, amber under a day and red under six hours. */
 export function Countdown({ until, now = Date.now() }: { until: string; now?: number }) {
   const [t, setT] = useState(now);
   useEffect(() => {
@@ -74,8 +92,9 @@ export function Countdown({ until, now = Date.now() }: { until: string; now?: nu
   if (left <= 0) return <Badge tone="bad">deadline passed</Badge>;
   const h = Math.floor(left / 3_600_000);
   const m = Math.floor((left % 3_600_000) / 60_000);
+  const urgency = left <= 6 * HOUR ? "urgent" : left <= 24 * HOUR ? "soon" : "";
   return (
-    <span className="countdown" aria-label={`${h} hours ${m} minutes left`}>
+    <span className={`countdown ${urgency}`} aria-label={`${h} hours ${m} minutes left`}>
       <span className="mono">{h}h {String(m).padStart(2, "0")}m</span>
       <span className="progress"><motion.span animate={{ scaleX: Math.min(1, left / SELLER_WINDOW_MS) }} transition={spring.gentle} /></span>
     </span>
@@ -96,7 +115,7 @@ export function Disputes() {
       <Card className="" >
         {q.isPending && <SkeletonTable rows={4} cols={5} label="Loading disputes" />}
         {q.isError && <ErrorNote error={q.error} onRetry={() => void q.refetch()} />}
-        {q.data && rows.length === 0 && <EmptyState icon="dispute" title="Nothing here" hint="No disputes in this state." />}
+        {q.data && rows.length === 0 && ((tab !== "awaiting_decision") ? <EmptyState icon="dispute" title="Nothing here" hint="No disputes in this state." action={<Button icon="refresh" onClick={() => { setTab("awaiting_decision"); }}>Back to ready to decide</Button>} /> : <EmptyState icon="dispute" title="Nothing here" hint="No disputes in this state." />)}
         {rows.length > 0 && (
           <DataTable
             label="Disputes"
@@ -107,7 +126,7 @@ export function Disputes() {
               { key: "o", header: "Order", cell: (d) => <span className="mono">{d.order_id.slice(0, 8)}</span> },
               { key: "r", header: "Reason", cell: (d) => <strong style={{ textTransform: "capitalize" }}>{words(d.reason)}</strong> },
               { key: "a", header: "Items", className: "num", cell: (d) => <Money kobo={d.items_total_kobo} /> },
-              { key: "w", header: "Opened", cell: (d) => ago(d.opened_at) },
+              { key: "w", header: "Opened", cell: (d) => (d.status === "decided" || d.status === "withdrawn" ? ago(d.opened_at) : <Age iso={d.opened_at} />) },
               { key: "c", header: tab === "awaiting_seller" ? "Seller has" : "Status", cell: (d) => (d.status === "awaiting_seller" ? <Countdown until={d.seller_respond_by} /> : <StatusBadge status={d.status} />) },
             ]}
           />

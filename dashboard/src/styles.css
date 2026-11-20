@@ -410,3 +410,14 @@ textarea { resize: vertical; }
 .icon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 8px; width: 100%; }
 .icon-cell { display: grid; place-items: center; height: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
 .icon-cell:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+/* disputes: the seller's clock and how long a case has waited */
+.countdown.soon .progress > span { background: var(--warn); }
+.countdown.urgent .progress > span { background: var(--bad); }
+.countdown.urgent .mono { color: var(--bad); font-weight: 600; }
+.age { display: inline-flex; align-items: center; gap: 8px; }
+.age-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); flex: none; }
+.age-warn .age-dot { background: var(--warn); }
+.age-bad .age-dot { background: var(--bad); animation: age-pulse 1.8s ease-in-out infinite; }
+@keyframes age-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) 55%, transparent); } 50% { box-shadow: 0 0 0 5px transparent; } }
+@media (prefers-reduced-motion: reduce) { .age-bad .age-dot { animation: none; } }

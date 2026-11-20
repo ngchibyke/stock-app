@@ -70,7 +70,7 @@ export function Money({ kobo, signed = false }: { kobo: number | null | undefine
 
 export { Skeleton } from "./Skeleton";
 
-export function EmptyState({ icon, title, hint }: { icon: IconName; title: string; hint?: string }) {
+export function EmptyState({ icon, title, hint, action }: { icon: IconName; title: string; hint?: string; action?: ReactNode }) {
   return (
     <motion.div className="empty" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} transition={spring.gentle}>
       <motion.div className="empty-icon" animate={{ y: [0, -5, 0] }} transition={{ repeat: Infinity, duration: 3.2, ease: "easeInOut" }}>
@@ -78,6 +78,7 @@ export function EmptyState({ icon, title, hint }: { icon: IconName; title: strin
       </motion.div>
       <strong>{title}</strong>
       {hint && <span>{hint}</span>}
+      {action && <div style={{ marginTop: 10 }}>{action}</div>}
     </motion.div>
   );
 }
