@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{
     extractor::{AuthUser, bearer_token},
-    otp::{IssueReason, invalidate_otps, issue_otp, verify_otp},
+    otp::{IssueReason, Purpose, invalidate_otps, issue_otp, verify_otp},
     password::{blocking, dummy_verify, hash_password, validate_password, verify_password},
     sessions::{create_session, revoke_session},
 };
@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/verify-phone", post(verify_phone))
         .route("/auth/sign-in", post(sign_in))
         .route("/auth/sign-out", post(sign_out))
+        .merge(super::reset::router())
         .route("/me", get(me))
 }
 
@@ -139,7 +140,13 @@ async fn sign_up(
     // Credentials and the verification they are bound to change together.
     let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
     let user_id = insert_user(&mut tx, &state, &phone, &display_name, &hash).await?;
-    let issued = issue_otp(&mut tx, user_id, IssueReason::NewCredentials).await?;
+    let issued = issue_otp(
+        &mut tx,
+        user_id,
+        IssueReason::NewCredentials,
+        Purpose::VerifyPhone,
+    )
+    .await?;
     tx.commit().await.map_err(anyhow::Error::from)?;
     issued.deliver(state.otp.as_ref(), user_id, &phone).await?;
     Ok((
@@ -255,7 +262,7 @@ async fn sign_in(
         if current.as_deref() != Some(hash.as_str()) {
             return Err(AppError::InvalidCredentials);
         }
-        let issued = issue_otp(&mut tx, user_id, IssueReason::Resend).await?;
+        let issued = issue_otp(&mut tx, user_id, IssueReason::Resend, Purpose::VerifyPhone).await?;
         tx.commit().await.map_err(anyhow::Error::from)?;
         issued.deliver(state.otp.as_ref(), user_id, &phone).await?;
         return Err(AppError::PhoneUnverified(Redacted(issued.verification_id)));

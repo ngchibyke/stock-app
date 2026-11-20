@@ -33,6 +33,22 @@ impl OtpSender for LogOtpSender {
     }
 }
 
+/// What a code is for. A code for one purpose never verifies for another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    VerifyPhone,
+    PasswordReset,
+}
+
+impl Purpose {
+    fn as_str(self) -> &'static str {
+        match self {
+            Purpose::VerifyPhone => "verify_phone",
+            Purpose::PasswordReset => "password_reset",
+        }
+    }
+}
+
 /// Why a code is being issued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IssueReason {
@@ -113,6 +129,7 @@ pub async fn issue_otp(
     conn: &mut PgConnection,
     user_id: Uuid,
     reason: IssueReason,
+    purpose: Purpose,
 ) -> Result<Issued, AppError> {
     // Serialise issuance per user so concurrent calls cannot slip past the throttle.
     sqlx::query("SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE")
@@ -138,11 +155,13 @@ pub async fn issue_otp(
             "UPDATE otp_codes SET verification_hash = $2 WHERE id = ( \
                  SELECT id FROM otp_codes \
                  WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > now() \
+                   AND purpose = $3 \
                  ORDER BY created_at DESC LIMIT 1) \
              RETURNING id",
         )
         .bind(user_id)
         .bind(hash_verification_id(&verification_id))
+        .bind(purpose.as_str())
         .fetch_optional(&mut *conn)
         .await
         .map_err(anyhow::Error::from)?;
@@ -154,17 +173,26 @@ pub async fn issue_otp(
         }
     }
 
-    invalidate_otps(conn, user_id).await?;
+    sqlx::query(
+        "UPDATE otp_codes SET consumed_at = now() \
+         WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(purpose.as_str())
+    .execute(&mut *conn)
+    .await
+    .map_err(anyhow::Error::from)?;
     let code = format!("{:06}", OsRng.gen_range(0..1_000_000u32));
     sqlx::query(
-        "INSERT INTO otp_codes (user_id, code_hash, verification_hash, expires_at, sent_at) \
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4), CASE WHEN $5 THEN now() END)",
+        "INSERT INTO otp_codes (user_id, code_hash, verification_hash, expires_at, sent_at, purpose) \
+         VALUES ($1, $2, $3, now() + make_interval(mins => $4), CASE WHEN $5 THEN now() END, $6)",
     )
     .bind(user_id)
     .bind(hash_code(user_id, &code))
     .bind(hash_verification_id(&verification_id))
     .bind(OTP_MINUTES)
     .bind(sendable)
+    .bind(purpose.as_str())
     .execute(&mut *conn)
     .await
     .map_err(anyhow::Error::from)?;
@@ -189,11 +217,24 @@ fn locked() -> AppError {
 /// code is consumed, the phone is marked verified and the user's id is returned.
 /// Every guess counts toward the 5-attempt cap.
 pub async fn verify_otp(db: &PgPool, verification_id: &str, code: &str) -> Result<Uuid, AppError> {
+    verify_code(db, verification_id, code, Purpose::VerifyPhone).await
+}
+
+/// Like [`verify_otp`] for a given purpose. Only a `VerifyPhone` code marks the phone
+/// verified; any successful check consumes the code.
+pub async fn verify_code(
+    db: &PgPool,
+    verification_id: &str,
+    code: &str,
+    purpose: Purpose,
+) -> Result<Uuid, AppError> {
     let row: Option<(Uuid, Uuid, Vec<u8>, i32, bool)> = sqlx::query_as(
         "SELECT id, user_id, code_hash, attempts, expires_at < now() FROM otp_codes \
-         WHERE verification_hash = $1 AND consumed_at IS NULL AND sent_at IS NOT NULL",
+         WHERE verification_hash = $1 AND consumed_at IS NULL AND sent_at IS NOT NULL \
+           AND purpose = $2",
     )
     .bind(hash_verification_id(verification_id))
+    .bind(purpose.as_str())
     .fetch_optional(db)
     .await
     .map_err(anyhow::Error::from)?;
@@ -244,13 +285,15 @@ pub async fn verify_otp(db: &PgPool, verification_id: &str, code: &str) -> Resul
     if consumed == 0 {
         return Err(invalid());
     }
-    sqlx::query(
-        "UPDATE users SET phone_verified_at = COALESCE(phone_verified_at, now()) WHERE id = $1",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(anyhow::Error::from)?;
+    if purpose == Purpose::VerifyPhone {
+        sqlx::query(
+            "UPDATE users SET phone_verified_at = COALESCE(phone_verified_at, now()) WHERE id = $1",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(anyhow::Error::from)?;
+    }
     tx.commit().await.map_err(anyhow::Error::from)?;
     Ok(user_id)
 }

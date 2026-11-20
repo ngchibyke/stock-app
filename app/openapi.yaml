@@ -309,6 +309,48 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Token" } } } }
         default: { $ref: "#/components/responses/Error" }
+  /auth/password-reset:
+    post:
+      summary: Ask for a password-reset code. Always 202 with the same shape, whether or not the phone has an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verification_id: { type: string }
+                  resend_after_secs: { type: integer }
+        default: { $ref: "#/components/responses/Error" }
+  /auth/password-reset/confirm:
+    post:
+      summary: Set a new password with the code. Ends every session; one 422 code_invalid for a wrong or expired code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [verification_id, code, new_password]
+              properties:
+                verification_id: { type: string }
+                code: { type: string }
+                new_password: { type: string, minLength: 10, maxLength: 128 }
+      responses:
+        "204": { description: Password changed }
+        default: { $ref: "#/components/responses/Error" }
   /auth/sign-in:
     post:
       summary: Sign in. An unverified account answers 403 phone_unverified with a fresh verification_id

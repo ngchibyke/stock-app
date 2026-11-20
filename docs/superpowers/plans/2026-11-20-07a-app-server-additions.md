@@ -204,7 +204,9 @@
 - [ ] **Step 4: Run the whole suite.** Expected: PASS.
 - [ ] **Step 5: Commit.** `feat: check photo ownership and serve photos by URL`
 
-### Task 7: Password reset
+### Task 7: Password reset *(built)*
+
+> **As built:** the migration is `0041_otp_purpose.sql` (0041 was free). Two deviations: there is **no per-address limit** on the request route, because the server has no trusted client-address setting yet (the per-account OTP limits still cap SMS sent to any one phone); and a reset requested within a minute of a sign-up code gets no new code (the app reads `resend_after_secs`). All three wrong-code outcomes (wrong, expired, locked) answer the one `code_invalid`.
 
 **Files:**
 - Create: `server/migrations/0042_otp_purpose.sql`, `server/src/auth/reset.rs`, `server/tests/password_reset.rs`

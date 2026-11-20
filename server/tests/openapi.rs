@@ -22,6 +22,8 @@ const APP_ROUTES: &[(&str, &str)] = &[
     ("GET", "/config"),
     ("POST", "/auth/sign-up"),
     ("POST", "/auth/verify-phone"),
+    ("POST", "/auth/password-reset"),
+    ("POST", "/auth/password-reset/confirm"),
     ("POST", "/auth/sign-in"),
     ("POST", "/auth/sign-out"),
     ("GET", "/me"),
