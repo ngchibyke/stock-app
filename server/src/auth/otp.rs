@@ -174,6 +174,49 @@ pub async fn issue_otp(
     })
 }
 
+/// Issues a password-reset code. Unlike [`issue_otp`] it never supersedes a live code when
+/// throttled: spamming the route must not kill a code the account holder is about to use.
+/// When the throttle blocks a send, nothing is stored and the returned id matches nothing,
+/// so the caller's answer looks the same either way.
+pub async fn issue_reset_otp(conn: &mut PgConnection, user_id: Uuid) -> Result<Issued, AppError> {
+    sqlx::query("SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(user_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let (recent, hourly): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE sent_at > now() - make_interval(secs => $2)),                 count(*) FILTER (WHERE sent_at > now() - interval '1 hour')          FROM otp_codes WHERE user_id = $1 AND purpose = 'password_reset'",
+    )
+    .bind(user_id)
+    .bind(OTP_MIN_INTERVAL_SECS)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let verification_id = new_verification_id();
+    if recent > 0 || hourly >= OTP_MAX_PER_HOUR {
+        return Ok(Issued {
+            verification_id,
+            code_to_send: None,
+        });
+    }
+    invalidate_otps(conn, user_id).await?;
+    let code = format!("{:06}", OsRng.gen_range(0..1_000_000u32));
+    sqlx::query(
+        "INSERT INTO otp_codes (user_id, code_hash, verification_hash, expires_at, sent_at, purpose) \n         VALUES ($1, $2, $3, now() + make_interval(mins => $4), now(), 'password_reset')",
+    )
+    .bind(user_id)
+    .bind(hash_code(user_id, &code))
+    .bind(hash_verification_id(&verification_id))
+    .bind(OTP_MINUTES)
+    .execute(&mut *conn)
+    .await
+    .map_err(anyhow::Error::from)?;
+    Ok(Issued {
+        verification_id,
+        code_to_send: Some(code),
+    })
+}
+
 fn invalid() -> AppError {
     AppError::Unprocessable("otp_invalid", "That code is not correct".into())
 }
@@ -189,11 +232,31 @@ fn locked() -> AppError {
 /// code is consumed, the phone is marked verified and the user's id is returned.
 /// Every guess counts toward the 5-attempt cap.
 pub async fn verify_otp(db: &PgPool, verification_id: &str, code: &str) -> Result<Uuid, AppError> {
+    check_code(db, verification_id, code, "verify_phone").await
+}
+
+/// Checks a password-reset code the same way. The code is consumed, but nothing else
+/// changes: the caller sets the password. A code for another purpose never matches.
+pub async fn verify_reset_otp(
+    db: &PgPool,
+    verification_id: &str,
+    code: &str,
+) -> Result<Uuid, AppError> {
+    check_code(db, verification_id, code, "password_reset").await
+}
+
+async fn check_code(
+    db: &PgPool,
+    verification_id: &str,
+    code: &str,
+    purpose: &str,
+) -> Result<Uuid, AppError> {
     let row: Option<(Uuid, Uuid, Vec<u8>, i32, bool)> = sqlx::query_as(
         "SELECT id, user_id, code_hash, attempts, expires_at < now() FROM otp_codes \
-         WHERE verification_hash = $1 AND consumed_at IS NULL AND sent_at IS NOT NULL",
+         WHERE verification_hash = $1 AND consumed_at IS NULL AND sent_at IS NOT NULL \n           AND purpose = $2",
     )
     .bind(hash_verification_id(verification_id))
+    .bind(purpose)
     .fetch_optional(db)
     .await
     .map_err(anyhow::Error::from)?;
@@ -244,13 +307,15 @@ pub async fn verify_otp(db: &PgPool, verification_id: &str, code: &str) -> Resul
     if consumed == 0 {
         return Err(invalid());
     }
-    sqlx::query(
-        "UPDATE users SET phone_verified_at = COALESCE(phone_verified_at, now()) WHERE id = $1",
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(anyhow::Error::from)?;
+    if purpose == "verify_phone" {
+        sqlx::query(
+            "UPDATE users SET phone_verified_at = COALESCE(phone_verified_at, now()) WHERE id = $1",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(anyhow::Error::from)?;
+    }
     tx.commit().await.map_err(anyhow::Error::from)?;
     Ok(user_id)
 }
