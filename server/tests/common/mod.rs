@@ -97,6 +97,8 @@ pub struct TestApp {
     pub tone: Arc<server::moderation::fake::FakeTone>,
     /// The push double the state sends through.
     pub push: Arc<server::notify::fake::FakePush>,
+    /// The photo store the state uses.
+    pub objects: Arc<server::uploads::fake::FakeStore>,
     /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
     shipped_seq: std::sync::atomic::AtomicUsize,
 }
@@ -116,6 +118,7 @@ impl TestApp {
         let courier = Arc::new(server::couriers::fake::FakeCourier::new());
         let tone = Arc::new(server::moderation::fake::FakeTone::new());
         let push = Arc::new(server::notify::fake::FakePush::new());
+        let objects = Arc::new(server::uploads::fake::FakeStore::new());
         let statement = Arc::new(server::statement::fake::FakeStatement::new());
         let state = AppState {
             db: pool.clone(),
@@ -129,6 +132,7 @@ impl TestApp {
             courier: Some(courier.clone()),
             tone: tone.clone(),
             push: push.clone(),
+            objects: objects.clone(),
             chat_hub: Arc::new(server::chat::hub::ChatHub::with_timings(
                 server::chat::hub::SocketTimings {
                     ping: std::time::Duration::from_secs(30),
@@ -146,6 +150,7 @@ impl TestApp {
             courier,
             tone,
             push,
+            objects,
             statement,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }

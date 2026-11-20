@@ -28,6 +28,7 @@ pub mod reviews;
 pub mod settings;
 pub mod statement;
 pub mod stores;
+pub mod uploads;
 
 use axum::{Json, Router, extract::MatchedPath, http::Request, routing::get};
 use std::sync::Arc;
@@ -58,6 +59,8 @@ pub struct AppState {
     pub courier: Option<Arc<dyn couriers::CourierProvider>>,
     /// Tone check for chat and reviews. Production always has a real one.
     pub tone: Arc<dyn moderation::tone::ToneChecker>,
+    /// Photo storage. Production always has a real one.
+    pub objects: Arc<dyn uploads::store::ObjectStore>,
     /// Sends notices to devices. Production always has a real one.
     pub push: Arc<dyn notify::push::PushSender>,
     /// Live pushes to open sockets.

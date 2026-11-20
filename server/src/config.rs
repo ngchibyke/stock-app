@@ -5,6 +5,7 @@ use crate::couriers::shipbubble::{self, ShipbubbleConfig};
 use crate::moderation::claude::{self, ClaudeConfig};
 use crate::notify::fcm::FcmConfig;
 use crate::payments::mono::{self, AmountUnit, MonoConfig, Secret};
+use crate::uploads::s3::{self, S3Config};
 
 #[derive(Clone)]
 pub struct Config {
@@ -29,6 +30,9 @@ pub struct Config {
     /// FCM settings; `None` when `FCM_SERVICE_ACCOUNT_FILE` is unset
     /// (production then refuses to serve; elsewhere pushes are dropped).
     pub fcm: Option<FcmConfig>,
+    /// Photo storage settings; `None` when none of the `S3_*` variables are set
+    /// (production then refuses to serve; elsewhere uploads answer 503).
+    pub s3: Option<S3Config>,
 }
 
 impl std::fmt::Debug for Config {
@@ -40,6 +44,7 @@ impl std::fmt::Debug for Config {
             .field("shipbubble", &self.shipbubble)
             .field("claude", &self.claude)
             .field("fcm", &self.fcm)
+            .field("s3", &self.s3)
             .finish_non_exhaustive()
     }
 }
@@ -260,6 +265,61 @@ fn fcm_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FcmConfig>
     Ok(Some(cfg))
 }
 
+/// Object storage for photos. All seven variables are set together or none is.
+fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> {
+    const NAMES: [&str; 7] = [
+        "S3_ENDPOINT",
+        "S3_REGION",
+        "S3_BUCKET_PUBLIC",
+        "S3_BUCKET_PRIVATE",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+        "UPLOADS_PUBLIC_BASE_URL",
+    ];
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let values: Vec<Option<String>> = NAMES.iter().map(|n| get(n)).collect();
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if let Some((name, _)) = NAMES.iter().zip(&values).find(|(_, v)| v.is_none()) {
+        bail!(
+            "{name} is required when photo storage is configured (all of the S3_* variables and UPLOADS_PUBLIC_BASE_URL go together)"
+        );
+    }
+    let [endpoint, region, public, private, key_id, secret, base]: [String; 7] = values
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("photo storage settings are incomplete"))?;
+    for (name, url) in [
+        ("S3_ENDPOINT", &endpoint),
+        ("UPLOADS_PUBLIC_BASE_URL", &base),
+    ] {
+        if !url.starts_with("https://") || url.contains(char::is_whitespace) {
+            bail!("{name} must be an https URL");
+        }
+    }
+    let path_style = !matches!(get("S3_PATH_STYLE").as_deref(), Some("false" | "0"));
+    Ok(Some(S3Config {
+        endpoint,
+        region,
+        bucket_public: public,
+        bucket_private: private,
+        access_key_id: key_id,
+        secret_access_key: Secret::new(&secret),
+        public_base_url: base,
+        path_style,
+        connect_timeout: s3::CONNECT_TIMEOUT,
+        timeout: s3::REQUEST_TIMEOUT,
+        insecure_http_for_tests: false,
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -294,12 +354,14 @@ impl Config {
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
         let claude = claude_config(&var)?;
         let fcm = fcm_config(&var)?;
+        let s3 = s3_config(&var)?;
         Ok(Self {
             public_redirect_url,
             mono,
             shipbubble,
             claude,
             fcm,
+            s3,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,
@@ -361,6 +423,59 @@ mod tests {
         });
         std::fs::write(&file, body.to_string()).unwrap();
         file.to_str().unwrap().to_string()
+    }
+
+    const S3_VARS: [(&str, &str); 7] = [
+        ("S3_ENDPOINT", "https://s3.example.test"),
+        ("S3_REGION", "af-south-1"),
+        ("S3_BUCKET_PUBLIC", "market-public"),
+        ("S3_BUCKET_PRIVATE", "market-private"),
+        ("S3_ACCESS_KEY_ID", "AKEXAMPLE"),
+        ("S3_SECRET_ACCESS_KEY", "never-logged-secret"),
+        ("UPLOADS_PUBLIC_BASE_URL", "https://cdn.example.test"),
+    ];
+
+    #[test]
+    fn photo_storage_is_optional_and_all_or_nothing() {
+        assert!(load(&[]).unwrap().s3.is_none());
+        let cfg = load(&S3_VARS).unwrap().s3.unwrap();
+        assert_eq!(cfg.bucket_private, "market-private");
+        assert!(cfg.path_style, "path style is the default");
+        assert!(!cfg.insecure_http_for_tests);
+        // Leaving any one out names it.
+        for (skip, (name, _)) in S3_VARS.iter().enumerate() {
+            let partial: Vec<(&str, &str)> = S3_VARS
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, p)| *p)
+                .collect();
+            let err = load(&partial).unwrap_err();
+            assert!(err.to_string().contains(name), "{err}");
+        }
+        let virtual_host = [&S3_VARS[..], &[("S3_PATH_STYLE", "false")]].concat();
+        assert!(!load(&virtual_host).unwrap().s3.unwrap().path_style);
+    }
+
+    #[test]
+    fn photo_storage_urls_must_be_https() {
+        for (name, bad) in [
+            ("S3_ENDPOINT", "http://s3.example.test"),
+            ("UPLOADS_PUBLIC_BASE_URL", "http://cdn.example.test"),
+        ] {
+            let vars: Vec<(&str, &str)> = S3_VARS
+                .iter()
+                .map(|(k, v)| if *k == name { (*k, bad) } else { (*k, *v) })
+                .collect();
+            let err = load(&vars).unwrap_err();
+            assert!(err.to_string().contains(name), "{err}");
+        }
+    }
+
+    #[test]
+    fn photo_storage_secret_is_not_in_debug() {
+        let cfg = load(&S3_VARS).unwrap();
+        assert!(!format!("{cfg:?}").contains("never-logged-secret"));
     }
 
     #[test]
