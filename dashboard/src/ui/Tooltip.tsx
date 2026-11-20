@@ -3,6 +3,15 @@ import { type ReactElement, type ReactNode, cloneElement, useCallback, useEffect
 import { createPortal } from "react-dom";
 import { place, useMeasured } from "./overlay";
 
+/** True when focus arrived the way a keyboard user would cause it (jsdom cannot tell, so it says yes). */
+function keyboardFocus(el: EventTarget): boolean {
+  try {
+    return (el as Element).matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
 /**
  * A small label for an icon or a clipped value. It opens after a short pause on
  * hover (so moving across a toolbar does not flash every tip) and at once on
@@ -48,7 +57,7 @@ export function Tooltip({ label, children, delay = 350, side = "top" }: { label:
   const at = rect && size.width ? place(rect, size, "center", side, 8) : null;
   return (
     <>
-      <span ref={anchor} className="tip-anchor" onMouseEnter={() => show(delay)} onMouseLeave={hide} onFocus={() => show(0)} onBlur={hide} onMouseDown={hide}>
+      <span ref={anchor} className="tip-anchor" onMouseEnter={() => show(delay)} onMouseLeave={hide} onFocus={(e) => keyboardFocus(e.target) && show(0)} onBlur={hide} onMouseDown={hide}>
         {cloneElement(children, { "aria-describedby": open ? id : undefined })}
       </span>
       {createPortal(

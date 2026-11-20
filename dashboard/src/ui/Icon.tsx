@@ -87,6 +87,8 @@ export const glyphs = {
 } satisfies Record<string, Glyph>;
 
 export type IconName = keyof typeof glyphs;
+/** Every icon, for the kit page. */
+export const Glyphs = glyphs;
 
 interface IconProps {
   name: IconName;

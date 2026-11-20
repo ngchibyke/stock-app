@@ -404,3 +404,9 @@ textarea { resize: vertical; }
 .tile:hover .tile-go, .tile-link:focus-visible .tile-go { opacity: 1; transform: none; color: var(--accent); }
 .card > h2 { margin-bottom: 8px; }
 .card > h2 + p.muted { margin: -4px 0 10px; }
+
+/* kit page */
+.kit-demo { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin-top: var(--space-3); }
+.icon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 8px; width: 100%; }
+.icon-cell { display: grid; place-items: center; height: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.icon-cell:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }

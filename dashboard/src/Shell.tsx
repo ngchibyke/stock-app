@@ -14,6 +14,7 @@ import { ThemeToggle, useTheme } from "./theme";
 import { Icon } from "./ui/Icon";
 import { IconButton } from "./ui/Button";
 import { type Command, CommandPalette } from "./ui/CommandPalette";
+import { Avatar } from "./ui/Controls";
 
 function Link({ item, collapsed, badge }: { item: NavItem; collapsed: boolean; badge?: number }) {
   return (
@@ -116,9 +117,7 @@ export function Shell() {
           <span style={{ marginLeft: "auto" }}>
             <IconButton icon="search" label="Search" onClick={() => setPaletteOpen(true)} />
           </span>
-          <span className="avatar" aria-hidden="true">
-            {user.display_name.slice(0, 1).toUpperCase()}
-          </span>
+          <Avatar name={user.display_name} />
         </header>
       )}
       <AnimatePresence>
@@ -174,7 +173,7 @@ export function Shell() {
             {!mobile && <IconButton icon="menu" label={slim ? "Expand menu" : "Collapse menu"} onClick={() => setCollapsed((c) => !c)} />}
           </div>
           <div className="me">
-            <span className="avatar">{user.display_name.slice(0, 1).toUpperCase()}</span>
+            <Avatar name={user.display_name} />
             {!slim && (
               <span style={{ minWidth: 0 }}>
                 <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{user.display_name}</strong>

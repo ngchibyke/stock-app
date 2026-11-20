@@ -9,6 +9,7 @@ import { DataTable, LoadMore, SearchBox } from "../ui/Table";
 import { Badge, Card, EmptyState, ErrorNote, Segmented, StatusBadge, Tabs } from "../ui/kit";
 import { PageHeader } from "../ui/PageHeader";
 import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
+import { Avatar } from "../ui/Controls";
 
 interface UserRow {
   id: string;
@@ -87,7 +88,7 @@ function People() {
             rowKey={(u) => u.id}
             onRowClick={(u) => setOpen(u.id)}
             columns={[
-              { key: "name", header: "Name", cell: (u) => <strong>{u.display_name}</strong> },
+              { key: "name", header: "Name", cell: (u) => <span className="row" style={{ flexWrap: "nowrap" }}><Avatar name={u.display_name} size={28} /><strong>{u.display_name}</strong></span> },
               { key: "role", header: "Role", cell: (u) => (u.role === "user" ? (u.is_seller ? <Badge tone="info">seller</Badge> : <span className="muted">shopper</span>) : <Badge tone="info">{u.role}</Badge>) },
               { key: "state", header: "State", cell: (u) => (u.deleted ? <StatusBadge status="deleted" /> : u.banned ? <StatusBadge status="banned" /> : u.muted ? <StatusBadge status="muted" /> : <StatusBadge status="active" />) },
               { key: "since", header: "Joined", cell: (u) => day(u.created_at) },
@@ -199,7 +200,7 @@ function Staff() {
             rows={q.data.items}
             rowKey={(s) => s.id}
             columns={[
-              { key: "name", header: "Name", cell: (s) => <strong>{s.display_name}</strong> },
+              { key: "name", header: "Name", cell: (s) => <span className="row" style={{ flexWrap: "nowrap" }}><Avatar name={s.display_name} size={28} /><strong>{s.display_name}</strong></span> },
               { key: "role", header: "Role", cell: (s) => <Badge tone="info">{s.role}</Badge> },
               { key: "since", header: "Added", cell: (s) => day(s.created_at) },
               { key: "act", header: "", className: "actions", cell: (s) => <Button variant="ghost" icon="ban" onClick={() => setRemoving(s)}>Remove</Button> },
