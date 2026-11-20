@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/sign-in", post(sign_in))
         .route("/auth/sign-out", post(sign_out))
         .route("/me", get(me))
+        .merge(super::reset::router())
 }
 
 #[derive(Deserialize)]
