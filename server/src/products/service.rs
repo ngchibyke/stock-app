@@ -133,6 +133,20 @@ pub fn unit_price(base_price_kobo: i64, variant_price_kobo: Option<i64>) -> i64 
     variant_price_kobo.unwrap_or(base_price_kobo)
 }
 
+/// A product's category must be one of the fixed list (`GET /categories`).
+async fn require_category<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    category: &str,
+) -> Result<(), AppError> {
+    if crate::catalog::categories::exists(db, category.trim()).await? {
+        return Ok(());
+    }
+    Err(AppError::Unprocessable(
+        "unknown_category",
+        "Choose one of the listed categories".into(),
+    ))
+}
+
 fn invalid(msg: &str) -> AppError {
     AppError::Validation(msg.to_string())
 }
@@ -455,6 +469,7 @@ pub async fn create_product(
     validate_text(&input.name, 120, "name")?;
     validate_text(&input.description, 5000, "description")?;
     validate_text(&input.category, 60, "category")?;
+    require_category(db, &input.category).await?;
     validate_brand(&input.brand)?;
     validate_condition(&input.condition)?;
     validate_photos(&input.photo_keys)?;
@@ -536,6 +551,7 @@ pub async fn update_product(
     validate_text(&name, 120, "name")?;
     validate_text(&description, 5000, "description")?;
     validate_text(&category, 60, "category")?;
+    require_category(&mut *tx, &category).await?;
     validate_brand(&brand)?;
     validate_condition(&condition)?;
     validate_photos(&photo_keys)?;
