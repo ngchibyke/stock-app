@@ -54,18 +54,60 @@ pub struct Issued {
 impl Issued {
     /// Hands the code to the SMS sender if this issuance was not throttled.
     /// Call only after the issuing transaction has committed.
+    ///
+    /// If the sender fails, the code that was never delivered is retired and stops counting
+    /// toward the send throttle, so the person can ask again at once and is never handed a
+    /// verification id for a code that is not on their phone.
     pub async fn deliver(
         &self,
+        db: &PgPool,
         sender: &dyn OtpSender,
         user_id: Uuid,
         phone_e164: &str,
     ) -> Result<(), AppError> {
         if let Some(code) = &self.code_to_send {
-            sender.send(phone_e164, code).await?;
+            if let Err(err) = sender.send(phone_e164, code).await {
+                sqlx::query(
+                    "UPDATE otp_codes SET consumed_at = now(), sent_at = NULL                      WHERE verification_hash = $1",
+                )
+                .bind(hash_verification_id(&self.verification_id))
+                .execute(db)
+                .await
+                .map_err(anyhow::Error::from)?;
+                return Err(err);
+            }
             tracing::info!(user_id = %user_id, "OTP sent to user");
         }
         Ok(())
     }
+}
+
+/// Seconds the person must wait before a new code may be sent, or `None` if one may go now.
+/// One code per [`OTP_MIN_INTERVAL_SECS`], at most [`OTP_MAX_PER_HOUR`] per rolling hour.
+async fn retry_after(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    purpose: &str,
+) -> Result<Option<u64>, AppError> {
+    // Seconds until the newest send is old enough, and until the hourly count drops
+    // below the cap (when the oldest of the capped sends leaves the window).
+    let (interval_wait, hourly_wait, hourly): (Option<f64>, Option<f64>, i64) = sqlx::query_as(
+        "SELECT              (SELECT $2::float8 - extract(epoch FROM now() - max(sent_at))::float8 FROM otp_codes                WHERE user_id = $1 AND purpose = $3),              (SELECT 3600::float8 - extract(epoch FROM now() - min(sent_at))::float8 FROM (                  SELECT sent_at FROM otp_codes                   WHERE user_id = $1 AND purpose = $3 AND sent_at > now() - interval '1 hour'                   ORDER BY sent_at DESC LIMIT $4) newest),              (SELECT count(*) FROM otp_codes                WHERE user_id = $1 AND purpose = $3 AND sent_at > now() - interval '1 hour')",
+    )
+    .bind(user_id)
+    .bind(OTP_MIN_INTERVAL_SECS)
+    .bind(purpose)
+    .bind(OTP_MAX_PER_HOUR)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let mut wait = interval_wait.filter(|w| *w > 0.0);
+    if hourly >= OTP_MAX_PER_HOUR
+        && let Some(h) = hourly_wait.filter(|w| *w > 0.0)
+    {
+        wait = Some(wait.map_or(h, |w| w.max(h)));
+    }
+    Ok(wait.map(|w| w.ceil().max(1.0) as u64))
 }
 
 fn hash_code(user_id: Uuid, code: &str) -> Vec<u8> {
@@ -104,11 +146,13 @@ pub async fn invalidate_otps(conn: &mut PgConnection, user_id: Uuid) -> Result<(
 /// Issues a verification inside the caller's transaction (which must also hold any
 /// credential change it is bound to). Deliver the code with [`Issued::deliver`] after commit.
 ///
-/// - `NewCredentials`: always supersedes earlier codes and creates a new code + id.
-///   The send throttle only decides whether the sender is called.
-/// - `Resend`: when a send is allowed, same as above. When throttled, the live code
-///   is re-bound to a fresh verification id (the code already on the phone stays valid,
-///   the previous id stops working); if there is no live code, an unsent one is created.
+/// A verification id is only ever returned for a code that will be sent, so the throttle
+/// answers with [`AppError::OtpThrottled`] instead of an id for an unsent code:
+/// - `NewCredentials`: when throttled, fails. The caller's transaction rolls back, so the
+///   credentials do not change and earlier codes keep working for the old credentials.
+/// - `Resend`: when throttled, the live sent code is re-bound to a fresh verification id
+///   (the code already on the phone stays valid, the previous id stops working). With no
+///   live sent code, fails.
 pub async fn issue_otp(
     conn: &mut PgConnection,
     user_id: Uuid,
@@ -120,57 +164,44 @@ pub async fn issue_otp(
         .fetch_optional(&mut *conn)
         .await
         .map_err(anyhow::Error::from)?;
-    let (recent, hourly): (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE sent_at > now() - make_interval(secs => $2)), \
-                count(*) FILTER (WHERE sent_at > now() - interval '1 hour') \
-         FROM otp_codes WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .bind(OTP_MIN_INTERVAL_SECS)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(anyhow::Error::from)?;
-    let sendable = recent == 0 && hourly < OTP_MAX_PER_HOUR;
+    let wait = retry_after(conn, user_id, "verify_phone").await?;
     let verification_id = new_verification_id();
 
-    if reason == IssueReason::Resend && !sendable {
-        let rebound: Option<Uuid> = sqlx::query_scalar(
-            "UPDATE otp_codes SET verification_hash = $2 WHERE id = ( \
-                 SELECT id FROM otp_codes \
-                 WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > now() \
-                 ORDER BY created_at DESC LIMIT 1) \
-             RETURNING id",
-        )
-        .bind(user_id)
-        .bind(hash_verification_id(&verification_id))
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(anyhow::Error::from)?;
-        if rebound.is_some() {
-            return Ok(Issued {
-                verification_id,
-                code_to_send: None,
-            });
+    if let Some(retry_after_secs) = wait {
+        if reason == IssueReason::Resend {
+            let rebound: Option<Uuid> = sqlx::query_scalar(
+                "UPDATE otp_codes SET verification_hash = $2 WHERE id = (                      SELECT id FROM otp_codes                      WHERE user_id = $1 AND purpose = 'verify_phone' AND consumed_at IS NULL                        AND sent_at IS NOT NULL AND expires_at > now()                      ORDER BY created_at DESC LIMIT 1)                  RETURNING id",
+            )
+            .bind(user_id)
+            .bind(hash_verification_id(&verification_id))
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(anyhow::Error::from)?;
+            if rebound.is_some() {
+                return Ok(Issued {
+                    verification_id,
+                    code_to_send: None,
+                });
+            }
         }
+        return Err(AppError::OtpThrottled { retry_after_secs });
     }
 
     invalidate_otps(conn, user_id).await?;
     let code = format!("{:06}", OsRng.gen_range(0..1_000_000u32));
     sqlx::query(
-        "INSERT INTO otp_codes (user_id, code_hash, verification_hash, expires_at, sent_at) \
-         VALUES ($1, $2, $3, now() + make_interval(mins => $4), CASE WHEN $5 THEN now() END)",
+        "INSERT INTO otp_codes (user_id, code_hash, verification_hash, expires_at, sent_at)          VALUES ($1, $2, $3, now() + make_interval(mins => $4), now())",
     )
     .bind(user_id)
     .bind(hash_code(user_id, &code))
     .bind(hash_verification_id(&verification_id))
     .bind(OTP_MINUTES)
-    .bind(sendable)
     .execute(&mut *conn)
     .await
     .map_err(anyhow::Error::from)?;
     Ok(Issued {
         verification_id,
-        code_to_send: sendable.then_some(code),
+        code_to_send: Some(code),
     })
 }
 

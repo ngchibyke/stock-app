@@ -277,35 +277,26 @@ async fn reclaim_invalidates_previous_verification(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn reclaim_during_throttle_invalidates_old_code(pool: PgPool) {
+async fn reclaim_during_throttle_is_refused_and_changes_nothing(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let a = app.sign_up(PHONE, "victim-password-1").await;
     let code1 = app.last_code(PHONE);
-    // Within 60s: the reclaim is throttled, so nothing new is sent...
+    // Within 60s the reclaim is throttled: nothing is sent and no verification id is handed
+    // out for a code that was never sent...
     let b = app.sign_up(PHONE, "attacker-password-2").await;
-    assert_eq!(b.status, 201);
+    assert_err(&b, 429, "otp_throttled");
+    assert!(b.json["verification_id"].is_null());
     assert_eq!(app.otp.sent_count(), 1);
-    // ...but the victim's code and id are dead, and code1 does not unlock B's id either.
+    // ...and because the whole request is rolled back, the victim's credentials, code and id
+    // are untouched, while the attacker's password does not work.
     assert_err(
-        &app.verify(&a.json["verification_id"], &code1).await,
-        422,
-        "otp_invalid",
+        &app.sign_in(PHONE, "attacker-password-2").await,
+        401,
+        "invalid_credentials",
     );
-    assert_err(
-        &app.verify(&b.json["verification_id"], &code1).await,
-        422,
-        "otp_invalid",
-    );
-
-    // Once the throttle allows, signing in with B's password sends a fresh code.
-    app.age_otps(120).await;
-    let resend = app.sign_in(PHONE, "attacker-password-2").await;
-    assert_err(&resend, 403, "phone_unverified");
-    assert_eq!(app.otp.sent_count(), 2);
-    let ok = app
-        .verify(&resend.json["verification_id"], &app.last_code(PHONE))
-        .await;
+    let ok = app.verify(&a.json["verification_id"], &code1).await;
     assert_eq!(ok.status, 200, "body: {}", ok.json);
+    assert_eq!(app.sign_in(PHONE, "victim-password-1").await.status, 200);
 }
 
 #[sqlx::test]

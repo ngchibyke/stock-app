@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{
     extractor::{AuthUser, bearer_token},
-    otp::{IssueReason, invalidate_otps, issue_otp, verify_otp},
+    otp::{IssueReason, OTP_MIN_INTERVAL_SECS, invalidate_otps, issue_otp, verify_otp},
     password::{blocking, dummy_verify, hash_password, validate_password, verify_password},
     sessions::{create_session, revoke_session},
 };
@@ -142,10 +142,16 @@ async fn sign_up(
     let user_id = insert_user(&mut tx, &state, &phone, &display_name, &hash).await?;
     let issued = issue_otp(&mut tx, user_id, IssueReason::NewCredentials).await?;
     tx.commit().await.map_err(anyhow::Error::from)?;
-    issued.deliver(state.otp.as_ref(), user_id, &phone).await?;
+    issued
+        .deliver(&state.db, state.otp.as_ref(), user_id, &phone)
+        .await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "user_id": user_id, "verification_id": issued.verification_id })),
+        Json(json!({
+            "user_id": user_id,
+            "verification_id": issued.verification_id,
+            "resend_after_secs": OTP_MIN_INTERVAL_SECS as u64,
+        })),
     ))
 }
 
@@ -258,7 +264,9 @@ async fn sign_in(
         }
         let issued = issue_otp(&mut tx, user_id, IssueReason::Resend).await?;
         tx.commit().await.map_err(anyhow::Error::from)?;
-        issued.deliver(state.otp.as_ref(), user_id, &phone).await?;
+        issued
+            .deliver(&state.db, state.otp.as_ref(), user_id, &phone)
+            .await?;
         return Err(AppError::PhoneUnverified(Redacted(issued.verification_id)));
     }
     let token = create_session(&state.db, user_id).await?;

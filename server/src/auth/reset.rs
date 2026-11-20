@@ -107,7 +107,7 @@ async fn request_reset(
             // A sender failure must not turn into a different answer: that would show
             // which phones have accounts. It is logged (without the phone) instead.
             if issued
-                .deliver(state.otp.as_ref(), user_id, &phone)
+                .deliver(&state.db, state.otp.as_ref(), user_id, &phone)
                 .await
                 .is_err()
             {

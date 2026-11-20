@@ -4,7 +4,7 @@ use anyhow::{Context, bail};
 use server::{
     AppState,
     auth::{
-        otp::LogOtpSender,
+        otp::{LogOtpSender, OtpSender},
         password::{blocking, hash_password, validate_password},
         routes::{create_owner_account, validate_display_name},
     },
@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
+    let sms = sms_sender(config.sms_provider.as_deref())?;
     // Before connecting or migrating: a production server with no payment
     // provider would fail every checkout. Admin commands still run.
     if matches!(command, Command::Serve) {
@@ -79,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         require_moderation(&config.app_env, config.claude.is_some())?;
         require_push(&config.app_env, config.fcm.is_some())?;
         require_uploads(&config.app_env, config.s3.is_some())?;
+        require_sms(&config.app_env, sms.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -136,8 +138,11 @@ async fn main() -> anyhow::Result<()> {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
         index_key: Arc::new(config.index_key),
-        otp: Arc::new(LogOtpSender {
-            echo: config.otp_dev_echo,
+        otp: sms.unwrap_or_else(|| {
+            tracing::warn!("SMS_PROVIDER not set: codes are written to the log, not sent");
+            Arc::new(LogOtpSender {
+                echo: config.otp_dev_echo,
+            })
         }),
         providers: Arc::new(providers),
         payment_redirect_url: config.public_redirect_url.clone(),
@@ -257,6 +262,27 @@ fn require_uploads(app_env: &str, configured: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Builds the SMS sender named by `SMS_PROVIDER`.
+///
+/// REVISIT(sms-provider): no provider adapter exists yet (decision D4 in the part 7 plan).
+/// Until one is added every name is refused, so production cannot start without one.
+fn sms_sender(name: Option<&str>) -> anyhow::Result<Option<Arc<dyn OtpSender>>> {
+    match name {
+        None => Ok(None),
+        // The value is not echoed back.
+        Some(_) => bail!("SMS_PROVIDER does not name a supported provider"),
+    }
+}
+
+/// Production refuses to start without an SMS sender: nobody could sign up on a real
+/// phone, and the log would hold their codes.
+fn require_sms(app_env: &str, configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !configured {
+        bail!("APP_ENV is production but no SMS sender is configured (set SMS_PROVIDER)");
+    }
+    Ok(())
+}
+
 /// Production refuses to start without push: buyers and sellers would miss
 /// every notice unless they happened to open the inbox.
 fn require_push(app_env: &str, fcm_configured: bool) -> anyhow::Result<()> {
@@ -355,6 +381,23 @@ mod tests {
         for env in ["development", "test", "staging"] {
             assert!(require_uploads(env, false).is_ok(), "{env}");
         }
+    }
+
+    #[test]
+    fn production_requires_an_sms_sender() {
+        let err = require_sms("production", false).unwrap_err();
+        assert!(err.to_string().contains("SMS_PROVIDER"), "{err}");
+        assert!(require_sms("production", true).is_ok());
+        for env in ["development", "test", "staging"] {
+            assert!(require_sms(env, false).is_ok(), "{env}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_sms_provider_is_refused() {
+        assert!(sms_sender(None).unwrap().is_none());
+        let err = sms_sender(Some("not-a-provider")).err().unwrap();
+        assert!(!err.to_string().contains("not-a-provider"), "{err}");
     }
 
     #[test]
