@@ -47,9 +47,8 @@ async fn review(
         photo_keys: body.photo_keys,
         use_suggestion: body.use_suggestion,
     };
-    Ok(Json(
-        service::post_review(&state, user.id, parse_id(&id)?, new).await?,
-    ))
+    let outcome = service::post_review(&state, user.id, parse_id(&id)?, new).await?;
+    Ok(Json(outcome.with_urls(&*state.objects)))
 }
 
 #[derive(Deserialize)]
@@ -65,16 +64,15 @@ async fn reply(
     Path(id): Path<String>,
     AppJson(body): AppJson<ReplyBody>,
 ) -> Result<Json<PostOutcome>, AppError> {
-    Ok(Json(
-        service::post_reply(
-            &state,
-            user.id,
-            parse_id(&id)?,
-            body.body.as_deref(),
-            body.use_suggestion,
-        )
-        .await?,
-    ))
+    let outcome = service::post_reply(
+        &state,
+        user.id,
+        parse_id(&id)?,
+        body.body.as_deref(),
+        body.use_suggestion,
+    )
+    .await?;
+    Ok(Json(outcome.with_urls(&*state.objects)))
 }
 
 #[derive(Deserialize)]
@@ -92,7 +90,6 @@ async fn list(
     AppQuery(q): AppQuery<ListQuery>,
 ) -> Result<Json<ReviewPage>, AppError> {
     let store = stores::service::get_by_slug(&state.db, &key, viewer.map(|u| u.id)).await?;
-    Ok(Json(
-        service::list_for_store(&state.db, store.id, q.before.as_deref(), q.limit).await?,
-    ))
+    let page = service::list_for_store(&state.db, store.id, q.before.as_deref(), q.limit).await?;
+    Ok(Json(page.with_urls(&*state.objects)))
 }

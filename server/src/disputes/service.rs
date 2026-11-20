@@ -19,13 +19,19 @@ use crate::{
     AppState,
     admin::LOCK_TIMEOUT,
     audit,
+    auth::{AuthUser, Role},
     checkout::service::busy_err,
     error::AppError,
-    limits::{MAX_DISPUTE_CHARS, MAX_DISPUTE_PHOTOS},
+    limits::{EVIDENCE_URL_TTL_SECS, MAX_DISPUTE_CHARS, MAX_DISPUTE_PHOTOS},
     moderation::filter::{Category, Scan, Severity, scan},
     notify::{
         kinds::Kind,
         service::{self as notify, Notice},
+    },
+    uploads::{
+        claim::{Kind as PhotoKind, claim},
+        service::Purpose,
+        store::Bucket,
     },
 };
 
@@ -386,6 +392,14 @@ pub async fn open(
     .execute(&mut *tx)
     .await
     .context("insert dispute statement")?;
+    claim(
+        &mut tx,
+        buyer,
+        Purpose::Dispute,
+        &s.photo_keys,
+        (PhotoKind::Dispute, dispute_id),
+    )
+    .await?;
     if !order.held {
         sqlx::query("UPDATE orders SET held_at = now(), hold_reason = 'dispute' WHERE id = $1")
             .bind(order_id)
@@ -486,6 +500,83 @@ pub async fn view(
         return Err(AppError::NotFound);
     }
     Ok(view)
+}
+
+/// A short-lived signed link to one dispute photo.
+#[derive(Debug, Serialize)]
+pub struct PhotoLink {
+    pub url: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+}
+
+/// A signed link to one photo of a dispute, for its buyer, the seller of its
+/// store, or staff (Owner any dispute; Support open ones only). Anyone else gets
+/// 404. A photo that is not in the dispute's statements is 404 for everyone, so
+/// keys cannot be probed. Staff reads are audited before the link is returned.
+pub async fn photo_link(
+    state: &AppState,
+    user: &AuthUser,
+    dispute_id: Uuid,
+    key: &str,
+) -> Result<PhotoLink, AppError> {
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT d.buyer_id, s.owner_id, d.status FROM disputes d          JOIN stores s ON s.id = d.store_id WHERE d.id = $1",
+    )
+    .bind(dispute_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .context("find dispute")?;
+    let (buyer, seller, status) = row.ok_or(AppError::NotFound)?;
+    let party = user.id == buyer || user.id == seller;
+    let staff = !party && matches!(user.role, Role::Owner | Role::Support);
+    if !party && !staff {
+        return Err(AppError::NotFound);
+    }
+    if staff
+        && user.role != Role::Owner
+        && !DisputeStatus::parse(&status).is_some_and(DisputeStatus::is_open)
+    {
+        return Err(AppError::Forbidden("dispute_closed"));
+    }
+    let attached: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM dispute_statements                         WHERE dispute_id = $1 AND $2 = ANY(photo_keys))",
+    )
+    .bind(dispute_id)
+    .bind(key)
+    .fetch_one(&mut *conn)
+    .await
+    .context("check dispute photo")?;
+    if !attached {
+        return Err(AppError::NotFound);
+    }
+    if !state.objects.available() {
+        return Err(AppError::Unavailable("uploads_unavailable"));
+    }
+    if staff {
+        // Fail closed: no link without a record of who asked. The dispute id only.
+        let mut tx = state.db.begin().await.context("begin")?;
+        audit::record(
+            &mut tx,
+            Some(user.id),
+            "admin.dispute_photo_viewed",
+            "dispute",
+            Some(dispute_id),
+            json!({ "dispute_id": dispute_id }),
+        )
+        .await?;
+        tx.commit().await.context("commit")?;
+    }
+    let ttl = std::time::Duration::from_secs(EVIDENCE_URL_TTL_SECS);
+    let url = state
+        .objects
+        .presign_get(Bucket::Private, key, ttl)
+        .map_err(|_| AppError::Unavailable("uploads_unavailable"))?;
+    Ok(PhotoLink {
+        url,
+        expires_at: OffsetDateTime::now_utc() + ttl,
+    })
 }
 
 /// Who pays for the return shipping (the side at fault). Nothing moves.
@@ -595,6 +686,14 @@ pub async fn respond(
     .execute(&mut *tx)
     .await
     .context("insert seller statement")?;
+    claim(
+        &mut tx,
+        seller,
+        Purpose::Dispute,
+        &s.photo_keys,
+        (PhotoKind::Dispute, dispute_id),
+    )
+    .await?;
     sqlx::query(
         "UPDATE disputes SET status = 'awaiting_decision', seller_responded_at = now() \
          WHERE id = $1",

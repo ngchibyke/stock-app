@@ -20,6 +20,7 @@ fn report(body: &str) -> Value {
 }
 
 async fn open(app: &TestApp, o: &ShippedOrder, body: Value) -> TestResponse {
+    let body = app.ready_photos_in(&o.buyer_token, "dispute", body).await;
     app.request(
         Method::POST,
         &format!("/orders/{}/dispute", o.order_id),
@@ -72,10 +73,11 @@ async fn buyer_opens_dispute_and_order_is_held(pool: PgPool) {
     assert_eq!(res.json["status"], "awaiting_seller");
     assert_eq!(res.json["reason"], "damaged");
     assert_eq!(res.json["buyer_statement"]["body"], COMPLAINT);
-    assert_eq!(
-        res.json["buyer_statement"]["photo_keys"],
-        json!(["evidence/1.jpg"])
-    );
+    let keys = res.json["buyer_statement"]["photo_keys"]
+        .as_array()
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].as_str().unwrap().starts_with("u/dispute/"));
     assert!(res.json["seller_statement"].is_null());
     assert_eq!(hold(&app, o.order_id).await, (true, Some("dispute".into())));
 
@@ -597,10 +599,17 @@ async fn open_id(app: &TestApp, o: &ShippedOrder) -> String {
 }
 
 async fn respond(app: &TestApp, id: &str, token: &str, body: &str) -> TestResponse {
+    let photos = app
+        .ready_photos_in(
+            token,
+            "dispute",
+            json!({ "photo_keys": ["evidence/s1.jpg"] }),
+        )
+        .await;
     app.request(
         Method::POST,
         &format!("/disputes/{id}/response"),
-        Some(json!({ "body": body, "photo_keys": ["evidence/s1.jpg"] })),
+        Some(json!({ "body": body, "photo_keys": photos["photo_keys"] })),
         Some(token),
     )
     .await
@@ -1056,9 +1065,10 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     assert_eq!(kinds(shop.seller_id).await, ["order_paid"]);
 
     // 2. The buyer reports damage, with a photo.
+    let evidence = app.ready_photo_for(&buyer, "dispute").await;
     let res = post(
         format!("/orders/{order}/dispute"),
-        json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+        json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": [evidence] }),
         buyer.clone(),
     )
     .await;

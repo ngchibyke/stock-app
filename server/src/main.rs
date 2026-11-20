@@ -26,6 +26,10 @@ use server::{
     payments::{ProviderRegistry, mono::MonoProvider},
     phone::normalize_ng_phone,
     pool_options,
+    uploads::{
+        s3::S3Store,
+        store::{NoStore, ObjectStore},
+    },
 };
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -74,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         require_payment_provider(&config.app_env, config.mono.is_some())?;
         require_moderation(&config.app_env, config.claude.is_some())?;
         require_push(&config.app_env, config.fcm.is_some())?;
+        require_uploads(&config.app_env, config.s3.is_some())?;
     }
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
@@ -119,6 +124,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let objects: Arc<dyn ObjectStore> = match config.s3.clone() {
+        Some(cfg) => Arc::new(S3Store::new(cfg)?),
+        None => {
+            tracing::warn!("S3_* not set: photo uploads are unavailable");
+            Arc::new(NoStore)
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -134,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         courier,
         tone,
         push,
+        objects,
         chat_hub: chat_hub.clone(),
         // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
         statements: None,
@@ -232,6 +246,17 @@ fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Res
     Ok(())
 }
 
+/// Production refuses to start without photo storage: nobody could list a
+/// product with a photo.
+fn require_uploads(app_env: &str, configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !configured {
+        bail!(
+            "APP_ENV is production but photo storage is not configured (set the S3_* variables and UPLOADS_PUBLIC_BASE_URL)"
+        );
+    }
+    Ok(())
+}
+
 /// Production refuses to start without push: buyers and sellers would miss
 /// every notice unless they happened to open the inbox.
 fn require_push(app_env: &str, fcm_configured: bool) -> anyhow::Result<()> {
@@ -320,6 +345,16 @@ mod tests {
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
         assert!(require_moderation("production", true).is_ok());
         assert!(require_moderation("development", false).is_ok());
+    }
+
+    #[test]
+    fn production_requires_photo_storage() {
+        let err = require_uploads("production", false).unwrap_err();
+        assert!(err.to_string().contains("S3_"), "{err}");
+        assert!(require_uploads("production", true).is_ok());
+        for env in ["development", "test", "staging"] {
+            assert!(require_uploads(env, false).is_ok(), "{env}");
+        }
     }
 
     #[test]

@@ -21,13 +21,12 @@ const REPLY: &str = "It left the shop in perfect condition and was packed in a b
 const NOTE: &str = "Photos confirm the damage";
 
 async fn open_id(app: &TestApp, o: &ShippedOrder) -> String {
+    let evidence = app.ready_photo_for(&o.buyer_token, "dispute").await;
     let res = app
         .request(
             Method::POST,
             &format!("/orders/{}/dispute", o.order_id),
-            Some(
-                json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
-            ),
+            Some(json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": [evidence] })),
             Some(&o.buyer_token),
         )
         .await;

@@ -23,6 +23,11 @@ use crate::{
         strikes::{NewFlag, Surface, ensure_can_post, record_flag},
     },
     orders::views::Cursor,
+    uploads::{
+        claim::{self, Kind, claim},
+        service::Purpose,
+        store::ObjectStore,
+    },
 };
 
 const DEFAULT_PAGE: i64 = 20;
@@ -36,11 +41,43 @@ pub struct ReviewView {
     pub stars: i16,
     pub body: Option<String>,
     pub photo_keys: Vec<String>,
+    /// Public addresses of `photo_keys`; filled by `with_urls`.
+    #[sqlx(skip)]
+    pub photo_urls: Vec<String>,
     pub reply: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub replied_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+impl ReviewView {
+    fn with_urls(mut self, objects: &dyn ObjectStore) -> Self {
+        self.photo_urls = claim::public_urls(objects, &self.photo_keys);
+        self
+    }
+}
+
+impl PostOutcome {
+    pub fn with_urls(self, objects: &dyn ObjectStore) -> Self {
+        match self {
+            PostOutcome::Posted { review } => PostOutcome::Posted {
+                review: review.with_urls(objects),
+            },
+            other => other,
+        }
+    }
+}
+
+impl ReviewPage {
+    pub fn with_urls(mut self, objects: &dyn ObjectStore) -> Self {
+        self.reviews = self
+            .reviews
+            .into_iter()
+            .map(|r| r.with_urls(objects))
+            .collect();
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -287,6 +324,14 @@ pub async fn post_review(
     .context("insert review")?;
     // Rolling back here also gives an unused suggestion back.
     let review = review.ok_or(AppError::Conflict("already_reviewed"))?;
+    claim(
+        &mut tx,
+        user,
+        Purpose::Review,
+        &new.photo_keys,
+        (Kind::Review, review.id),
+    )
+    .await?;
     recount(&mut tx, store).await?;
     audit::record(
         &mut tx,

@@ -61,7 +61,7 @@ async fn create(
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher)?),
+        Json(store.owner_view(&state.cipher, &*state.objects)?),
     ))
 }
 
@@ -73,7 +73,7 @@ async fn mine(
     let stores = service::list_mine(&state.db, user.id).await?;
     let views = stores
         .iter()
-        .map(|s| s.owner_view(&state.cipher))
+        .map(|s| s.owner_view(&state.cipher, &*state.objects))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
@@ -84,7 +84,7 @@ async fn show(
     Path(slug): Path<String>,
 ) -> Result<Json<PublicStore>, AppError> {
     let store = service::get_by_slug(&state.db, &slug, viewer.map(|u| u.id)).await?;
-    Ok(Json(store.public()))
+    Ok(Json(store.public(&*state.objects)))
 }
 
 async fn update(
@@ -98,7 +98,7 @@ async fn update(
         service::update_store(&state.db, &state.cipher, user.id, parse_id(&key)?, patch).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher)?),
+        Json(store.owner_view(&state.cipher, &*state.objects)?),
     ))
 }
 
