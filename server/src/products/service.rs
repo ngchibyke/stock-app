@@ -11,6 +11,11 @@ use crate::{
     audit,
     error::AppError,
     limits::{MAX_PRICE_KOBO, MAX_STOCK},
+    uploads::{
+        claim::{self, Kind, claim},
+        service::Purpose,
+        store::ObjectStore,
+    },
 };
 
 const MAX_VARIANTS: usize = 50;
@@ -119,7 +124,17 @@ struct VariantRow {
 pub struct ProductView {
     #[serde(flatten)]
     pub product: Product,
+    /// Public addresses of `photo_keys`, in the same order. Filled by
+    /// [`ProductView::with_urls`]; empty until then.
+    pub photo_urls: Vec<String>,
     pub variants: Vec<Variant>,
+}
+
+impl ProductView {
+    pub fn with_urls(mut self, objects: &dyn ObjectStore) -> Self {
+        self.photo_urls = claim::public_urls(objects, &self.product.photo_keys);
+        self
+    }
 }
 
 /// The price a buyer pays for `variant`: its own override, else the product's base price.
@@ -437,7 +452,11 @@ async fn view(
         None => false,
     };
     let variants = load_variants(db, product.id, owner_view).await?;
-    Ok(ProductView { product, variants })
+    Ok(ProductView {
+        product,
+        photo_urls: Vec::new(),
+        variants,
+    })
 }
 
 /// Locks a live product whose live store belongs to `owner`; anything else is NotFound.
@@ -510,6 +529,14 @@ pub async fn create_product(
     .fetch_one(&mut *tx)
     .await
     .context("insert product")?;
+    claim(
+        &mut tx,
+        owner,
+        Purpose::Product,
+        &input.photo_keys,
+        (Kind::Product, product.id),
+    )
+    .await?;
     insert_variants(&mut tx, product.id, &input.variants).await?;
     audit::record(
         &mut tx,
@@ -538,6 +565,7 @@ pub async fn update_product(
     let category = patch.category.unwrap_or(cur.category);
     let brand = patch.brand.or(cur.brand);
     let condition = patch.condition.unwrap_or(cur.condition);
+    let held_photos = cur.photo_keys.clone();
     let photo_keys = patch.photo_keys.unwrap_or(cur.photo_keys);
     let weight = patch.weight_grams.unwrap_or(cur.weight_grams);
     let (l, w, h) = (
@@ -581,6 +609,15 @@ pub async fn update_product(
     .fetch_one(&mut *tx)
     .await
     .context("update product")?;
+    // Photos the product already held are not rechecked.
+    claim(
+        &mut tx,
+        owner,
+        Purpose::Product,
+        &claim::added(&held_photos, &photo_keys),
+        (Kind::Product, id),
+    )
+    .await?;
     audit::record(
         &mut tx,
         Some(owner),

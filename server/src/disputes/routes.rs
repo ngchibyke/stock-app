@@ -9,9 +9,13 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::service::{self, DisputeView, Reason, Statement, WithdrawResponse};
+use super::service::{self, DisputeView, PhotoLink, Reason, Statement, WithdrawResponse};
 use crate::{
-    AppState, admin::parse_id, auth::AuthUser, error::AppError, extract::AppJson,
+    AppState,
+    admin::parse_id,
+    auth::AuthUser,
+    error::AppError,
+    extract::{AppJson, AppQuery},
     orders::routes::confirmed,
 };
 
@@ -19,6 +23,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/orders/{id}/dispute", post(open))
         .route("/disputes/{id}", get(show))
+        .route("/disputes/{id}/photo", get(photo))
         .route("/disputes/{id}/withdraw", post(withdraw))
         .route("/disputes/{id}/response", post(respond))
         .route("/disputes/{id}/return-received", post(return_received))
@@ -105,5 +110,25 @@ async fn return_received(
 ) -> Result<Json<DisputeView>, AppError> {
     Ok(Json(
         service::return_received(&state, user.id, parse_id(&id)?).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct PhotoQuery {
+    key: String,
+}
+
+/// A 60-second link to one photo of the dispute. The key is a query value (it
+/// contains slashes) and holds no personal data.
+async fn photo(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    AppQuery(q): AppQuery<PhotoQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let link: PhotoLink = service::photo_link(&state, &user, parse_id(&id)?, &q.key).await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(link),
     ))
 }

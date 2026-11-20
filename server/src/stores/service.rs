@@ -11,6 +11,11 @@ use crate::{
     delivery::area::{AreaCouncil, normalize_postcode},
     error::AppError,
     phone::normalize_ng_phone,
+    uploads::{
+        claim::{Kind, claim},
+        service::Purpose,
+        store::ObjectStore,
+    },
 };
 
 pub const MAX_STORES_PER_USER: i64 = 2;
@@ -48,6 +53,10 @@ pub struct StorePatch {
     pub pickup_postcode: Option<String>,
     pub business_phone: Option<String>,
     pub self_delivery_fee_kobo: Option<i64>,
+    /// A ready `store_logo` upload's key; blank removes the logo.
+    pub logo_key: Option<String>,
+    /// A ready `store_banner` upload's key; blank removes the banner.
+    pub banner_key: Option<String>,
 }
 
 const REDACTED: &str = "[redacted]";
@@ -98,6 +107,8 @@ impl std::fmt::Debug for StorePatch {
                 &self.business_phone.as_ref().map(|_| REDACTED),
             )
             .field("self_delivery_fee_kobo", &self.self_delivery_fee_kobo)
+            .field("logo_key", &self.logo_key)
+            .field("banner_key", &self.banner_key)
             .finish()
     }
 }
@@ -123,12 +134,15 @@ pub struct Store {
     pub self_delivery_fee_kobo: Option<i64>,
     pub rating_count: i32,
     pub rating_sum: i64,
+    pub logo_key: Option<String>,
+    pub banner_key: Option<String>,
 }
 
 const COLUMNS: &str = "id, owner_id, name, slug, description, pickup_address_enc, pickup_state, \
                        delivery_courier, delivery_self, status::text AS status, created_at, \
                        pickup_area_council, pickup_postcode, pickup_courier_address_code, \
-                       business_phone_enc, self_delivery_fee_kobo, rating_count, rating_sum";
+                       business_phone_enc, self_delivery_fee_kobo, rating_count, rating_sum, \
+                       logo_key, banner_key";
 
 /// The public shape: never carries the pickup address.
 #[derive(Debug, Serialize)]
@@ -146,6 +160,10 @@ pub struct PublicStore {
     pub rating_count: i32,
     /// To one decimal place; null with no reviews.
     pub rating_average: Option<f64>,
+    pub logo_key: Option<String>,
+    pub banner_key: Option<String>,
+    pub logo_url: Option<String>,
+    pub banner_url: Option<String>,
 }
 
 /// The owner-only shape: the public shape plus the decrypted pickup address and
@@ -210,7 +228,7 @@ impl std::fmt::Debug for StoreDelivery {
 }
 
 impl Store {
-    pub fn public(&self) -> PublicStore {
+    pub fn public(&self, objects: &dyn ObjectStore) -> PublicStore {
         PublicStore {
             id: self.id,
             name: self.name.clone(),
@@ -226,12 +244,23 @@ impl Store {
                 let average = self.rating_sum as f64 / f64::from(self.rating_count);
                 (average * 10.0).round() / 10.0
             }),
+            logo_key: self.logo_key.clone(),
+            banner_key: self.banner_key.clone(),
+            logo_url: self.logo_key.as_deref().and_then(|k| objects.public_url(k)),
+            banner_url: self
+                .banner_key
+                .as_deref()
+                .and_then(|k| objects.public_url(k)),
         }
     }
 
-    pub fn owner_view(&self, cipher: &FieldCipher) -> Result<OwnerStore, AppError> {
+    pub fn owner_view(
+        &self,
+        cipher: &FieldCipher,
+        objects: &dyn ObjectStore,
+    ) -> Result<OwnerStore, AppError> {
         Ok(OwnerStore {
-            store: self.public(),
+            store: self.public(objects),
             pickup_address: cipher.decrypt(&self.pickup_address_enc)?,
             pickup_area_council: self.pickup_area_council,
             pickup_postcode: self.pickup_postcode.clone(),
@@ -550,6 +579,15 @@ pub async fn update_store(
         None => current.business_phone_enc.clone(),
     };
 
+    // Blank removes a picture; a key the store already holds is not rechecked.
+    let pick = |patch: &Option<String>, held: &Option<String>| match patch {
+        Some(k) if k.trim().is_empty() => None,
+        Some(k) => Some(k.clone()),
+        None => held.clone(),
+    };
+    let logo_key = pick(&patch.logo_key, &current.logo_key);
+    let banner_key = pick(&patch.banner_key, &current.banner_key);
+
     let mut changed: Vec<&str> = Vec::new();
     if let Some(a) = &new_address
         && cipher.decrypt(&current.pickup_address_enc)? != *a
@@ -611,7 +649,8 @@ pub async fn update_store(
                            delivery_courier = $6, delivery_self = $7, pickup_area_council = $8, \
                            pickup_postcode = $9, business_phone_enc = $10, \
                            self_delivery_fee_kobo = $11, pickup_courier_address_code = $12, \
-                           pickup_moved_at = CASE WHEN $13 THEN now() ELSE pickup_moved_at END \
+                           pickup_moved_at = CASE WHEN $13 THEN now() ELSE pickup_moved_at END, \
+                           logo_key = $14, banner_key = $15 \
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(id)
@@ -627,9 +666,28 @@ pub async fn update_store(
     .bind(fee)
     .bind(courier_code)
     .bind(pickup_moved)
+    .bind(&logo_key)
+    .bind(&banner_key)
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;
+    for (key, held, purpose) in [
+        (&logo_key, &current.logo_key, Purpose::StoreLogo),
+        (&banner_key, &current.banner_key, Purpose::StoreBanner),
+    ] {
+        if let Some(key) = key
+            && Some(key) != held.as_ref()
+        {
+            claim(
+                &mut tx,
+                owner,
+                purpose,
+                std::slice::from_ref(key),
+                (Kind::Store, id),
+            )
+            .await?;
+        }
+    }
     // Field names only, never values.
     let detail = if changed.is_empty() {
         json!({})

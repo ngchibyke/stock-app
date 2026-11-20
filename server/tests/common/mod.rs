@@ -503,6 +503,51 @@ impl TestApp {
         }
     }
 
+    /// A finished upload owned by `user` for `purpose` (`product`, `review`,
+    /// `dispute`, ...), as if the app had uploaded and finalized a photo; returns
+    /// its key. Use it wherever a request needs a photo key it is allowed to attach.
+    pub async fn ready_photo(&self, user: Uuid, purpose: &str) -> String {
+        let key: String = sqlx::query_scalar(
+            "INSERT INTO uploads (user_id, purpose, raw_key, key, declared_type, declared_bytes,                                   status, finalized_at)              VALUES ($1, $2, 'raw/' || gen_random_uuid()::text,                      'u/' || $2 || '/' || gen_random_uuid()::text || '.jpg',                      'image/jpeg', 1000, 'ready', now()) RETURNING key",
+        )
+        .bind(user)
+        .bind(purpose)
+        .fetch_one(&self.pool)
+        .await
+        .expect("insert ready upload");
+        let bucket = if purpose == "dispute" {
+            server::uploads::store::Bucket::Private
+        } else {
+            server::uploads::store::Bucket::Public
+        };
+        self.objects
+            .put_raw(bucket, &key, vec![0xFF, 0xD8, 0xFF], "image/jpeg");
+        key
+    }
+
+    /// `body` with each made-up entry of `photo_keys` (anything not already a
+    /// real `u/...` key, and not blank) swapped for a ready photo of `purpose`
+    /// owned by the person holding `token`. Lets a fixture keep a readable
+    /// placeholder such as `"photos/a.jpg"`.
+    pub async fn ready_photos_in(&self, token: &str, purpose: &str, mut body: Value) -> Value {
+        let count = body["photo_keys"].as_array().map_or(0, Vec::len);
+        for i in 0..count {
+            let key = body["photo_keys"][i].as_str().unwrap_or("").to_string();
+            if !key.trim().is_empty() && !key.starts_with("u/") {
+                body["photo_keys"][i] = json!(self.ready_photo_for(token, purpose).await);
+            }
+        }
+        body
+    }
+
+    /// [`ready_photo`](Self::ready_photo) for the person holding `token`.
+    pub async fn ready_photo_for(&self, token: &str, purpose: &str) -> String {
+        let me = self.request(Method::GET, "/me", None, Some(token)).await;
+        assert_eq!(me.status, 200, "me: {}", me.json);
+        let user: Uuid = me.json["id"].as_str().unwrap().parse().unwrap();
+        self.ready_photo(user, purpose).await
+    }
+
     /// Adds a published product to `store_id` with the given (attributes, stock)
     /// variants at `price_kobo`; returns the product id.
     pub async fn add_product(
@@ -516,6 +561,7 @@ impl TestApp {
             .iter()
             .map(|(attrs, stock)| json!({ "attributes": attrs, "stock": stock }))
             .collect();
+        let photo = self.ready_photo_for(seller_token, "product").await;
         let res = self
             .request(
                 Method::POST,
@@ -525,7 +571,7 @@ impl TestApp {
                     "description": "Handmade shirt",
                     "category": "fashion",
                     "condition": "new",
-                    "photo_keys": ["photos/a.jpg"],
+                    "photo_keys": [photo],
                     "weight_grams": 300,
                     "base_price_kobo": price_kobo,
                     "variants": variants

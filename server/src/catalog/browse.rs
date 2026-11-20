@@ -76,6 +76,8 @@ pub struct ProductCard {
     /// The cheapest a buyer can pay: the lowest variant price, or the base price.
     pub price_from_kobo: i64,
     pub photo_key: String,
+    /// Where the first photo is served from; null when no public store is set up.
+    pub photo_url: Option<String>,
     /// Any variant with units left (stock minus those held by pending checkouts).
     pub in_stock: bool,
     pub store: StoreBrief,
@@ -210,7 +212,11 @@ async fn browse(
     State(state): State<AppState>,
     AppQuery(q): AppQuery<BrowseQuery>,
 ) -> Result<Json<Page<ProductCard>>, AppError> {
-    Ok(Json(run(&state.db, q).await?))
+    let mut page = run(&state.db, q).await?;
+    for item in &mut page.items {
+        item.photo_url = state.objects.public_url(&item.photo_key);
+    }
+    Ok(Json(page))
 }
 
 pub async fn run(db: &PgPool, q: BrowseQuery) -> Result<Page<ProductCard>, AppError> {
@@ -431,6 +437,7 @@ fn card(r: Row) -> ProductCard {
         condition: r.condition,
         price_from_kobo: r.price_from,
         photo_key: r.photo_key,
+        photo_url: None,
         in_stock: r.in_stock,
         store: StoreBrief {
             id: r.store_id,

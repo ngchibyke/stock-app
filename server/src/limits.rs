@@ -42,5 +42,7 @@ pub const OUTPUT_JPEG_QUALITY: u8 = 85;
 pub const UPLOADS_PER_HOUR: i64 = 30;
 /// How long a signed upload URL lives, in seconds.
 pub const UPLOAD_URL_TTL_SECS: u64 = 600;
+/// How long a signed link to a dispute photo works.
+pub const EVIDENCE_URL_TTL_SECS: u64 = 60;
 /// A pending or failed upload older than this is deleted, with its object.
 pub const STALE_UPLOAD_HOURS: i32 = 24;

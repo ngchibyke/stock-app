@@ -57,10 +57,13 @@ async fn product_needs_a_known_category(pool: PgPool) {
     let create = |category: &'static str| {
         let (app, token, store) = (&app, shop.seller_token.clone(), shop.store_id);
         async move {
+            let body = app
+                .ready_photos_in(&token, "product", product_body(category))
+                .await;
             app.request(
                 Method::POST,
                 &format!("/stores/{store}/products"),
-                Some(product_body(category)),
+                Some(body),
                 Some(&token),
             )
             .await

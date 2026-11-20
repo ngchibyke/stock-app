@@ -278,10 +278,34 @@ async fn photo_limit(pool: PgPool) {
         .review(order, json!({ "stars": 5, "photo_keys": ["  "] }))
         .await;
     assert_eq!(res.status, 422);
-    s.posted(order, json!({ "stars": 5, "photo_keys": ["p/a.jpg"] }))
+    let photo = s.app.ready_photo(s.buyer_id, "review").await;
+    s.posted(order, json!({ "stars": 5, "photo_keys": [photo] }))
         .await;
     let list = s.public_list().await;
-    assert_eq!(list.json["reviews"][0]["photo_keys"], json!(["p/a.jpg"]));
+    assert_eq!(list.json["reviews"][0]["photo_keys"], json!([photo]));
+}
+
+#[sqlx::test]
+async fn review_photos_require_ownership_and_carry_urls(pool: PgPool) {
+    let s = sale(pool).await;
+    let order = s.completed_order().await;
+    // The seller's photo is not the buyer's to attach.
+    let theirs = s.app.ready_photo(s.shop.seller_id, "review").await;
+    let res = s
+        .review(order, json!({ "stars": 5, "photo_keys": [theirs] }))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "photo_not_yours");
+
+    let mine = s.app.ready_photo(s.buyer_id, "review").await;
+    let res = s
+        .review(order, json!({ "stars": 5, "photo_keys": [mine] }))
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let url = format!("https://cdn.fake.invalid/{mine}");
+    assert_eq!(res.json["review"]["photo_urls"], json!([url]));
+    let list = s.public_list().await;
+    assert_eq!(list.json["reviews"][0]["photo_urls"], json!([url]));
 }
 
 #[sqlx::test]

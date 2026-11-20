@@ -63,6 +63,7 @@ fn with(mut body: Value, key: &str, value: Value) -> Value {
 }
 
 async fn create(app: &TestApp, token: &str, store_id: Uuid, body: Value) -> TestResponse {
+    let body = app.ready_photos_in(token, "product", body).await;
     app.request(
         Method::POST,
         &format!("/stores/{store_id}/products"),

@@ -36,6 +36,8 @@ pub struct StoreCard {
     pub slug: String,
     pub name: String,
     pub logo_key: Option<String>,
+    /// Where the logo is served from; null with no logo or no public store.
+    pub logo_url: Option<String>,
     /// To one decimal place; null with no reviews.
     pub rating_average: Option<f64>,
     pub rating_count: i32,
@@ -98,7 +100,14 @@ async fn directory(
     State(state): State<AppState>,
     AppQuery(q): AppQuery<DirectoryQuery>,
 ) -> Result<Json<Page<StoreCard>>, AppError> {
-    Ok(Json(run(&state.db, q).await?))
+    let mut page = run(&state.db, q).await?;
+    for item in &mut page.items {
+        item.logo_url = item
+            .logo_key
+            .as_deref()
+            .and_then(|k| state.objects.public_url(k));
+    }
+    Ok(Json(page))
 }
 
 pub async fn run(db: &PgPool, q: DirectoryQuery) -> Result<Page<StoreCard>, AppError> {
@@ -205,6 +214,7 @@ fn card(r: Row) -> StoreCard {
         slug: r.slug,
         name: r.name,
         logo_key: r.logo_key,
+        logo_url: None,
         rating_average: (r.rating_count > 0).then(|| {
             let average = r.rating_sum as f64 / f64::from(r.rating_count);
             (average * 10.0).round() / 10.0

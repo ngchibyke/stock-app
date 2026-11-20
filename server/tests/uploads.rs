@@ -684,3 +684,431 @@ async fn a_store_outage_keeps_the_slot_for_a_retry(pool: PgPool) {
     app.objects.set_unavailable(false);
     assert_eq!(finalize(&app, &token, &id).await.status, 200);
 }
+
+// ---- Task 6: ownership of photo keys, public URLs, private evidence ----
+
+fn product_with(photos: Value) -> Value {
+    json!({
+        "name": "Ankara Shirt",
+        "description": "Handmade shirt",
+        "category": "fashion",
+        "condition": "new",
+        "photo_keys": photos,
+        "weight_grams": 300,
+        "base_price_kobo": 1_200_000,
+        "variants": [{ "attributes": { "size": "M" }, "stock": 4 }]
+    })
+}
+
+async fn create_product(app: &TestApp, token: &str, store: Uuid, photos: Value) -> TestResponse {
+    app.request(
+        Method::POST,
+        &format!("/stores/{store}/products"),
+        Some(product_with(photos)),
+        Some(token),
+    )
+    .await
+}
+
+async fn shop(app: &TestApp) -> common::Listing {
+    app.make_active_store_with_product("08033333331", "Kano Fabrics", 10_000, 5)
+        .await
+}
+
+async fn attached(app: &TestApp, key: &str) -> (Option<String>, Option<Uuid>) {
+    sqlx::query_as("SELECT attached_kind, attached_id FROM uploads WHERE key = $1")
+        .bind(key)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn cannot_claim_foreign_pending_or_wrong_purpose_keys(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let (other, _) = app.make_seller("08033333332").await;
+
+    let foreign = app.ready_photo(other, "product").await;
+    let wrong_purpose = app.ready_photo(s.seller_id, "review").await;
+    let unknown = format!("u/product/{}.jpg", Uuid::new_v4());
+    // A slot that was asked for but never finalized has no key at all.
+    let pending = upload(&app, &s.seller_token, "product", "image/jpeg", jpeg(30, 30)).await;
+    let pending_raw: String = sqlx::query_scalar("SELECT raw_key FROM uploads WHERE id = $1::uuid")
+        .bind(&pending)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+
+    let mut bodies = Vec::new();
+    for key in [foreign, wrong_purpose, unknown, pending_raw] {
+        let res = create_product(&app, &s.seller_token, s.store_id, json!([key])).await;
+        assert_eq!(res.status, 422, "{}", res.json);
+        assert_eq!(res.json["error"]["code"], "photo_not_yours");
+        bodies.push(res.json.to_string());
+    }
+    assert!(bodies.windows(2).all(|w| w[0] == w[1]), "{bodies:?}");
+}
+
+#[sqlx::test]
+async fn a_failed_claim_leaves_good_keys_unattached(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let (other, _) = app.make_seller("08033333332").await;
+    let mine = app.ready_photo(s.seller_id, "product").await;
+    let theirs = app.ready_photo(other, "product").await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM products")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+
+    let res = create_product(&app, &s.seller_token, s.store_id, json!([mine, theirs])).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(attached(&app, &mine).await, (None, None));
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM products")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after, "the product rolled back with its claim");
+
+    // The same key works once the request is right.
+    let res = create_product(&app, &s.seller_token, s.store_id, json!([mine])).await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id: Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        attached(&app, &mine).await,
+        (Some("product".into()), Some(id))
+    );
+}
+
+#[sqlx::test]
+async fn concurrent_claims_of_one_key_attach_once(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let key = app.ready_photo(s.seller_id, "product").await;
+    let (a, b) = tokio::join!(
+        create_product(&app, &s.seller_token, s.store_id, json!([key])),
+        create_product(&app, &s.seller_token, s.store_id, json!([key])),
+    );
+    let mut statuses = [a.status, b.status];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409], "{} / {}", a.json, b.json);
+    let loser = if a.status == 409 { &a } else { &b };
+    assert_eq!(loser.json["error"]["code"], "photo_in_use");
+    let products: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM products WHERE $1 = ANY(photo_keys)")
+            .bind(&key)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(products, 1);
+}
+
+#[sqlx::test]
+async fn a_key_in_use_elsewhere_is_refused(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let key = app.ready_photo(s.seller_id, "product").await;
+    assert_eq!(
+        create_product(&app, &s.seller_token, s.store_id, json!([key]))
+            .await
+            .status,
+        201
+    );
+    let again = create_product(&app, &s.seller_token, s.store_id, json!([key])).await;
+    assert_eq!(again.status, 409, "{}", again.json);
+    assert_eq!(again.json["error"]["code"], "photo_in_use");
+}
+
+#[sqlx::test]
+async fn existing_keys_are_not_rechecked_on_patch(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    // A product written before ownership checks existed holds a made-up key.
+    sqlx::query("UPDATE products SET photo_keys = ARRAY['photos/old.jpg'] WHERE id = $1")
+        .bind(s.product_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let patch = |body: Value| {
+        let (app, token, id) = (&app, s.seller_token.clone(), s.product_id);
+        async move {
+            app.request(
+                Method::PATCH,
+                &format!("/products/{id}"),
+                Some(body),
+                Some(&token),
+            )
+            .await
+        }
+    };
+    let res = patch(json!({ "name": "Renamed" })).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+
+    let fresh = app.ready_photo(s.seller_id, "product").await;
+    let res = patch(json!({ "photo_keys": ["photos/old.jpg", fresh] })).await;
+    assert_eq!(
+        res.status, 200,
+        "the old key is grandfathered: {}",
+        res.json
+    );
+    assert_eq!(res.json["photo_keys"][0], "photos/old.jpg");
+
+    let res = patch(json!({ "photo_keys": ["photos/old.jpg", "photos/new.jpg"] })).await;
+    assert_eq!(res.status, 422, "a new made-up key is checked");
+    assert_eq!(res.json["error"]["code"], "photo_not_yours");
+}
+
+#[sqlx::test]
+async fn store_and_dispute_photos_require_ownership(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let (other, _) = app.make_seller("08033333332").await;
+
+    // Store logo and banner.
+    for (field, purpose) in [("logo_key", "store_logo"), ("banner_key", "store_banner")] {
+        let theirs = app.ready_photo(other, purpose).await;
+        let res = app
+            .request(
+                Method::PATCH,
+                &format!("/stores/{}", s.store_id),
+                Some(json!({ field: theirs })),
+                Some(&s.seller_token),
+            )
+            .await;
+        assert_eq!(res.status, 422, "{field}: {}", res.json);
+        assert_eq!(res.json["error"]["code"], "photo_not_yours");
+        let mine = app.ready_photo(s.seller_id, purpose).await;
+        let res = app
+            .request(
+                Method::PATCH,
+                &format!("/stores/{}", s.store_id),
+                Some(json!({ field: mine })),
+                Some(&s.seller_token),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{field}: {}", res.json);
+        assert_eq!(res.json[field], json!(mine));
+    }
+
+    // A dispute: someone else's evidence is refused, the buyer's own is taken.
+    let o = app.shipped_order("courier", "delivered").await;
+    let theirs = app.ready_photo(other, "dispute").await;
+    let open = |key: String| {
+        let (app, o) = (&app, &o);
+        async move {
+            app.request(
+                Method::POST,
+                &format!("/orders/{}/dispute", o.order_id),
+                Some(json!({
+                    "reason": "damaged",
+                    "body": "The zip was torn and the lining was stained when it arrived",
+                    "photo_keys": [key]
+                })),
+                Some(&o.buyer_token),
+            )
+            .await
+        }
+    };
+    let res = open(theirs).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "photo_not_yours");
+    let mine = app.ready_photo(o.buyer_id, "dispute").await;
+    let res = open(mine).await;
+    assert_eq!(res.status, 201, "{}", res.json);
+}
+
+#[sqlx::test]
+async fn public_views_carry_urls(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let s = shop(&app).await;
+    let cdn = |key: &str| json!(format!("https://cdn.fake.invalid/{key}"));
+
+    // Product detail.
+    let res = app
+        .request(
+            Method::GET,
+            &format!("/products/{}", s.product_id),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let key = res.json["photo_keys"][0].as_str().unwrap().to_string();
+    assert_eq!(res.json["photo_urls"], json!([cdn(&key)]));
+
+    // Store logo and banner.
+    let logo = app.ready_photo(s.seller_id, "store_logo").await;
+    let banner = app.ready_photo(s.seller_id, "store_banner").await;
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{}", s.store_id),
+            Some(json!({ "logo_key": logo, "banner_key": banner })),
+            Some(&s.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let slug = res.json["slug"].as_str().unwrap().to_string();
+    let public = app
+        .request(Method::GET, &format!("/stores/{slug}"), None, None)
+        .await;
+    assert_eq!(public.json["logo_url"], cdn(&logo));
+    assert_eq!(public.json["banner_url"], cdn(&banner));
+
+    // Cards in browse and in the directory.
+    let browse = app.request(Method::GET, "/products", None, None).await;
+    assert_eq!(browse.status, 200, "{}", browse.json);
+    let card = &browse.json["items"][0];
+    assert_eq!(card["photo_url"], cdn(card["photo_key"].as_str().unwrap()));
+    let directory = app.request(Method::GET, "/stores", None, None).await;
+    assert_eq!(directory.status, 200, "{}", directory.json);
+    assert_eq!(directory.json["items"][0]["logo_url"], cdn(&logo));
+}
+
+/// An open dispute with a buyer photo; returns (order, dispute id, photo key).
+async fn dispute_with_photo(app: &TestApp) -> (common::ShippedOrder, String, String) {
+    let o = app.shipped_order("courier", "delivered").await;
+    let key = app.ready_photo(o.buyer_id, "dispute").await;
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{}/dispute", o.order_id),
+            Some(json!({
+                "reason": "damaged",
+                "body": "The zip was torn and the lining was stained when it arrived",
+                "photo_keys": [key]
+            })),
+            Some(&o.buyer_token),
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id = res.json["id"].as_str().unwrap().to_string();
+    (o, id, key)
+}
+
+async fn dispute_photo(app: &TestApp, token: &str, id: &str, key: &str) -> TestResponse {
+    app.request(
+        Method::GET,
+        &format!("/disputes/{id}/photo?key={key}"),
+        None,
+        Some(token),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn dispute_photos_are_never_public(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (o, id, key) = dispute_with_photo(&app).await;
+    let view = app
+        .request(
+            Method::GET,
+            &format!("/disputes/{id}"),
+            None,
+            Some(&o.buyer_token),
+        )
+        .await;
+    assert_eq!(view.status, 200, "{}", view.json);
+    let text = view.json.to_string();
+    assert!(
+        !text.contains("photo_urls") && !text.contains("http"),
+        "{text}"
+    );
+    assert_eq!(view.json["buyer_statement"]["photo_keys"], json!([key]));
+    assert!(app.objects.object(Bucket::Private, &key).is_some());
+    assert!(app.objects.object(Bucket::Public, &key).is_none());
+}
+
+#[sqlx::test]
+async fn dispute_photo_url_is_short_lived_and_scoped(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (o, id, key) = dispute_with_photo(&app).await;
+    for token in [&o.buyer_token, &o.seller_token] {
+        let res = dispute_photo(&app, token, &id, &key).await;
+        assert_eq!(res.status, 200, "{}", res.json);
+        let url = res.json["url"].as_str().unwrap();
+        assert!(url.contains("/private/"), "{url}");
+        assert!(url.ends_with("ttl=60"), "{url}");
+        let at = time::OffsetDateTime::parse(
+            res.json["expires_at"].as_str().unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let left = (at - time::OffsetDateTime::now_utc()).whole_seconds();
+        assert!((50..=60).contains(&left), "{left}");
+    }
+    // A key that is not one of this dispute's photos is not found, even a real one.
+    let elsewhere = app.ready_photo(o.buyer_id, "dispute").await;
+    assert_eq!(
+        dispute_photo(&app, &o.buyer_token, &id, &elsewhere)
+            .await
+            .status,
+        404
+    );
+    // Neither a buyer's nor a seller's read is an admin read.
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action = 'admin.dispute_photo_viewed'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 0);
+}
+
+#[sqlx::test]
+async fn stranger_gets_404_for_dispute_photo(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, id, key) = dispute_with_photo(&app).await;
+    let (_, stranger) = app.sign_up_verified("08044444441").await;
+    assert_eq!(dispute_photo(&app, &stranger, &id, &key).await.status, 404);
+    let no_such = Uuid::new_v4().to_string();
+    assert_eq!(
+        dispute_photo(&app, &stranger, &no_such, &key).await.status,
+        404
+    );
+}
+
+#[sqlx::test]
+async fn support_cannot_sign_closed_dispute_photo(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (o, id, key) = dispute_with_photo(&app).await;
+    let support = app.make_support().await;
+    let owner = app.owner_token().await;
+
+    // Open: both staff roles may.
+    assert_eq!(dispute_photo(&app, &support, &id, &key).await.status, 200);
+    // Withdrawn (closed): Support is refused, the Owner is not.
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/disputes/{id}/withdraw"),
+            Some(json!({ "confirm": true })),
+            Some(&o.buyer_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = dispute_photo(&app, &support, &id, &key).await;
+    assert_eq!(res.status, 403, "{}", res.json);
+    assert_eq!(res.json["error"]["code"], "dispute_closed");
+    assert_eq!(dispute_photo(&app, &owner, &id, &key).await.status, 200);
+}
+
+#[sqlx::test]
+async fn staff_reads_are_audited_with_the_dispute_id_only(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, id, key) = dispute_with_photo(&app).await;
+    let owner = app.owner_token().await;
+    assert_eq!(dispute_photo(&app, &owner, &id, &key).await.status, 200);
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT detail FROM audit_log WHERE action = 'admin.dispute_photo_viewed' \
+         AND subject_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], json!({ "dispute_id": id }));
+    assert!(!rows[0].to_string().contains(&key));
+}

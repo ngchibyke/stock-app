@@ -51,6 +51,7 @@ async fn setup(app: &TestApp) -> (String, Uuid) {
 }
 
 async fn create(app: &TestApp, token: &str, store_id: Uuid, body: Value) -> common::TestResponse {
+    let body = app.ready_photos_in(token, "product", body).await;
     app.request(
         Method::POST,
         &format!("/stores/{store_id}/products"),
