@@ -223,14 +223,15 @@ void main() {
       expect(h.repo.signUpPhones, isEmpty);
     });
 
-    testWidgets('phone_taken_shows_the_server_message_and_a_sign_in_link', (
+    testWidgets('phone_taken_shows_our_own_words_and_a_sign_in_link', (
       tester,
     ) async {
       final h = _Harness();
+      // The real server's wording (server/src/error.rs, AppError::Conflict).
       h.repo.onSignUp = (_, _, _) async => throw _error(
         409,
         'phone_taken',
-        message: 'That phone number already has an account.',
+        message: 'Conflict with existing data',
       );
       var signInTaps = 0;
       await h.pump(tester, _signUpPage(onSignIn: () => signInTaps++));
@@ -239,10 +240,8 @@ void main() {
       await _tap(tester, find.text(Strings.signUpAction));
       await tester.pump();
 
-      expect(
-        find.text('That phone number already has an account.'),
-        findsOneWidget,
-      );
+      expect(find.text(Strings.phoneTaken), findsOneWidget);
+      expect(find.text('Conflict with existing data'), findsNothing);
       await _tap(tester, find.text(Strings.signInInstead));
       expect(signInTaps, 1);
     });

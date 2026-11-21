@@ -113,13 +113,12 @@ class _SignUpPageState extends ConsumerState<SignUpPage> {
       setState(() {
         _busy = false;
         _retryable = authErrorIsRetryable(e);
-        // The server words "phone already registered" for this screen.
+        // Our own words for every code, phone_taken included: the server's
+        // message is generic ("Conflict with existing data").
         if (e is ApiError && e.code == 'invalid_phone') {
           _phoneError = Strings.phoneInvalid;
         } else {
-          _formError = e is ApiError && e.code == 'phone_taken'
-              ? e.message
-              : authErrorMessage(e);
+          _formError = authErrorMessage(e);
         }
       });
     }

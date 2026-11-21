@@ -10,8 +10,6 @@ abstract final class Strings {
   static const String genericError =
       'Something went wrong. Check your connection and try again.';
   static const String offlineTitle = "You're offline";
-  static const String offlineBody =
-      'Check your connection. We will show your latest data when you are back.';
 
   // Actions.
   static const String retry = 'Try again';
