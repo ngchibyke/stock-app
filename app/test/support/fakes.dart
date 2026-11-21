@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:market/core/session/session_store.dart';
 
 /// One request as the [FakeAdapter] saw it.
 class RecordedRequest {
@@ -83,4 +85,62 @@ class FakeAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+/// An in-memory [SessionStore] that counts how often it is touched.
+class MemorySessionStore implements SessionStore {
+  MemorySessionStore([this.token]);
+
+  String? token;
+  int clearCount = 0;
+  int writeCount = 0;
+
+  @override
+  Future<String?> read() async => token;
+
+  @override
+  Future<void> write(String value) async {
+    writeCount++;
+    token = value;
+  }
+
+  @override
+  Future<void> clear() async {
+    clearCount++;
+    token = null;
+  }
+}
+
+/// A [FlutterSecureStorage] whose read always fails, as a corrupt keystore
+/// does. Records deletes; can also fail them.
+class ThrowingReadStorage extends FlutterSecureStorage {
+  ThrowingReadStorage({this.failDelete = false});
+
+  final bool failDelete;
+  final List<String> deleted = [];
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => throw StateError('keystore unreadable');
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    deleted.add(key);
+    if (failDelete) throw StateError('cannot delete');
+  }
 }
