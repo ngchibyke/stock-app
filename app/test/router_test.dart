@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_error.dart';
 import 'package:market/core/config/app_config.dart';
 import 'package:market/core/config/app_gate.dart';
+import 'package:market/core/paths.dart';
 import 'package:market/core/session/me.dart';
 import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/strings.dart';
@@ -137,6 +138,54 @@ void main() {
 
       expect(find.text(Strings.home), findsOneWidget);
       expect(_uri(tester, h), '/home');
+    });
+
+    testWidgets('the_address_pages_are_top_level_routes_above_the_tab_bar', (
+      tester,
+    ) async {
+      final h = AppHarness(store: MemorySessionStore('tok'));
+      h.adapter
+        ..reply(200, testMe)
+        ..reply(200, <Object>[]);
+      await h.pump(tester);
+      expect(find.byType(NavigationBar), findsOneWidget);
+      final router = h.container(tester).read(routerProvider);
+
+      router.push(addressesPath);
+      await settle(tester);
+      expect(find.text(Strings.addressesEmptyTitle), findsOneWidget);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(_uri(tester, h), '/addresses');
+
+      router.push(newAddressPath);
+      await settle(tester);
+      expect(find.text(Strings.newAddressTitle), findsOneWidget);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(_uri(tester, h), '/addresses/new');
+
+      // Back, twice: the form, then the list, then the tab it came from.
+      await tester.tap(find.byTooltip(Strings.back));
+      await settle(tester);
+      expect(find.text(Strings.addressesEmptyTitle), findsOneWidget);
+      await tester.tap(find.byTooltip(Strings.back));
+      await settle(tester);
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(_uri(tester, h), '/home');
+    });
+
+    testWidgets('a_signed_out_deep_link_to_the_address_pages_goes_to_sign_in', (
+      tester,
+    ) async {
+      final h = AppHarness();
+      await h.pump(tester);
+      final router = h.container(tester).read(routerProvider);
+
+      for (final path in [addressesPath, newAddressPath]) {
+        router.go(path);
+        await settle(tester);
+        expect(find.text(Strings.signInTitle), findsOneWidget, reason: path);
+        expect(_uri(tester, h), '/sign-in', reason: path);
+      }
     });
 
     testWidgets('the_splash_is_labelled_while_the_session_restores', (

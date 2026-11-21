@@ -1,19 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:go_router/go_router.dart';
 import 'package:market/core/config/app_config.dart';
 import 'package:market/core/strings.dart';
-import 'package:market/router.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../support/app_harness.dart';
 import '../../support/fakes.dart';
-
-/// `/addresses` is built in a later task; here it is a stub so the navigation
-/// can be asserted.
-final _stub = GoRoute(
-  path: '/addresses',
-  builder: (context, state) => const Scaffold(body: Text('addresses stub')),
-);
 
 Future<AppHarness> _openApp(
   WidgetTester tester, {
@@ -21,17 +12,11 @@ Future<AppHarness> _openApp(
   AppConfig config = AppConfig.empty,
 }) async {
   final h = AppHarness(store: MemorySessionStore('tok'), config: config);
-  h.adapter.reply(200, testMe);
-  await h.pump(
-    tester,
-    extra: [
-      routerProvider.overrideWith((ref) {
-        final router = buildRouter(ref.container, extraRoutes: [_stub]);
-        ref.onDispose(router.dispose);
-        return router;
-      }),
-    ],
-  );
+  h.adapter
+    ..reply(200, testMe)
+    // The address book opens on an empty list.
+    ..reply(200, <Object>[]);
+  await h.pump(tester);
   if (size != null) tester.view.physicalSize = size;
   await settle(tester);
   return h;
@@ -48,7 +33,7 @@ void main() {
 
     await tester.tap(find.text(Strings.addresses));
     await settle(tester);
-    expect(find.text('addresses stub'), findsOneWidget);
+    expect(find.text(Strings.addressesEmptyTitle), findsOneWidget);
   });
 
   testWidgets('the_account_row_opens_the_address_book', (tester) async {
@@ -58,7 +43,7 @@ void main() {
 
     await tester.tap(find.text(Strings.addresses));
     await settle(tester);
-    expect(find.text('addresses stub'), findsOneWidget);
+    expect(find.text(Strings.addressesEmptyTitle), findsOneWidget);
   });
 
   testWidgets('the_shell_keeps_each_tabs_state_when_switching', (tester) async {

@@ -234,6 +234,9 @@ class AppTextField extends StatelessWidget {
     this.keyboardType,
     this.action,
     this.maxLength,
+    this.maxLines = 1,
+    this.helperText,
+    this.capitalization = TextCapitalization.none,
     this.formatters,
     this.onChanged,
     this.onSubmitted,
@@ -246,6 +249,13 @@ class AppTextField extends StatelessWidget {
   final TextInputType? keyboardType;
   final TextInputAction? action;
   final int? maxLength;
+
+  /// More than one lets a long value wrap onto several lines.
+  final int maxLines;
+
+  /// A short hint shown under the field while there is no error.
+  final String? helperText;
+  final TextCapitalization capitalization;
   final List<TextInputFormatter>? formatters;
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
@@ -257,6 +267,9 @@ class AppTextField extends StatelessWidget {
       obscureText: obscure,
       keyboardType: keyboardType,
       textInputAction: action,
+      textCapitalization: capitalization,
+      maxLines: obscure ? 1 : maxLines,
+      minLines: obscure || maxLines == 1 ? null : 1,
       maxLength: maxLength,
       // The length is enforced, but no "0/10" counter is shown.
       buildCounter: (
@@ -268,7 +281,12 @@ class AppTextField extends StatelessWidget {
       inputFormatters: formatters,
       onChanged: onChanged,
       onSubmitted: onSubmitted,
-      decoration: InputDecoration(labelText: label, errorText: errorText),
+      decoration: InputDecoration(
+        labelText: label,
+        errorText: errorText,
+        helperText: helperText,
+        helperMaxLines: 4,
+      ),
     );
   }
 }

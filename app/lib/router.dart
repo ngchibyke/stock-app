@@ -5,11 +5,14 @@ import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'core/config/app_gate.dart';
+import 'core/paths.dart';
 import 'core/session/session_controller.dart';
 import 'core/strings.dart';
 import 'core/theme/tokens.dart';
 import 'core/ui/states.dart';
 import 'features/account/account_page.dart';
+import 'features/addresses/address_form_page.dart';
+import 'features/addresses/address_list_page.dart';
 import 'features/auth/auth_errors.dart';
 import 'features/auth/forgot_page.dart';
 import 'features/auth/pending_reset.dart';
@@ -40,9 +43,9 @@ const Set<String> _signedOutPaths = {
   resetPath,
 };
 
-/// Pages (and everything below them) that need a signed-in person. Later tasks
-/// add `/account` and `/addresses` routes under these.
-const List<String> _signedInPrefixes = [homePath, '/account', '/addresses'];
+/// Pages (and everything below them) that need a signed-in person. This covers
+/// `/addresses/new` too.
+const List<String> _signedInPrefixes = [homePath, accountPath, addressesPath];
 
 bool _isUnder(String path, String prefix) =>
     path == prefix || path.startsWith('$prefix/');
@@ -268,6 +271,16 @@ GoRouter buildRouter(
             ],
           ),
         ],
+      ),
+      // Full-screen pages above the tab bar, for signed-in people only (the
+      // redirect covers everything under `/addresses`).
+      GoRoute(
+        path: addressesPath,
+        builder: (context, state) => const AddressListPage(),
+      ),
+      GoRoute(
+        path: newAddressPath,
+        builder: (context, state) => const AddressFormPage(),
       ),
       ...extraRoutes,
     ],

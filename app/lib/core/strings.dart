@@ -76,6 +76,57 @@ abstract final class Strings {
     _ => role,
   };
 
+  // The address book.
+  static const String cancel = 'Cancel';
+  static const String delete = 'Delete';
+  static const String addAddress = 'Add an address';
+  static const String addressesEmptyTitle = 'No addresses yet';
+  static const String addressesEmptyBody =
+      'Add the place you want your orders delivered to.';
+  static const String unknownCouncil = 'Area council not listed';
+  static String landmarkLine(String landmark) => 'Landmark: $landmark';
+  static String postcodeLine(String postcode) => 'Postcode: $postcode';
+  static String deleteAddressFor(String name) => name.trim().isEmpty
+      ? 'Delete this address'
+      : 'Delete the address for $name';
+  static const String deleteConfirmTitle = 'Delete this address?';
+  static const String deleteConfirmBody =
+      'It will be removed from your address book.';
+  static const String deleteFailed =
+      'We could not delete that address. Please try again.';
+
+  // The new address form.
+  static const String newAddressTitle = 'New address';
+  static const String saveAddress = 'Save address';
+  static const String recipientNameLabel = 'Recipient name';
+  static const String addressLineLabel = 'Street address';
+  static const String landmarkLabel = 'Landmark (optional)';
+  static const String councilLabel = 'Area council';
+  static const String postcodeLabel = 'Postcode (optional)';
+  static const String postcodeHint =
+      'The new 11-character code that starts with FC. '
+      'Leave it blank if you do not have one.';
+  static const String recipientRequired = "Enter the recipient's name.";
+  static const String recipientTooLong =
+      'Use 100 characters or fewer for the name.';
+  static const String addressLineRequired = 'Enter the street address.';
+  static const String addressLineTooLong =
+      'Use 300 characters or fewer for the address.';
+  static const String landmarkTooLong =
+      'Use 200 characters or fewer for the landmark.';
+  static const String councilRequired = 'Choose your area council.';
+  static const String postcodeInvalid =
+      'That postcode is not right. Enter the 11-character code that starts '
+      'with FC, or leave it blank.';
+  static const String outsideServiceArea =
+      'We do not deliver there yet. Coming to your city soon.';
+  static const String tooManyAddresses =
+      'You have saved as many addresses as we can keep. '
+      'Delete one you no longer use, then try again.';
+  static const String recipientInvalid = 'Please check the recipient name.';
+  static const String addressLineInvalid = 'Please check the street address.';
+  static const String landmarkInvalid = 'Please check the landmark.';
+
   // Full-screen notices (the gate).
   static const String updateRequiredTitle = 'Please update the app';
   static const String updateRequiredBody =
