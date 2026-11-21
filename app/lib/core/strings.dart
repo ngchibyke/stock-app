@@ -51,6 +51,9 @@ abstract final class Strings {
   static const String resend = 'Send a new code';
   static String resendIn(int secs) => 'Send a new code in ${secs}s';
   static const String resentConfirmation = 'We sent you a new code.';
+  static const String signInAgain =
+      'For your safety we cannot send a new code from here. '
+      'Please sign in again.';
   static const String resendPasswordRejected =
       'We could not send a new code. Go back and create your account again.';
 

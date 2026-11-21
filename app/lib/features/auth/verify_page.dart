@@ -14,22 +14,32 @@ import '../../core/ui/states.dart';
 import 'auth_errors.dart';
 import 'auth_repository.dart';
 import 'countdown.dart';
+import 'pending_credential.dart';
 
 const int _codeLength = 6;
+
+// Only these mean the typed code itself was refused. Others (otp_unavailable,
+// otp_throttled) are about the service and go to the error banner.
+const Set<String> _codeErrorCodes = {
+  'otp_invalid',
+  'otp_expired',
+  'otp_locked',
+};
 
 /// Enter the code that was texted. A correct code signs the person in and
 /// calls [onVerified].
 ///
-/// [password] is the one just typed on the sign-up page, kept in this page's
-/// memory only so a resend can be asked for (a sign-in on the unverified
-/// account). It is cleared when the page goes away and is never stored,
+/// [credential] holds the password just typed on the sign-up page, in memory
+/// only, so a resend can be asked for (a sign-in on the unverified account).
+/// The page reads it only at the moment it resends, and clears it after a
+/// successful verification and when the page goes away. It is never stored,
 /// logged, or carried in a URL.
 class VerifyPage extends ConsumerStatefulWidget {
   const VerifyPage({
     super.key,
     required this.challenge,
     required this.phone,
-    required this.password,
+    required this.credential,
     required this.onVerified,
     @visibleForTesting this.clock,
     @visibleForTesting this.tickSource,
@@ -37,7 +47,7 @@ class VerifyPage extends ConsumerStatefulWidget {
 
   final CodeChallenge challenge;
   final String phone;
-  final String password;
+  final PendingCredential credential;
   final VoidCallback onVerified;
   final Clock? clock;
   final Stream<void>? tickSource;
@@ -49,7 +59,6 @@ class VerifyPage extends ConsumerStatefulWidget {
 class _VerifyPageState extends ConsumerState<VerifyPage>
     with WidgetsBindingObserver {
   late String _verificationId = widget.challenge.verificationId;
-  String _password = '';
   late final Countdown _countdown;
   StreamSubscription<Duration>? _ticks;
 
@@ -61,6 +70,10 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
   bool _busy = false;
   bool _resending = false;
 
+  // A full code was typed while a resend was in flight: submit it as soon as
+  // the resend ends instead of dropping it.
+  bool _submitAfterResend = false;
+
   // A token the server already gave us whose session load failed. A retry
   // repeats only that load: the code is spent and must not be sent again.
   String? _pendingToken;
@@ -68,7 +81,6 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
   @override
   void initState() {
     super.initState();
-    _password = widget.password;
     _countdown = Countdown(
       Duration(seconds: widget.challenge.resendAfterSecs),
       clock: widget.clock,
@@ -91,9 +103,26 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_ticks?.cancel());
-    _password = '';
+    widget.credential.clear();
     _pendingToken = null;
     super.dispose();
+  }
+
+  /// A completed code: sent now, or queued while a resend is in flight.
+  void _codeCompleted() {
+    if (_resending) {
+      _submitAfterResend = true;
+      return;
+    }
+    unawaited(_verify());
+  }
+
+  /// Runs after a resend ends without signing in: sends a code that was
+  /// completed meanwhile.
+  void _afterResend() {
+    if (!_submitAfterResend) return;
+    _submitAfterResend = false;
+    if (_code.length == _codeLength) unawaited(_verify());
   }
 
   void _codeChanged(String value) {
@@ -127,6 +156,7 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
       await session.signInWithToken(token);
       _pendingToken = null;
       if (!mounted) return;
+      widget.credential.clear();
       setState(() => _busy = false);
       widget.onVerified();
     } catch (e) {
@@ -136,7 +166,9 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
       final message = authErrorMessage(e);
       setState(() {
         _busy = false;
-        if (e is ApiError && e.code.startsWith('otp_') && spent == null) {
+        if (e is ApiError &&
+            _codeErrorCodes.contains(e.code) &&
+            spent == null) {
           _codeError = message;
         } else {
           _formError = message;
@@ -148,6 +180,15 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
 
   Future<void> _resend() async {
     if (_busy || _resending || !_countdown.done) return;
+    // The password is read from the holder only now, at the moment of use.
+    final password = widget.credential.password;
+    if (password == null || password.isEmpty) {
+      setState(() {
+        _formError = Strings.signInAgain;
+        _retry = null;
+      });
+      return;
+    }
     final repo = ref.read(authRepositoryProvider);
     setState(() {
       _resending = true;
@@ -157,9 +198,10 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
       _retry = null;
     });
     try {
-      final token = await repo.signIn(phone: widget.phone, password: _password);
+      final token = await repo.signIn(phone: widget.phone, password: password);
       // The account was verified in the meantime: just sign in.
       if (!mounted) return;
+      _submitAfterResend = false;
       setState(() => _resending = false);
       _pendingToken = token;
       await _verify();
@@ -172,6 +214,7 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
         _verificationId = next.verificationId;
         _notice = Strings.resentConfirmation;
       });
+      _afterResend();
     } catch (e) {
       if (!mounted) return;
       if (e is ApiError && (e.retryAfterSecs ?? 0) > 0) {
@@ -185,6 +228,7 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
             : authErrorMessage(e);
         _retry = authErrorIsRetryable(e) ? _resend : null;
       });
+      _afterResend();
     }
   }
 
@@ -208,7 +252,7 @@ class _VerifyPageState extends ConsumerState<VerifyPage>
             length: _codeLength,
             errorText: _codeError,
             onChanged: _codeChanged,
-            onCompleted: (_) => _verify(),
+            onCompleted: (_) => _codeCompleted(),
           ),
           if (formError != null) ...[
             const SizedBox(height: Tokens.s3),

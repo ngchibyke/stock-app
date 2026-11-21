@@ -13,6 +13,7 @@ import 'package:market/core/theme/tokens.dart';
 import 'package:market/core/ui/code_boxes.dart';
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/auth/countdown.dart';
+import 'package:market/features/auth/pending_credential.dart';
 import 'package:market/features/auth/sign_up_page.dart';
 import 'package:market/features/auth/verify_page.dart';
 import 'package:material_ui/material_ui.dart';
@@ -159,7 +160,7 @@ Future<void> _fillSignUp(
 }
 
 SignUpPage _signUpPage({
-  void Function(CodeChallenge, String, String)? onCodeSent,
+  void Function(CodeChallenge, String, PendingCredential)? onCodeSent,
   VoidCallback? onSignIn,
 }) => SignUpPage(
   onCodeSent: onCodeSent ?? (_, _, _) {},
@@ -174,11 +175,11 @@ VerifyPage _verifyPage({
   VoidCallback? onVerified,
   Clock? clock,
   Stream<void>? ticks,
-  String password = 'a-long-password',
+  PendingCredential? credential,
 }) => VerifyPage(
   challenge: challenge,
   phone: '0803 123 4567',
-  password: password,
+  credential: credential ?? PendingCredential("a-long-password"),
   onVerified: onVerified ?? () {},
   clock: clock,
   tickSource: ticks ?? const Stream<void>.empty(),
@@ -259,7 +260,7 @@ void main() {
           onCodeSent: (c, phone, password) {
             gotChallenge = c;
             gotPhone = phone;
-            gotPassword = password;
+            gotPassword = password.password;
           },
         ),
       );
@@ -602,6 +603,136 @@ void main() {
       await tester.pump();
 
       expect(find.text(Strings.otpUnavailable), findsOneWidget);
+    });
+
+    testWidgets('a_code_typed_during_a_resend_is_submitted_when_it_ends', (
+      tester,
+    ) async {
+      final h = _Harness();
+      var now = DateTime(2026, 1, 1, 12);
+      final ticks = StreamController<void>.broadcast(sync: true);
+      addTearDown(ticks.close);
+      final pending = Completer<String>();
+      h.repo.onSignIn = (_, _) => pending.future;
+      h.repo.onVerify = (_, _) async => throw _error(422, 'otp_invalid');
+      await h.pump(tester, _verifyPage(clock: () => now, ticks: ticks.stream));
+
+      now = now.add(const Duration(seconds: 31));
+      ticks.add(null);
+      await tester.pump();
+      await _tap(tester, find.byKey(const ValueKey('resend-button')));
+
+      // The sixth digit arrives while the resend is in flight: nothing is
+      // sent yet, and nothing is lost.
+      await tester.enterText(find.byType(TextField), '123456');
+      await tester.pump();
+      expect(h.repo.verifiedCodes, isEmpty);
+
+      pending.completeError(
+        const PhoneUnverified(
+          CodeChallenge(verificationId: 'v2', resendAfterSecs: 60),
+        ),
+      );
+      await _settle(tester);
+
+      expect(h.repo.verifiedIds.single, 'v2');
+      expect(h.repo.verifiedCodes.single, '123456');
+      expect(find.text(Strings.codeWrong), findsOneWidget);
+    });
+
+    testWidgets('otp_unavailable_on_verify_shows_a_banner_with_retry', (
+      tester,
+    ) async {
+      final h = _Harness();
+      var attempts = 0;
+      h.repo.onVerify = (_, _) async {
+        attempts++;
+        throw _error(503, 'otp_unavailable');
+      };
+      await h.pump(tester, _verifyPage());
+
+      await tester.enterText(find.byType(TextField), '123456');
+      await tester.pump();
+
+      expect(find.text(Strings.otpUnavailable), findsOneWidget);
+      expect(
+        tester.widget<CodeBoxes>(find.byType(CodeBoxes)).errorText,
+        isNull,
+      );
+      await _tap(tester, find.text(Strings.retry));
+      await tester.pump();
+      expect(attempts, 2);
+    });
+
+    testWidgets('otp_throttled_on_verify_shows_the_wait_not_a_wrong_code', (
+      tester,
+    ) async {
+      final h = _Harness();
+      h.repo.onVerify = (_, _) async =>
+          throw _error(429, 'otp_throttled', retry: 90);
+      await h.pump(tester, _verifyPage());
+
+      await tester.enterText(find.byType(TextField), '123456');
+      await tester.pump();
+
+      expect(find.text(Strings.throttled(90)), findsOneWidget);
+      expect(
+        tester.widget<CodeBoxes>(find.byType(CodeBoxes)).errorText,
+        isNull,
+      );
+      expect(find.text(Strings.codeWrong), findsNothing);
+    });
+
+    testWidgets('the_credential_is_cleared_on_dispose', (tester) async {
+      final h = _Harness();
+      final credential = PendingCredential('a-long-password');
+      await h.pump(tester, _verifyPage(credential: credential));
+      expect(credential.password, 'a-long-password');
+
+      await tester.pumpWidget(const SizedBox());
+      expect(credential.password, isNull);
+    });
+
+    testWidgets('the_credential_is_cleared_after_a_successful_verify', (
+      tester,
+    ) async {
+      final h = _Harness();
+      h.adapter.reply(200, _me);
+      h.repo.onVerify = (_, _) async => 'tok';
+      final credential = PendingCredential('a-long-password');
+      await h.pump(tester, _verifyPage(credential: credential));
+
+      await tester.enterText(find.byType(TextField), '123456');
+      await _settle(tester);
+
+      expect(credential.password, isNull);
+    });
+
+    testWidgets('a_resend_after_the_credential_was_cleared_asks_to_sign_in', (
+      tester,
+    ) async {
+      final h = _Harness();
+      var now = DateTime(2026, 1, 1, 12);
+      final ticks = StreamController<void>.broadcast(sync: true);
+      addTearDown(ticks.close);
+      final credential = PendingCredential('a-long-password')..clear();
+      await h.pump(
+        tester,
+        _verifyPage(
+          clock: () => now,
+          ticks: ticks.stream,
+          credential: credential,
+        ),
+      );
+
+      now = now.add(const Duration(seconds: 31));
+      ticks.add(null);
+      await tester.pump();
+      await _tap(tester, find.byKey(const ValueKey('resend-button')));
+      await tester.pump();
+
+      expect(h.repo.signInCalls, 0);
+      expect(find.text(Strings.signInAgain), findsOneWidget);
     });
 
     testWidgets('a_verified_account_signs_in_and_leaves_the_flow', (

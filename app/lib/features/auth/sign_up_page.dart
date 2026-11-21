@@ -9,6 +9,7 @@ import '../../core/ui/brand_header.dart';
 import '../../core/ui/states.dart';
 import 'auth_errors.dart';
 import 'auth_repository.dart';
+import 'pending_credential.dart';
 
 const int _passwordMin = 10;
 const int _passwordMax = 128;
@@ -26,7 +27,11 @@ class SignUpPage extends ConsumerStatefulWidget {
     required this.onSignIn,
   });
 
-  final void Function(CodeChallenge challenge, String phone, String password)
+  final void Function(
+    CodeChallenge challenge,
+    String phone,
+    PendingCredential credential,
+  )
   onCodeSent;
   final VoidCallback onSignIn;
 
@@ -102,7 +107,7 @@ class _SignUpPageState extends ConsumerState<SignUpPage> {
           );
       if (!mounted) return;
       setState(() => _busy = false);
-      widget.onCodeSent(challenge, phone, password);
+      widget.onCodeSent(challenge, phone, PendingCredential(password));
     } catch (e) {
       if (!mounted) return;
       setState(() {
