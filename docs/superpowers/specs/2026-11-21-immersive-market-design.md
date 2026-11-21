@@ -1,7 +1,7 @@
 # The Immersive Market: Design
 
 Date: 2026-11-21
-Status: Draft for owner approval. Nothing here is built. The prototype that settled the feel was throwaway and is not in the repository.
+Status: Approved by the owner 2026-11-21 (design only; nothing in it is built yet). The prototype that settled the feel was throwaway and is not in the repository.
 Part of: the Flutter app (part 7). Read with `2026-10-22-abuja-marketplace-design.md` (the product) and `docs/superpowers/plans/2026-11-20-07-mobile-app.md` (the app overview).
 
 ## 1. Intent

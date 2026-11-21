@@ -327,3 +327,12 @@ app/
 - **Placeholders:** none. The only deferred values are the application id and bundle id (the product has no name yet, overview D1), flagged in Task 1 and Task 12.
 - **Type consistency:** `CodeChallenge`, `PhoneUnverified`, `ApiError`, `Countdown`, `Gate`, `AppConfig`, `Me`, `SessionState`, `AddressRepository` and `AreaCouncil` are defined in the task that first needs them and used with the same names after.
 - **Not run on this machine:** there is no Flutter toolchain, emulator or iPhone here today. Tasks 1 and 12 say so and Task 12's hand check must be reported as not run if it cannot happen.
+
+## Decisions made during execution
+
+- The status chip colour for `delivered` has foreground `#0F6F4E` (was `#12805A`) so it meets AA contrast.
+- An `errorText` colour role exists: light `#B3262E`, dark equal to `bad`.
+- The start-up gate's failure fallback never carries maintenance: a saved update-required minimum still stands.
+- The two API-client seam providers throw until the session layer supplies them.
+- The password hand-offs use short-lived providers (`PendingCredential`, `pendingVerificationProvider`, `pendingResetProvider`), never route state.
+- The update notice has no store link yet, because `/app/config` has no store URL field (plan 7e adds it).
