@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
@@ -5,6 +7,16 @@ import 'api_error.dart';
 
 const _authKey = 'auth';
 const _plainHttpHosts = {'10.0.2.2', 'localhost', '127.0.0.1'};
+const Object _notJson = Object();
+
+/// Decodes a JSON string; returns [_notJson] when it is not valid JSON.
+Object? _tryDecode(String raw) {
+  try {
+    return jsonDecode(raw);
+  } on FormatException {
+    return _notJson;
+  }
+}
 
 /// JSON over HTTP for the server API. Throws [ApiError] on any failure.
 ///
@@ -89,9 +101,10 @@ class ApiClient {
         error = ApiError.timeout();
       case DioExceptionType.badResponse:
         final response = e.response;
+        final data = response?.data;
         error = ApiError.fromResponse(
           response?.statusCode ?? 0,
-          response?.data,
+          data is String ? _tryDecode(data) : data,
         );
         final sentAuth = e.requestOptions.extra[_authKey] != false;
         if (error.status == 401 && sentAuth && !_signedOut) {
@@ -122,17 +135,46 @@ class ApiClient {
     Object? body,
     bool auth = true,
   }) async {
+    // Dio ignores baseUrl for an absolute URL, which would send the bearer
+    // token to another host (or over plain http). Only server-relative paths.
+    final parsed = Uri.tryParse(path);
+    if (parsed == null ||
+        !path.startsWith('/') ||
+        path.startsWith('//') ||
+        parsed.hasScheme ||
+        parsed.hasAuthority) {
+      throw ApiError(
+        status: 0,
+        code: 'invalid_path',
+        message: 'Invalid request path.',
+      );
+    }
     try {
-      final response = await dio.request<Object?>(
+      final response = await dio.request<String>(
         path,
         data: body,
         queryParameters: query,
-        options: Options(method: method, extra: {_authKey: auth}),
+        options: Options(
+          method: method,
+          extra: {_authKey: auth},
+          // Decoded here so a malformed body is a typed error, not a dio
+          // "unknown" exception that would read as being offline.
+          responseType: ResponseType.plain,
+        ),
       );
-      if (response.statusCode == 204) return null;
-      final data = response.data;
-      if (data is String && data.isEmpty) return null;
-      return data;
+      final status = response.statusCode ?? 0;
+      final raw = response.data;
+      if (status == 204 || raw == null || raw.isEmpty) return null;
+      final decoded = _tryDecode(raw);
+      if (decoded is Map || decoded is List || decoded == null) {
+        // A literal `null` body decodes to null; "not JSON" is the sentinel.
+        if (!identical(decoded, _notJson)) return decoded;
+      }
+      throw ApiError(
+        status: status,
+        code: 'bad_response',
+        message: 'The server sent an unexpected response.',
+      );
     } on DioException catch (e) {
       final error = e.error;
       if (error is ApiError) throw error;

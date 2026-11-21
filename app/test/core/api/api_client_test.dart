@@ -158,6 +158,75 @@ void main() {
     );
   });
 
+  test('a_json_typed_5xx_with_an_html_body_is_a_server_error', () async {
+    final client = build();
+    adapter.reply(502, '<html>Bad Gateway</html>', 'application/json');
+    await expectLater(
+      client.get('/x'),
+      throwsA(
+        isA<ApiError>()
+            .having((e) => e.status, 'status', 502)
+            .having((e) => e.isOffline, 'isOffline', isFalse)
+            .having((e) => e.isServerDown, 'isServerDown', isTrue),
+      ),
+    );
+  });
+
+  test('a_2xx_with_a_non_json_body_is_a_bad_response_error', () async {
+    final client = build();
+    adapter.reply(200, '<html>Captive portal</html>');
+    adapter.reply(200, '<html>Captive portal</html>', 'application/json');
+    adapter.reply(200, '"just a string"', 'application/json');
+    for (var i = 0; i < 3; i++) {
+      await expectLater(
+        client.get('/x'),
+        throwsA(
+          isA<ApiError>()
+              .having((e) => e.code, 'code', 'bad_response')
+              .having((e) => e.status, 'status', 200),
+        ),
+      );
+    }
+  });
+
+  test('a_401_guard_re_arms_when_a_different_token_is_read', () async {
+    final client = build();
+    const body = {
+      'error': {'code': 'unauthorized', 'message': 'Sign in'},
+    };
+    Future<void> hit() async {
+      adapter.reply(401, body);
+      await client.get('/x').then<void>((_) {}).catchError((Object _) {});
+    }
+
+    token = 'A';
+    await hit();
+    expect(unauthorizedCalls, 1);
+    await hit();
+    expect(unauthorizedCalls, 1);
+    token = 'B';
+    await hit();
+    expect(unauthorizedCalls, 2);
+  });
+
+  test('an_absolute_or_schemeful_path_is_refused_before_any_request', () async {
+    final client = build();
+    for (final path in [
+      'http://evil.test/x',
+      'https://evil.test/x',
+      '//evil.test/x',
+      'x',
+      'ftp://evil.test',
+    ]) {
+      await expectLater(
+        client.get(path),
+        throwsA(isA<ApiError>().having((e) => e.code, 'code', 'invalid_path')),
+        reason: path,
+      );
+    }
+    expect(adapter.requests, isEmpty);
+  });
+
   test('requests_time_out_after_15_seconds', () {
     final client = build();
     expect(client.dio.options.connectTimeout, const Duration(seconds: 15));
