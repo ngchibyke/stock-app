@@ -37,6 +37,30 @@ abstract final class Strings {
   static const String passwordTooShort = 'Use at least 10 characters.';
   static const String passwordTooLong = 'Use 128 characters or fewer.';
 
+  // Sign-in form.
+  static const String signInTitle = 'Welcome back';
+  static const String signInSubtitle = 'Sign in to your account.';
+  static const String signInAction = 'Sign in';
+  static const String createAccountInstead = 'New here? Create an account';
+  static const String passwordRequired = 'Enter your password.';
+  // One message for a wrong password and for an unknown phone: the screen
+  // never says which of the two it was.
+  static const String invalidCredentials =
+      'That phone number and password do not match. Check them and try again.';
+
+  // The app shell.
+  static const String home = 'Home';
+  static const String signOut = 'Sign out';
+
+  // Full-screen notices (the gate).
+  static const String updateRequiredTitle = 'Please update the app';
+  static const String updateRequiredBody =
+      'This version is too old to keep working. '
+      'Open your app store and install the latest version.';
+  static const String maintenanceTitle = 'Back soon';
+  static const String maintenanceFallback =
+      'We are making improvements. Please try again in a little while.';
+
   // Code page.
   static const String verifyTitle = 'Enter your code';
   static String verifySubtitle(String phone) =>
