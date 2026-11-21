@@ -10,6 +10,8 @@ String formatNaira(int kobo) {
   final whole = abs ~/ 100;
   final fraction = abs % 100;
   final grouped = NumberFormat.decimalPattern('en_NG').format(whole);
-  final decimals = fraction == 0 ? '' : '.${fraction.toString().padLeft(2, '0')}';
+  final decimals = fraction == 0
+      ? ''
+      : '.${fraction.toString().padLeft(2, '0')}';
   return '${negative ? '-' : ''}₦$grouped$decimals';
 }
