@@ -54,6 +54,14 @@ Disputes and notifications (part 5):
 - **Push:** notices go out through Firebase Cloud Messaging with the fixed copy and two ids, and nothing else: no order, name, amount or message text reaches a lock screen. A signed-out session gets no push, a dead token is disabled, and an outage is retried with backoff without re-sending to devices that already got it.
 - **Flagged payments:** a buyer can no longer release an order whose payment the provider flagged.
 
+App support (part 7a):
+
+- **Catalog:** a fixed list of ten categories (`GET /categories`), public browse and search over published products (`GET /products`: text search that forgives typos, category, condition and price filters, sorting, stable paging), and a store directory (`GET /stores`). Products from a suspended or unpublished store never appear.
+- **Photos:** a seller or buyer asks for an upload slot (`POST /uploads`), the phone `PUT`s the file straight to object storage with the signed link, then finalizes it (`POST /uploads/{id}/finalize`). Finalizing makes the server re-encode the photo as a JPEG at most 2048 px on a side, which drops EXIF and GPS data, and refuses anything that is not a real image, is over 5 MiB, or would decode to more than 40 million pixels. The finished key is then attached to a product, store, review or dispute, and the server checks that the key is the caller's own finished upload of the right kind and is not already used elsewhere. Public photos are served from a public bucket by address; dispute evidence lives in a private bucket and is reached only through `GET /disputes/{id}/photo?key=...`, which hands the buyer, the seller or staff a link that works for 60 seconds.
+- **Password reset:** by SMS code. The request answers the same way for every phone, so it cannot be used to find out who has an account. Confirming sets the new password, ends every session and clears the sign-in lockout.
+- **SMS codes:** sign-up and reset codes go out through an SMS provider behind a small trait (fixed message text, never the phone or code in a log). A throttled request says so (`429 otp_throttled`, with `retry_after_secs`) and never hands back a verification id for a code that was not sent. The provider is Termii (`SMS_PROVIDER=termii`), on its do-not-disturb route so codes reach numbers that opted out of promotions.
+- **App config:** `GET /app/config` tells the app the minimum version per platform, the terms and privacy links, the support address and any maintenance notice (settings `APP_*`).
+
 ## Owner dashboard
 
 `dashboard/` is the owner and support web app (React, Vite, TypeScript; every screen is animated with the `motion` library and respects the system's reduced-motion setting). It is a static build that talks to this API with the normal bearer session. Owner sees everything; Support sees disputes and moderation only.
@@ -83,7 +91,7 @@ npm run e2e      # browser tests against the real server (needs Postgres; see be
 | 4 | Moderated chat and reviews (done) |
 | 5 | Disputes and notifications (done) |
 | 6 | Owner web dashboard (done) |
-| 7 | Flutter phone app (Android and iPhone) |
+| 7 | Flutter phone app (Android and iPhone). 7a, the server additions the app needs, is done; 7b to 7e are not written |
 | 8 | Data export, deletion and retention |
 
 The design is in [docs/superpowers/specs/2026-10-22-abuja-marketplace-design.md](docs/superpowers/specs/2026-10-22-abuja-marketplace-design.md). The build plan and the items each later part must handle are in [docs/superpowers/plans/2026-10-23-00-roadmap.md](docs/superpowers/plans/2026-10-23-00-roadmap.md).
@@ -120,6 +128,16 @@ You need Rust (stable) and Docker.
 
 The Android and iOS app lives in `app/` (Flutter). Install the stable Flutter SDK, then from `app/` run `flutter pub get`, `dart run build_runner build --delete-conflicting-outputs`, `flutter analyze` and `flutter test`. See `app/README.md` for the placeholder app id that must be changed before the first store upload.
 
+### Trying photo uploads by hand (optional)
+
+Uploads need an S3-compatible store. For local work `docker-compose.yml` has an optional MinIO with a public and a private bucket:
+
+```bash
+docker compose --profile storage up -d minio minio-setup
+```
+
+MinIO no longer publishes images on Docker Hub, so the compose file uses whatever `minio/minio:latest` you already have locally (or the image named by `MINIO_IMAGE`). Check where an image comes from before you run it. Then put the local values from `server/.env.example` into `server/.env` (plain http is accepted only for localhost, and only when `APP_ENV` is development or test). The credentials in the compose file are public and local only.
+
 ## Tests
 
 The tests run against the local database:
@@ -127,6 +145,8 @@ The tests run against the local database:
 ```bash
 cd server && DATABASE_URL=postgres://market:market@localhost:5433/market cargo test
 ```
+
+One test talks to a real MinIO and is skipped by default; with the storage profile above running, `cargo test --test s3_presign -- --ignored against_a_local_minio` checks that a real store accepts the server's signatures, refuses a wrong content type, and keeps the private bucket private.
 
 Every push and pull request runs format, lint, the full test suite against Postgres, and a dependency security audit (`.github/workflows/ci.yml`).
 
@@ -152,11 +172,15 @@ These are tracked in the roadmap:
 - DPO and legal: Anthropic as a processor, the cross-border transfer under the NDPA, and the privacy notice covering automated checks on chats.
 - DPO: strikes and mutes are automated decisions about a person. The server gives a reason and a human route (dismiss, unmute), but whether that is sufficient under the NDPA needs review.
 - Native-speaker review of the word lists and the eval fixture, and a run of the language eval (`server/tests/tone_eval.rs`), with the owner choosing the accuracy bar before launch.
-- Photos in reviews are not checked and can carry phone numbers. Decide before launch. The upload plan must also check that a key belongs to the uploader.
+- Photos are re-encoded but not looked at: nothing detects a phone number written on a product or review photo, or an inappropriate image. Decide before launch whether to add a moderation step. Ownership is checked: a photo key must be the caller's own finished upload.
 - Owner decisions: whether users can report a message that got through (not in the spec, so not built); whether chat should close some time after an order ends; whether sellers may see buyer names.
 - DPO and legal: Google (Firebase Cloud Messaging) as a processor of push tokens, and the cross-border transfer under the NDPA; the privacy notice naming push; and whether generic lock-screen copy is enough, or users should be able to opt out per kind of notice.
 - DPO: retention of dispute statements and evidence photos (which may hold personal data of third parties), inbox rows and push devices; Support's access to statements inside open disputes; and staff free-text notes, which are kept in the audit log for every admin action, now including return requests and dispute decisions.
-- Evidence photos on a dispute are not checked and can carry phone numbers, as in reviews. The upload plan must check that a key belongs to the uploader.
+- Evidence photos on a dispute are not looked at and can carry phone numbers, as in reviews. Ownership of the key is checked (part 7a).
 - Owner decisions on disputes: whether the seller's 48 hours should pause on Sundays and holidays (today they are calendar hours, like the ship deadline); whether a withdrawn report should ever be reopenable; and whether a dispute on a courier order still in transit should cancel the courier.
 - The daily statement check (plan 6) has no Mono adapter: confirm whether Mono offers a statement API, and its shape and units, then write `StatementSource` for it and set the tolerance (`server/src/statement`). Until then production installs no source and the job does nothing.
 - Set `FCM_SERVICE_ACCOUNT_FILE` to the Firebase service-account file, kept outside the repository. Production refuses to start without it.
+- DPO and legal (part 7a), for review and not as conclusions: the object store as a processor of photos, its region and any cross-border transfer; retention of uploads, and a purge on account erasure (part 8); photos that may show faces or other people; and whether evidence photos need access logging beyond staff reads.
+- Termii (the SMS provider) as a processor of phone numbers. Before going live: get the sender ID approved (the company that registers it should be registered in Nigeria), ask Termii support to switch on the do-not-disturb route for the account (the server sends every code on it), confirm the per-message price, and run a sandbox test: a real code to a number on the do-not-disturb list, and what Termii answers to a bad number, an empty balance and a bad key (Termii does not document its error bodies, so the adapter sorts failures by HTTP status). Production refuses to start without `SMS_PROVIDER`.
+- The production database role needs permission to create the `pg_trgm` extension (catalog search), or the database owner creates it before the first deploy.
+- Set the photo storage variables (`S3_*`, `UPLOADS_PUBLIC_BASE_URL`), kept outside the repository: production refuses to start without them. Also set `SMS_PROVIDER=termii`, `TERMII_API_KEY` (a secret) and `TERMII_SENDER_ID`, and the `APP_*` settings (`APP_MIN_VERSION_ANDROID`, `APP_MIN_VERSION_IOS`, `APP_TERMS_URL`, `APP_PRIVACY_URL`, `APP_SUPPORT_EMAIL`, `APP_MAINTENANCE_MESSAGE`).

@@ -5,5 +5,6 @@ pub mod reset;
 pub mod routes;
 pub mod sessions;
 pub mod sms;
+pub mod sms_termii;
 
 pub use extractor::{AuthUser, Role};

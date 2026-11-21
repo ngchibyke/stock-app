@@ -1,5 +1,6 @@
 pub mod access_codes;
 pub mod admin;
+pub mod app_config;
 pub mod audit;
 pub mod auth;
 pub mod cart;
@@ -68,6 +69,8 @@ pub struct AppState {
     /// The provider's daily statement, for reconciliation. `None` until a
     /// provider adapter exists (see [`statement`]).
     pub statements: Option<Arc<dyn statement::StatementSource>>,
+    /// What `GET /app/config` answers (config `APP_*`).
+    pub app_config: Arc<app_config::AppClientConfig>,
 }
 
 async fn health() -> Json<Value> {
@@ -111,6 +114,7 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
+        .merge(app_config::router())
         .merge(auth::routes::router())
         .merge(access_codes::routes::router())
         .merge(stores::routes::router())
