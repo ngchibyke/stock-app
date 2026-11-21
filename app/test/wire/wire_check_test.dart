@@ -1,4 +1,4 @@
-// Wire check: drives the app's real network code against a REAL running
+﻿// Wire check: drives the app's real network code against a REAL running
 // server, because the unit tests use a fake HTTP adapter and cannot prove the
 // wire contract.
 //
@@ -27,6 +27,40 @@ final _otpLog = Platform.environment['WIRE_OTP_LOG'] ?? '';
 final String? _skip = (_baseUrl.isEmpty || _otpLog.isEmpty)
     ? 'set WIRE_BASE_URL and WIRE_OTP_LOG to run the wire check'
     : null;
+
+/// True only for an http(s) URL whose host is exactly localhost, 127.0.0.1 or
+/// ::1 (and carries no user info). The wire check signs people up and asks for
+/// SMS codes, so it must never be pointed at a shared or remote server.
+bool isLoopbackBaseUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return false;
+  if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+  if (uri.userInfo.isNotEmpty) return false;
+  return const {'localhost', '127.0.0.1', '::1'}.contains(uri.host);
+}
+
+/// Describes how two `POST /auth/password-reset` answers differ in shape (key
+/// set, type of `verification_id`, `resend_after_secs`), or null if they match.
+String? resetShapeDifference(
+  Map<String, Object?> real,
+  Map<String, Object?> unknown,
+) {
+  final realKeys = real.keys.toSet();
+  final unknownKeys = unknown.keys.toSet();
+  if (realKeys.length != unknownKeys.length ||
+      !realKeys.containsAll(unknownKeys)) {
+    return 'keys differ: $realKeys vs $unknownKeys';
+  }
+  if (real['verification_id'].runtimeType !=
+      unknown['verification_id'].runtimeType) {
+    return 'verification_id type differs';
+  }
+  if (real['resend_after_secs'] != unknown['resend_after_secs']) {
+    return 'resend_after_secs differs: ${real['resend_after_secs']} vs '
+        '${unknown['resend_after_secs']}';
+  }
+  return null;
+}
 
 final _codeLine = RegExp(r'OTP code:\s*(\d{6})');
 
@@ -71,6 +105,9 @@ String _password() =>
 /// comes from a variable, and the real repositories.
 class _Stack {
   _Stack() {
+    if (!isLoopbackBaseUrl(_baseUrl)) {
+      throw StateError('the wire check only talks to a loopback server');
+    }
     api = ApiClient(
       baseUrl: _baseUrl,
       readToken: () async => token,
@@ -128,7 +165,67 @@ void _wire(String name, Future<void> Function() body) {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // These run in the normal `flutter test`, wire checks skipped or not.
+  group('wire check safety', () {
+    test('isLoopbackBaseUrl accepts only loopback hosts', () {
+      for (final ok in [
+        'http://localhost:8080',
+        'http://127.0.0.1:8080',
+        'http://[::1]:8080',
+        'https://localhost',
+      ]) {
+        expect(isLoopbackBaseUrl(ok), isTrue, reason: ok);
+      }
+      for (final bad in [
+        'http://192.168.1.20:8080',
+        'https://api.example.com',
+        'http://localhost.evil.com',
+        'http://user@evil.com',
+        'http://localhost@evil.com',
+        'http://127.0.0.1.evil.com',
+        'ftp://localhost',
+        'localhost:8080',
+        'http://',
+        '',
+        'not a url',
+      ]) {
+        expect(isLoopbackBaseUrl(bad), isFalse, reason: bad);
+      }
+    });
+
+    test('resetShapeDifference spots any difference in the two answers', () {
+      final base = <String, Object?>{
+        'verification_id': 'a',
+        'resend_after_secs': 60,
+      };
+      expect(
+        resetShapeDifference(base, {...base, 'verification_id': 'b'}),
+        isNull,
+      );
+      expect(resetShapeDifference({...base, 'extra': true}, base), isNotNull);
+      expect(resetShapeDifference(base, {...base, 'extra': true}), isNotNull);
+      expect(
+        resetShapeDifference(base, {
+          'verification_id': 1,
+          'resend_after_secs': 60,
+        }),
+        isNotNull,
+      );
+      expect(
+        resetShapeDifference(base, {...base, 'resend_after_secs': 30}),
+        isNotNull,
+      );
+    });
+  });
+
   setUpAll(() {
+    if (_skip == null && !isLoopbackBaseUrl(_baseUrl)) {
+      fail(
+        'WIRE_BASE_URL must be a loopback address (localhost, 127.0.0.1 or '
+        '[::1]); the wire check signs people up and requests SMS codes, so '
+        'it refuses every other server.',
+      );
+    }
     // flutter test blocks real network access by default.
     HttpOverrides.global = null;
   });
@@ -346,39 +443,42 @@ void main() {
     final oldToken = s.token!;
     expect((await s.me()).phone, isNotEmpty);
 
-    // A reset for a real account.
-    late CodeChallenge challenge;
+    // A reset for a real account, as the raw answer the server sends.
+    late Map<String, Object?> realAnswer;
     final code = await _codeAfter(() async {
-      challenge = await s.auth.requestPasswordReset(user.phone);
+      final json = await s.api.post(
+        '/auth/password-reset',
+        auth: false,
+        body: {'phone': user.phone},
+      );
+      expect(json, isA<Map>());
+      realAnswer = (json! as Map).cast<String, Object?>();
     });
+    final challenge = CodeChallenge(
+      verificationId: realAnswer['verification_id']! as String,
+      resendAfterSecs: realAnswer['resend_after_secs']! as int,
+    );
     expect(challenge.verificationId, isNotEmpty);
     expect(challenge.resendAfterSecs, greaterThan(0));
 
-    // A reset for a phone with no account must look the same.
+    // A reset for a phone with no account must look exactly the same.
     final ghost = await s.api.post(
       '/auth/password-reset',
       auth: false,
       body: {'phone': _nextPhone()},
     );
     expect(ghost, isA<Map>());
-    final ghostMap = (ghost! as Map).cast<String, Object?>();
-    expect(ghostMap['verification_id'], isA<String>());
+    final ghostAnswer = (ghost! as Map).cast<String, Object?>();
     expect(
-      ghostMap['resend_after_secs'],
-      challenge.resendAfterSecs,
-      reason: 'the unknown-phone answer must carry the same resend_after_secs',
+      resetShapeDifference(realAnswer, ghostAnswer),
+      isNull,
+      reason: 'the real-account and unknown-phone answers must not differ',
     );
-    final real = await s.api.post(
-      '/auth/password-reset',
-      auth: false,
-      // Throttled for the real phone now; compare shapes via a second ghost.
-      body: {'phone': _nextPhone()},
-    );
-    expect(
-      (real! as Map).keys.toSet(),
-      ghostMap.keys.toSet(),
-      reason: 'the answer for two unknown phones must have the same keys',
-    );
+
+    // The repository parses the same answer.
+    final viaRepo = await s.auth.requestPasswordReset(_nextPhone());
+    expect(viaRepo.verificationId, isNotEmpty);
+    expect(viaRepo.resendAfterSecs, challenge.resendAfterSecs);
 
     // A wrong code is refused.
     final wrong = code == '000000' ? '111111' : '000000';

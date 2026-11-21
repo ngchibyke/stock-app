@@ -49,5 +49,9 @@ set, so the normal `flutter test` stays offline.
 flutter test test/wire/wire_check_test.dart
 ```
 
+The check refuses any `WIRE_BASE_URL` whose host is not `localhost`,
+`127.0.0.1` or `[::1]`: it signs people up and asks for SMS codes, so it must
+never run against a shared, staging or live server. There is no override.
+
 Each run uses fresh phone numbers, so it can be repeated against the same
 scratch database. Drop the scratch database when finished.
