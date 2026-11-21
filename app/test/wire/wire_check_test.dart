@@ -1,4 +1,4 @@
-﻿// Wire check: drives the app's real network code against a REAL running
+// Wire check: drives the app's real network code against a REAL running
 // server, because the unit tests use a fake HTTP adapter and cannot prove the
 // wire contract.
 //
