@@ -36,6 +36,8 @@ pub struct Config {
     /// Which SMS provider sends sign-up and reset codes (`SMS_PROVIDER`); `None` when unset
     /// (production then refuses to serve; elsewhere codes go to the log).
     pub sms_provider: Option<String>,
+    /// What the app is told at start-up: minimum versions, links, a maintenance notice.
+    pub app: crate::app_config::AppClientConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -372,6 +374,7 @@ impl Config {
             field_key,
             index_key,
             otp_dev_echo,
+            app: crate::app_config::AppClientConfig::from_lookup(&var)?,
             sms_provider: var("SMS_PROVIDER")
                 .map(|v| v.trim().to_lowercase())
                 .filter(|v| !v.is_empty()),

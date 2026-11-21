@@ -140,6 +140,7 @@ impl TestApp {
                 },
             )),
             statements: None,
+            app_config: Arc::new(server::app_config::AppClientConfig::default()),
         };
         Self {
             router: build_app(state.clone()),
@@ -163,6 +164,12 @@ impl TestApp {
         app.state.otp = sender;
         app.router = build_app(app.state.clone());
         app
+    }
+
+    /// Replaces what `GET /app/config` answers.
+    pub fn use_app_config(&mut self, config: server::app_config::AppClientConfig) {
+        self.state.app_config = Arc::new(config);
+        self.router = build_app(self.state.clone());
     }
 
     /// Installs [`statement`](Self::statement) as the app's statement source.
