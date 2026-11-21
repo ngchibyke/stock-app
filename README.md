@@ -116,6 +116,10 @@ You need Rust (stable) and Docker.
    cd server && cargo run -- create-owner --phone 0803XXXXXXX --name "Your Name"
    ```
 
+### The phone app
+
+The Android and iOS app lives in `app/` (Flutter). Install the stable Flutter SDK, then from `app/` run `flutter pub get`, `dart run build_runner build --delete-conflicting-outputs`, `flutter analyze` and `flutter test`. See `app/README.md` for the placeholder app id that must be changed before the first store upload.
+
 ## Tests
 
 The tests run against the local database:
