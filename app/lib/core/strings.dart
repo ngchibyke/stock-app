@@ -49,8 +49,32 @@ abstract final class Strings {
       'That phone number and password do not match. Check them and try again.';
 
   // The app shell.
-  static const String home = 'Home';
+  static const String home = 'Welcome';
   static const String signOut = 'Sign out';
+  static const String tabMarket = 'Market';
+  static const String tabAccount = 'Account';
+  static const String marketOpeningSoon = 'The market is opening soon.';
+  static const String marketOpeningBody =
+      'Browse and buy from sellers near you, right here. '
+      'In the meantime, keep your delivery addresses up to date.';
+  static const String addresses = 'Addresses';
+
+  // The account page.
+  static const String terms = 'Terms of use';
+  static const String privacy = 'Privacy policy';
+  static const String contactSupport = 'Contact support';
+  static const String linkOpenFailed =
+      'We could not open that link. Please try again later.';
+  static String appVersion(String version) => 'Version $version';
+
+  /// The person's role as it reads on the account page; an unknown role is
+  /// shown as the server sent it.
+  static String roleName(String role) => switch (role) {
+    'buyer' => 'Buyer',
+    'seller' => 'Seller',
+    'admin' => 'Admin',
+    _ => role,
+  };
 
   // Full-screen notices (the gate).
   static const String updateRequiredTitle = 'Please update the app';

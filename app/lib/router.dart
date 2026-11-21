@@ -9,6 +9,7 @@ import 'core/session/session_controller.dart';
 import 'core/strings.dart';
 import 'core/theme/tokens.dart';
 import 'core/ui/states.dart';
+import 'features/account/account_page.dart';
 import 'features/auth/auth_errors.dart';
 import 'features/auth/forgot_page.dart';
 import 'features/auth/pending_reset.dart';
@@ -17,6 +18,8 @@ import 'features/auth/reset_page.dart';
 import 'features/auth/sign_in_page.dart';
 import 'features/auth/sign_up_page.dart';
 import 'features/auth/verify_page.dart';
+import 'features/home/home_page.dart';
+import 'features/home/shell.dart';
 
 const String splashPath = '/splash';
 const String blockedPath = '/blocked';
@@ -26,6 +29,7 @@ const String verifyPath = '/verify';
 const String forgotPath = '/forgot';
 const String resetPath = '/reset';
 const String homePath = '/home';
+const String accountPath = '/account';
 
 /// Pages a signed-out person may open.
 const Set<String> _signedOutPaths = {
@@ -93,7 +97,12 @@ bool _hasLiveHandOff(ProviderContainer container) {
 bool _hasResetHandOff(ProviderContainer container) =>
     container.read(pendingResetProvider) != null;
 
-GoRouter buildRouter(ProviderContainer container) {
+/// [extraRoutes] are added at the top level; pages not built yet are stubbed
+/// there by tests.
+GoRouter buildRouter(
+  ProviderContainer container, {
+  List<RouteBase> extraRoutes = const [],
+}) {
   final pending = pendingVerificationProvider;
   return GoRouter(
     initialLocation: homePath,
@@ -237,12 +246,30 @@ GoRouter buildRouter(ProviderContainer container) {
           );
         },
       ),
-      // Replaced by the shell in a later task.
-      GoRoute(
-        path: homePath,
-        builder: (context, state) =>
-            const Scaffold(body: Center(child: Text(Strings.home))),
+      // The signed-in frame: Market and Account, each keeping its own state.
+      StatefulShellRoute.indexedStack(
+        builder: (context, state, navigationShell) =>
+            Shell(navigationShell: navigationShell),
+        branches: [
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: homePath,
+                builder: (context, state) => const HomePage(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: accountPath,
+                builder: (context, state) => const AccountPage(),
+              ),
+            ],
+          ),
+        ],
       ),
+      ...extraRoutes,
     ],
   );
 }
