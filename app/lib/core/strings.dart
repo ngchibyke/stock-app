@@ -20,4 +20,65 @@ abstract final class Strings {
   // Code entry.
   static String codeFieldLabel(int length) =>
       'Verification code, $length digits';
+
+  // Sign-up form.
+  static const String signUpTitle = 'Create your account';
+  static const String signUpSubtitle =
+      'Buy and sell with people you can trust.';
+  static const String phoneLabel = 'Phone number';
+  static const String displayNameLabel = 'Your name';
+  static const String passwordLabel = 'Password';
+  static const String passwordHint = 'At least 10 characters.';
+  static const String signUpAction = 'Create account';
+  static const String signInInstead = 'Already have an account? Sign in';
+  static const String phoneInvalid = 'Enter a Nigerian phone number.';
+  static const String nameRequired = 'Enter your name.';
+  static const String nameTooLong = 'Use 80 characters or fewer for your name.';
+  static const String passwordTooShort = 'Use at least 10 characters.';
+  static const String passwordTooLong = 'Use 128 characters or fewer.';
+
+  // Code page.
+  static const String verifyTitle = 'Enter your code';
+  static String verifySubtitle(String phone) =>
+      'We sent a 6-digit code to $phone.';
+  static const String verifyAction = 'Verify';
+  static const String codeIncomplete = 'Enter all 6 digits.';
+  static const String codeWrong = 'That code is not right. Check it and try.';
+  static const String codeExpired =
+      'That code has expired. Ask for a new code.';
+  static const String codeLocked =
+      'Too many wrong codes. Ask for a new code to try again.';
+  static const String resend = 'Send a new code';
+  static String resendIn(int secs) => 'Send a new code in ${secs}s';
+  static const String resentConfirmation = 'We sent you a new code.';
+  static const String resendPasswordRejected =
+      'We could not send a new code. Go back and create your account again.';
+
+  // Plain messages for failed calls.
+  static const String phoneTaken = 'That phone number already has an account.';
+  static const String otpUnavailable =
+      'We cannot send codes right now. Please try again in a few minutes.';
+  static const String offlineMessage =
+      "You're offline. Check your connection and try again.";
+  static const String timeoutMessage =
+      'That took too long. Check your connection and try again.';
+  static const String serverDownMessage =
+      'Our service is having trouble. Please try again in a few minutes.';
+  static const String throttledGeneric =
+      'Too many tries. Please wait a little and try again.';
+  static const String checkDetails =
+      'Please check what you entered and try again.';
+
+  /// "Please wait 1 minute 30 seconds before trying again." Computed from the
+  /// server's `retry_after_secs`; a missing or zero wait reads generically.
+  static String throttled(int? secs) {
+    if (secs == null || secs <= 0) return throttledGeneric;
+    final minutes = secs ~/ 60;
+    final rest = secs % 60;
+    final parts = <String>[
+      if (minutes > 0) '$minutes minute${minutes == 1 ? '' : 's'}',
+      if (rest > 0) '$rest second${rest == 1 ? '' : 's'}',
+    ];
+    return 'Please wait ${parts.join(' ')} before trying again.';
+  }
 }
