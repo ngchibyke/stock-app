@@ -11,6 +11,7 @@ import '../../core/ui/states.dart';
 import 'auth_errors.dart';
 import 'auth_repository.dart';
 import 'pending_credential.dart';
+import 'pending_reset.dart';
 
 /// Sign in with a phone and a password.
 ///
@@ -27,6 +28,7 @@ class SignInPage extends ConsumerStatefulWidget {
     super.key,
     required this.onUnverified,
     required this.onSignUp,
+    this.onForgot,
   });
 
   final void Function(
@@ -36,6 +38,9 @@ class SignInPage extends ConsumerStatefulWidget {
   )
   onUnverified;
   final VoidCallback onSignUp;
+
+  /// Opens password recovery. The link is shown only when this is given.
+  final VoidCallback? onForgot;
 
   @override
   ConsumerState<SignInPage> createState() => _SignInPageState();
@@ -50,6 +55,21 @@ class _SignInPageState extends ConsumerState<SignInPage> {
   String? _formError;
   bool _retryable = false;
   bool _busy = false;
+
+  // True when the person has just changed their password (shown once).
+  bool _passwordChanged = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _passwordChanged = ref.read(passwordChangedNoticeProvider);
+    if (_passwordChanged) {
+      // A provider may not change while the tree is being built.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(passwordChangedNoticeProvider.notifier).consume();
+      });
+    }
+  }
 
   @override
   void dispose() {
@@ -122,6 +142,19 @@ class _SignInPageState extends ConsumerState<SignInPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_passwordChanged) ...[
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  Strings.passwordChanged,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: context.tokens.ink,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(height: Tokens.s4),
+            ],
             AppTextField(
               label: Strings.phoneLabel,
               controller: _phone,
@@ -145,6 +178,15 @@ class _SignInPageState extends ConsumerState<SignInPage> {
                 onRetry: _retryable && !_busy ? _submit : null,
               ),
             ],
+            if (widget.onForgot != null)
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: TextButton(
+                  style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                  onPressed: widget.onForgot,
+                  child: const Text(Strings.forgotLink),
+                ),
+              ),
             const SizedBox(height: Tokens.s5),
             LoadingButton(
               label: Strings.signInAction,

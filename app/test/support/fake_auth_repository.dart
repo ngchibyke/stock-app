@@ -36,14 +36,30 @@ class FakeAuthRepository implements AuthRepository {
     return onSignIn!(phone, password);
   }
 
+  Future<CodeChallenge> Function(String phone)? onRequestReset;
+  Future<void> Function(String verificationId, String code, String newPassword)?
+  onConfirmReset;
+
+  final List<String> resetPhones = [];
+  final List<String> resetIds = [];
+  final List<String> resetCodes = [];
+  final List<String> resetPasswords = [];
+
   @override
-  Future<CodeChallenge> requestPasswordReset(String phone) =>
-      throw UnimplementedError();
+  Future<CodeChallenge> requestPasswordReset(String phone) {
+    resetPhones.add(phone);
+    return onRequestReset!(phone);
+  }
 
   @override
   Future<void> confirmPasswordReset({
     required String verificationId,
     required String code,
     required String newPassword,
-  }) => throw UnimplementedError();
+  }) {
+    resetIds.add(verificationId);
+    resetCodes.add(code);
+    resetPasswords.add(newPassword);
+    return onConfirmReset!(verificationId, code, newPassword);
+  }
 }

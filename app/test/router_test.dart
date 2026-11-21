@@ -10,6 +10,7 @@ import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/strings.dart';
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/auth/pending_credential.dart';
+import 'package:market/features/auth/pending_reset.dart';
 import 'package:market/features/auth/pending_verification.dart';
 import 'package:market/router.dart';
 import 'package:material_ui/material_ui.dart';
@@ -335,6 +336,155 @@ void main() {
 
       expect(find.text(Strings.verifyTitle), findsNothing);
       expect(find.text(Strings.signInTitle), findsOneWidget);
+    });
+  });
+
+  group('password reset hand-off', () {
+    const challenge = CodeChallenge(verificationId: 'v', resendAfterSecs: 30);
+
+    testWidgets('reset_without_a_hand_off_goes_to_forgot', (tester) async {
+      final h = AppHarness();
+      await h.pump(tester);
+
+      h.container(tester).read(routerProvider).go('/reset');
+      await settle(tester);
+
+      expect(find.text(Strings.forgotTitle), findsOneWidget);
+      expect(find.text(Strings.resetTitle), findsNothing);
+      expect(_uri(tester, h), '/forgot');
+    });
+
+    testWidgets('a_pushed_reset_page_is_refused_once_the_hand_off_is_gone', (
+      tester,
+    ) async {
+      final h = AppHarness();
+      await h.pump(tester);
+      final container = h.container(tester);
+      final router = container.read(routerProvider);
+      container
+          .read(pendingResetProvider.notifier)
+          .set(
+            const PendingReset(challenge: challenge, phone: '0803 123 4567'),
+          );
+      router.go('/forgot');
+      await settle(tester);
+      router.push('/reset');
+      await settle(tester);
+      expect(find.text(Strings.resetTitle), findsOneWidget);
+
+      await tester.tap(find.byTooltip(Strings.back));
+      await settle(tester);
+      expect(container.read(pendingResetProvider), isNull);
+
+      router.push('/reset');
+      await settle(tester);
+      expect(find.text(Strings.resetTitle), findsNothing);
+      expect(find.text(Strings.forgotTitle), findsOneWidget);
+    });
+
+    testWidgets(
+      'a_reset_page_rebuilt_without_a_hand_off_goes_to_forgot_after_the_frame',
+      (tester) async {
+        final h = AppHarness();
+        await h.pump(tester);
+        final container = h.container(tester);
+        final router = container.read(routerProvider);
+        container
+            .read(pendingResetProvider.notifier)
+            .set(
+              const PendingReset(challenge: challenge, phone: '0803 123 4567'),
+            );
+        router.go('/reset');
+        await settle(tester);
+        expect(find.text(Strings.resetTitle), findsOneWidget);
+
+        // Drop the hand-off under the open page, then rebuild the route.
+        container.read(pendingResetProvider.notifier).clear();
+        router.refresh();
+        await settle(tester);
+
+        expect(tester.takeException(), isNull);
+        expect(find.text(Strings.forgotTitle), findsOneWidget);
+        expect(_uri(tester, h), '/forgot');
+      },
+    );
+
+    testWidgets('leaving_the_reset_page_clears_its_hand_off', (tester) async {
+      final h = AppHarness();
+      await h.pump(tester);
+      final container = h.container(tester);
+      container
+          .read(pendingResetProvider.notifier)
+          .set(
+            const PendingReset(challenge: challenge, phone: '0803 123 4567'),
+          );
+      final router = container.read(routerProvider);
+      router.go('/reset');
+      await settle(tester);
+      expect(find.text(Strings.resetTitle), findsOneWidget);
+
+      router.go('/sign-in');
+      await settle(tester);
+
+      expect(container.read(pendingResetProvider), isNull);
+    });
+
+    testWidgets('leaving_the_reset_page_never_clears_a_newer_hand_off', (
+      tester,
+    ) async {
+      final h = AppHarness();
+      await h.pump(tester);
+      final container = h.container(tester);
+      final notifier = container.read(pendingResetProvider.notifier);
+      notifier.set(
+        const PendingReset(challenge: challenge, phone: '0803 123 4567'),
+      );
+      final router = container.read(routerProvider);
+      router.go('/reset');
+      await settle(tester);
+      expect(find.text(Strings.resetTitle), findsOneWidget);
+
+      // A newer hand-off takes the place of the one the page was built for;
+      // the page going away afterwards must not wipe it.
+      const newer = PendingReset(challenge: challenge, phone: '0809 999 9999');
+      notifier.set(newer);
+      router.go('/sign-in');
+      await settle(tester);
+
+      expect(identical(container.read(pendingResetProvider), newer), isTrue);
+    });
+
+    test('it_is_cleared_when_the_person_signs_out', () async {
+      final h = AppHarness(store: MemorySessionStore('tok'));
+      h.adapter.reply(200, testMe);
+      final container = ProviderContainer(overrides: h.pageOverrides);
+      addTearDown(container.dispose);
+      await container.read(sessionProvider.future);
+
+      container
+          .read(pendingResetProvider.notifier)
+          .set(
+            const PendingReset(challenge: challenge, phone: '0803 123 4567'),
+          );
+      expect(container.read(pendingResetProvider), isNotNull);
+
+      h.adapter.reply(200, <String, dynamic>{});
+      await container.read(sessionProvider.notifier).signOut();
+
+      expect(container.read(pendingResetProvider), isNull);
+    });
+
+    test('it_is_cleared_when_the_app_scope_goes_away', () {
+      final h = AppHarness();
+      final container = ProviderContainer(overrides: h.pageOverrides);
+      final notifier = container.read(pendingResetProvider.notifier)
+        ..set(const PendingReset(challenge: challenge, phone: '0803 123 4567'));
+      expect(container.read(pendingResetProvider), isNotNull);
+
+      container.dispose();
+
+      // Nothing readable is left; the notifier no longer holds the phone.
+      expect(notifier.debugHeld, isNull);
     });
   });
 

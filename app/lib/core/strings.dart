@@ -81,6 +81,30 @@ abstract final class Strings {
   static const String resendPasswordRejected =
       'We could not send a new code. Go back and create your account again.';
 
+  // Password recovery.
+  static const String forgotLink = 'Forgot your password?';
+  static const String forgotTitle = 'Reset your password';
+  static const String forgotSubtitle =
+      'Enter your phone number and we will text you a code.';
+  static const String forgotAction = 'Send code';
+  static const String backToSignIn = 'Back to sign in';
+  // Said for every phone number, with or without an account.
+  static const String resetSentNotice =
+      'If that number has an account, we have sent a code.';
+  static const String resetTitle = 'Choose a new password';
+  static const String newPasswordLabel = 'New password';
+  static const String confirmPasswordLabel = 'Confirm new password';
+  static const String passwordsDoNotMatch = 'The two passwords do not match.';
+  static const String resetAction = 'Change password';
+  // One message for a wrong, expired, locked or unknown code.
+  static const String resetCodeInvalid =
+      'That code is not right, or it has expired. Check it, or ask for a new code.';
+  static const String resetPasswordRejected =
+      'That password cannot be used. Choose another one with 10 to 128 '
+      'characters.';
+  static const String passwordChanged =
+      'Your password was changed. Sign in with your new password.';
+
   // Plain messages for failed calls.
   static const String phoneTaken = 'That phone number already has an account.';
   static const String otpUnavailable =

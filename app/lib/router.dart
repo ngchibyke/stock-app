@@ -10,7 +10,10 @@ import 'core/strings.dart';
 import 'core/theme/tokens.dart';
 import 'core/ui/states.dart';
 import 'features/auth/auth_errors.dart';
+import 'features/auth/forgot_page.dart';
+import 'features/auth/pending_reset.dart';
 import 'features/auth/pending_verification.dart';
+import 'features/auth/reset_page.dart';
 import 'features/auth/sign_in_page.dart';
 import 'features/auth/sign_up_page.dart';
 import 'features/auth/verify_page.dart';
@@ -20,6 +23,8 @@ const String blockedPath = '/blocked';
 const String signInPath = '/sign-in';
 const String signUpPath = '/sign-up';
 const String verifyPath = '/verify';
+const String forgotPath = '/forgot';
+const String resetPath = '/reset';
 const String homePath = '/home';
 
 /// Pages a signed-out person may open.
@@ -27,8 +32,8 @@ const Set<String> _signedOutPaths = {
   signInPath,
   signUpPath,
   verifyPath,
-  '/forgot',
-  '/reset',
+  forgotPath,
+  resetPath,
 };
 
 /// Pages (and everything below them) that need a signed-in person. Later tasks
@@ -84,6 +89,10 @@ bool _hasLiveHandOff(ProviderContainer container) {
   return password != null && password.isNotEmpty;
 }
 
+/// Whether the reset page could be built right now: a hand-off is held.
+bool _hasResetHandOff(ProviderContainer container) =>
+    container.read(pendingResetProvider) != null;
+
 GoRouter buildRouter(ProviderContainer container) {
   final pending = pendingVerificationProvider;
   return GoRouter(
@@ -102,6 +111,11 @@ GoRouter buildRouter(ProviderContainer container) {
       if (Uri.parse(location).path == verifyPath &&
           !_hasLiveHandOff(container)) {
         return signInPath;
+      }
+      // The same for the reset page: no hand-off, nothing to enter a code for.
+      if (Uri.parse(location).path == resetPath &&
+          !_hasResetHandOff(container)) {
+        return forgotPath;
       }
       return null;
     },
@@ -132,7 +146,48 @@ GoRouter buildRouter(ProviderContainer container) {
             context.push(verifyPath);
           },
           onSignUp: () => context.go(signUpPath),
+          onForgot: () => context.go(forgotPath),
         ),
+      ),
+      GoRoute(
+        path: forgotPath,
+        builder: (context, state) => ForgotPage(
+          onCodeSent: (challenge, phone) {
+            container
+                .read(pendingResetProvider.notifier)
+                .set(PendingReset(challenge: challenge, phone: phone));
+            context.push(resetPath);
+          },
+          onBack: () => context.go(signInPath),
+        ),
+      ),
+      GoRoute(
+        path: resetPath,
+        // Nothing is carried in the path: with no hand-off in memory the
+        // person asks for a code again.
+        redirect: (context, state) =>
+            _hasResetHandOff(container) ? null : forgotPath,
+        builder: (context, state) {
+          final held = container.read(pendingResetProvider);
+          // A pushed page is not re-checked by the redirects, so one that is
+          // rebuilt without a hand-off sends the person back to ask again.
+          if (held == null) return const _GoTo(forgotPath);
+          return _ClearResetOnLeave(
+            container: container,
+            held: held,
+            child: ResetPage(
+              challenge: held.challenge,
+              phone: held.phone,
+              onReset: () {
+                // No session: the server ended them all. The person signs in
+                // again, with a one-time message saying so.
+                container.read(passwordChangedNoticeProvider.notifier).show();
+                container.read(pendingResetProvider.notifier).clear();
+                context.go(signInPath);
+              },
+            ),
+          );
+        },
       ),
       GoRoute(
         path: signUpPath,
@@ -166,7 +221,7 @@ GoRouter buildRouter(ProviderContainer container) {
           // A pushed code page is not re-checked by the redirects, so one that
           // is rebuilt without a live hand-off sends the person to sign-in.
           if (held == null || !_hasLiveHandOff(container)) {
-            return const _GoToSignIn();
+            return const _GoTo(signInPath);
           }
           return _ClearHolderOnLeave(
             container: container,
@@ -192,20 +247,22 @@ GoRouter buildRouter(ProviderContainer container) {
   );
 }
 
-/// Replaces whatever is stacked with the sign-in page, once built.
-class _GoToSignIn extends StatefulWidget {
-  const _GoToSignIn();
+/// Replaces whatever is stacked with the page at [path], after the frame.
+class _GoTo extends StatefulWidget {
+  const _GoTo(this.path);
+
+  final String path;
 
   @override
-  State<_GoToSignIn> createState() => _GoToSignInState();
+  State<_GoTo> createState() => _GoToState();
 }
 
-class _GoToSignInState extends State<_GoToSignIn> {
+class _GoToState extends State<_GoTo> {
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) context.go(signInPath);
+      if (mounted) context.go(widget.path);
     });
   }
 
@@ -235,6 +292,45 @@ class _ClearHolderOnLeaveState extends State<_ClearHolderOnLeave> {
     scheduleMicrotask(() {
       try {
         container.read(pendingVerificationProvider.notifier).clear();
+      } on StateError {
+        // The container was disposed first: nothing is held any more.
+      }
+    });
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// Drops the reset hand-off (the phone) when the reset page goes away. It
+/// clears only the hand-off the page was built for: a newer one, set before
+/// this page's microtask runs, is left alone.
+class _ClearResetOnLeave extends StatefulWidget {
+  const _ClearResetOnLeave({
+    required this.container,
+    required this.held,
+    required this.child,
+  });
+
+  final ProviderContainer container;
+  final PendingReset held;
+  final Widget child;
+
+  @override
+  State<_ClearResetOnLeave> createState() => _ClearResetOnLeaveState();
+}
+
+class _ClearResetOnLeaveState extends State<_ClearResetOnLeave> {
+  @override
+  void dispose() {
+    final container = widget.container;
+    final held = widget.held;
+    // A provider may not change during a widget life-cycle, so this waits for
+    // the frame to end. By then the whole app may be gone; that is fine.
+    scheduleMicrotask(() {
+      try {
+        container.read(pendingResetProvider.notifier).clearIfCurrent(held);
       } on StateError {
         // The container was disposed first: nothing is held any more.
       }
