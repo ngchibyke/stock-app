@@ -67,6 +67,17 @@ class AppConfig {
   final bool maintenanceActive;
   final String? maintenanceMessage;
 
+  /// This config as a fallback: maintenance is a live, transient server state,
+  /// so it is never carried through a failed fetch. A stored minimum version
+  /// stands (versions only go up).
+  AppConfig withoutMaintenance() => AppConfig(
+    minVersionAndroid: minVersionAndroid,
+    minVersionIos: minVersionIos,
+    termsUrl: termsUrl,
+    privacyUrl: privacyUrl,
+    supportEmail: supportEmail,
+  );
+
   /// The same shape the server sends, so a stored copy reads back through
   /// [AppConfig.fromJson].
   Map<String, Object?> toJson() => {
@@ -116,7 +127,7 @@ class AppConfigRepository {
     } on ApiError {
       // fall through to the last good answer
     }
-    return lastGood ?? AppConfig.empty;
+    return lastGood?.withoutMaintenance() ?? AppConfig.empty;
   }
 
   Future<void> _store(AppConfig config) async {
@@ -154,7 +165,9 @@ class AppConfigNotifier extends AsyncNotifier<AppConfig> {
 
   /// Fetches again, keeping the current value in place meanwhile.
   Future<void> refresh() async {
-    final next = await _fetch(state.value ?? AppConfig.empty);
+    final next = await _fetch(
+      state.value?.withoutMaintenance() ?? AppConfig.empty,
+    );
     if (ref.mounted) state = AsyncData(next);
   }
 }

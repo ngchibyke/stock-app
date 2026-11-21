@@ -116,26 +116,100 @@ void main() {
     );
   });
 
-  test('maintenance_wins_over_everything_and_carries_its_message', () {
-    final config = _config(
-      android: '9.0.0',
-      maintenance: true,
-      message: 'Back at 6pm',
-    );
-    expect(
-      evaluateGate(config, platform: 'android', version: '1.0.0'),
-      Gate.maintenance,
-    );
+  test('maintenance_wins_over_everything_and_carries_its_message', () async {
+    // A real server body goes through the repository's parse; the minimum
+    // would block this version, yet maintenance wins.
+    final adapter = FakeAdapter()
+      ..reply(
+        200,
+        _answer(android: '9.0.0', maintenance: true, message: 'Back at 6pm'),
+      );
+    final container = _container(adapter);
+    final config = await container.read(appConfigProvider.future);
+    await container.read(packageVersionProvider.future);
+
+    expect(config.maintenanceActive, isTrue);
     expect(config.maintenanceMessage, 'Back at 6pm');
-    expect(
-      evaluateGate(
-        _config(maintenance: true),
-        platform: 'ios',
-        version: '1.0.0',
-      ),
-      Gate.maintenance,
-    );
+    expect(container.read(gateProvider), Gate.maintenance);
   });
+
+  test('cached maintenance on then a failed fetch gives Gate.open', () async {
+    final first = FakeAdapter()
+      ..reply(200, _answer(maintenance: true, message: 'Back at 6pm'));
+    final c1 = _container(first);
+    await c1.read(appConfigProvider.future);
+    await c1.read(packageVersionProvider.future);
+    expect(c1.read(gateProvider), Gate.maintenance);
+
+    // A new launch with the server unreachable: the stored copy says
+    // maintenance, but a failure never carries it.
+    for (final fail in <void Function(FakeAdapter)>[
+      (a) => a.failWithConnectionError(),
+      (a) => a.failWithTimeout(),
+      (a) => a.reply(503, {
+        'error': {'code': 'unavailable', 'message': 'x'},
+      }),
+    ]) {
+      final adapter = FakeAdapter();
+      fail(adapter);
+      final c2 = _container(adapter);
+      final config = await c2.read(appConfigProvider.future);
+      await c2.read(packageVersionProvider.future);
+      expect(config.maintenanceActive, isFalse);
+      expect(config.maintenanceMessage, isNull);
+      expect(c2.read(gateProvider), Gate.open);
+    }
+  });
+
+  test(
+    'cached maintenance on then a fresh answer that says active still blocks',
+    () async {
+      final first = FakeAdapter()
+        ..reply(200, _answer(maintenance: true, message: 'old'));
+      final c1 = _container(first);
+      await c1.read(appConfigProvider.future);
+
+      final second = FakeAdapter()
+        ..reply(200, _answer(maintenance: true, message: 'Back at 6pm'));
+      final c2 = _container(second);
+      final config = await c2.read(appConfigProvider.future);
+      await c2.read(packageVersionProvider.future);
+
+      expect(config.maintenanceMessage, 'Back at 6pm');
+      expect(c2.read(gateProvider), Gate.maintenance);
+    },
+  );
+
+  test(
+    'cached update-required plus a failed fetch still requires an update',
+    () async {
+      final first = FakeAdapter()..reply(200, _answer(android: '2.0.0'));
+      final c1 = _container(first);
+      await c1.read(appConfigProvider.future);
+
+      final second = FakeAdapter()..failWithConnectionError();
+      final c2 = _container(second);
+      await c2.read(appConfigProvider.future);
+      await c2.read(packageVersionProvider.future);
+      expect(c2.read(gateProvider), Gate.updateRequired);
+    },
+  );
+
+  test(
+    'a failed refresh after a maintenance answer does not keep maintenance',
+    () async {
+      final adapter = FakeAdapter()
+        ..reply(200, _answer(maintenance: true, message: 'm'));
+      final container = _container(adapter);
+      await container.read(appConfigProvider.future);
+      await container.read(packageVersionProvider.future);
+      expect(container.read(gateProvider), Gate.maintenance);
+
+      adapter.failWithTimeout();
+      await container.read(appConfigProvider.notifier).refresh();
+      expect(container.read(gateProvider), Gate.open);
+    },
+  );
 
   test('a_malformed_version_in_the_config_does_not_block', () {
     for (final bad in ['abc', '1.2', '1.2.3.4', '1.x.0', '-1.0.0', ' ']) {

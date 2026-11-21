@@ -98,6 +98,48 @@ void main() {
     expect(repo.lastGood?.minVersionIos, isNull);
   });
 
+  for (final (label, sent, expected) in <(String, Object?, String?)>[
+    ('a message', 'Back at 6pm', 'Back at 6pm'),
+    ('a null message', null, null),
+    ('an empty message', '', null),
+  ]) {
+    test(
+      'maintenance active with $label parses, is stored and reloads',
+      () async {
+        final (repo, adapter) = await _build();
+        adapter.reply(200, {
+          ..._body,
+          'maintenance': {'active': true, 'message': sent},
+        });
+
+        final parsed = await repo.load();
+        expect(parsed.maintenanceActive, isTrue);
+        expect(parsed.maintenanceMessage, expected);
+
+        final (relaunched, _) = await _build();
+        final stored = relaunched.lastGood!;
+        expect(stored.maintenanceActive, isTrue);
+        expect(stored.maintenanceMessage, expected);
+      },
+    );
+  }
+
+  test('a failed fetch never carries a stored maintenance flag', () async {
+    final (repo, adapter) = await _build();
+    adapter.reply(200, {
+      ..._body,
+      'maintenance': {'active': true, 'message': 'Back at 6pm'},
+    });
+    await repo.load();
+
+    adapter.failWithConnectionError();
+    final fallback = await repo.load();
+    expect(fallback.maintenanceActive, isFalse);
+    expect(fallback.maintenanceMessage, isNull);
+    // The stored minimum stands.
+    expect(fallback.minVersionAndroid, '2.0.0');
+  });
+
   test('the stored copy survives a new repository (a new launch)', () async {
     final (repo, adapter) = await _build();
     adapter.reply(200, _body);
