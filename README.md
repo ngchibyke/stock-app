@@ -124,6 +124,14 @@ You need Rust (stable) and Docker.
    cd server && cargo run -- create-owner --phone 0803XXXXXXX --name "Your Name"
    ```
 
+### The phone app
+
+The Android and iOS app lives in `app/` (Flutter). Today it does sign-up with a phone code, sign-in, password recovery, an account page and an address book. The market itself (browsing, stores, buying and selling) is not built yet.
+
+**The app has NOT been run on a real device or emulator** (none exists on the build machine and the Android licences are not accepted there). The unit and widget tests and the real-server wire check (`app/test/wire`) pass. A first device run should check sign-up with a real SMS code, keyboard and autofill behaviour, the code boxes with the system one-time-code suggestion, text at 200 percent, and the shell and account page.
+
+Install Flutter stable 3.50.1, then from `app/` run `flutter pub get`, `dart run build_runner build --delete-conflicting-outputs`, `flutter analyze` and `flutter test`. See [app/README.md](app/README.md) for how to run it, the wire check, and the list of things to change before the first store upload (placeholder app id, release signing, store link).
+
 ### Trying photo uploads by hand (optional)
 
 Uploads need an S3-compatible store. For local work `docker-compose.yml` has an optional MinIO with a public and a private bucket:
