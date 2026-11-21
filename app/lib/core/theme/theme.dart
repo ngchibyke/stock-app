@@ -132,7 +132,7 @@ ThemeData _build(Brightness brightness, TokenColors c) {
       labelStyle: TextStyle(color: c.mute),
       floatingLabelStyle: TextStyle(color: c.mute),
       errorStyle: TextStyle(
-        color: c.bad,
+        color: c.errorText,
         fontSize: Tokens.captionSize,
         fontWeight: FontWeight.w600,
       ),

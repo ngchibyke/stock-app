@@ -25,6 +25,7 @@ class TokenColors extends ThemeExtension<TokenColors> {
     required this.line,
     required this.good,
     required this.bad,
+    required this.errorText,
     required this.paid,
     required this.onTheWay,
     required this.delivered,
@@ -46,6 +47,9 @@ class TokenColors extends ThemeExtension<TokenColors> {
   final Color good;
   final Color bad;
 
+  /// Error TEXT (at least 4.5:1 on bg and card); error borders keep [bad].
+  final Color errorText;
+
   final ChipColors paid;
   final ChipColors onTheWay;
   final ChipColors delivered;
@@ -64,6 +68,7 @@ class TokenColors extends ThemeExtension<TokenColors> {
     Color? line,
     Color? good,
     Color? bad,
+    Color? errorText,
     ChipColors? paid,
     ChipColors? onTheWay,
     ChipColors? delivered,
@@ -81,6 +86,7 @@ class TokenColors extends ThemeExtension<TokenColors> {
       line: line ?? this.line,
       good: good ?? this.good,
       bad: bad ?? this.bad,
+      errorText: errorText ?? this.errorText,
       paid: paid ?? this.paid,
       onTheWay: onTheWay ?? this.onTheWay,
       delivered: delivered ?? this.delivered,
@@ -108,6 +114,7 @@ class TokenColors extends ThemeExtension<TokenColors> {
       line: mix(line, other.line),
       good: mix(good, other.good),
       bad: mix(bad, other.bad),
+      errorText: mix(errorText, other.errorText),
       paid: mixChip(paid, other.paid),
       onTheWay: mixChip(onTheWay, other.onTheWay),
       delivered: mixChip(delivered, other.delivered),
@@ -160,6 +167,7 @@ abstract final class Tokens {
     line: Color(0xFFECE6DE),
     good: Color(0xFF1E9E6A),
     bad: Color(0xFFD4383F),
+    errorText: Color(0xFFB3262E),
     paid: ChipColors(
       background: Color(0xFFE7EAFB),
       foreground: Color(0xFF2B3AA8),
@@ -170,7 +178,7 @@ abstract final class Tokens {
     ),
     delivered: ChipColors(
       background: Color(0xFFDDF5EA),
-      foreground: Color(0xFF12805A),
+      foreground: Color(0xFF0F6F4E),
     ),
     reportOpen: ChipColors(
       background: Color(0xFFFDE2E3),
@@ -193,6 +201,7 @@ abstract final class Tokens {
     line: Color(0xFF2A2F55),
     good: Color(0xFF3CC48C),
     bad: Color(0xFFFF7B80),
+    errorText: Color(0xFFFF7B80),
     paid: ChipColors(
       background: Color(0xFF1F2660),
       foreground: Color(0xFFB5BCFF),

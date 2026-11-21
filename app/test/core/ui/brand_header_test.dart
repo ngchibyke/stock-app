@@ -3,6 +3,7 @@ import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/theme/tokens.dart';
 import 'package:market/core/ui/brand_header.dart';
+import 'package:market/core/ui/code_boxes.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../support/pump_app.dart';
@@ -56,6 +57,33 @@ void main() {
     final bottom = tester.getBottomLeft(find.byKey(const ValueKey('field'))).dy;
     expect(bottom, lessThanOrEqualTo(640 - 300));
   });
+
+  for (final scale in [1.0, 2.0]) {
+    testWidgets(
+      'code_boxes_work_inside_the_header_at_${scale}x_with_keyboard',
+      (tester) async {
+        await pumpApp(
+          tester,
+          BrandHeaderScaffold(
+            title: 'Enter your code',
+            subtitle: 'We sent it by SMS',
+            showBack: true,
+            child: CodeBoxes(
+              onChanged: (_) {},
+              errorText: 'That code is wrong',
+            ),
+          ),
+          scaffold: false,
+          textScale: scale,
+          viewInsets: const EdgeInsets.only(bottom: 300),
+        );
+
+        expect(tester.takeException(), isNull);
+        expect(find.byType(CodeBoxes), findsOneWidget);
+        expect(find.text('That code is wrong'), findsOneWidget);
+      },
+    );
+  }
 
   testWidgets('the_header_does_not_overflow_at_200_percent_text', (
     tester,

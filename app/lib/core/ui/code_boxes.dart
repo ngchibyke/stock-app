@@ -67,35 +67,34 @@ class _CodeBoxesState extends State<CodeBoxes> {
           textField: true,
           child: ExcludeSemantics(
             excluding: false,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                // Boxes shrink on narrow screens rather than overflow.
-                final gaps = CodeBoxes._gap * (widget.length - 1);
-                final fit = (constraints.maxWidth - gaps) / widget.length;
-                final width = fit.isFinite
-                    ? fit.clamp(0.0, CodeBoxes.boxWidth).toDouble()
-                    : CodeBoxes.boxWidth;
-                return SizedBox(
-                  height: CodeBoxes.boxHeight,
-                  child: Stack(
-                    children: [
-                      ExcludeSemantics(
-                        child: ListenableBuilder(
-                          listenable: Listenable.merge([_controller, _focus]),
-                          builder: (context, _) {
-                            final text = _controller.text;
-                            final active = _focus.hasFocus
-                                ? text.length.clamp(0, widget.length - 1)
-                                : -1;
-                            return Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                for (var i = 0; i < widget.length; i++) ...[
-                                  if (i > 0)
-                                    const SizedBox(width: CodeBoxes._gap),
-                                  Container(
+            // No LayoutBuilder here: this widget must answer intrinsic size
+            // queries (BrandHeaderScaffold's SliverFillRemaining asks).
+            child: SizedBox(
+              height: CodeBoxes.boxHeight,
+              child: Stack(
+                children: [
+                  ExcludeSemantics(
+                    child: ListenableBuilder(
+                      listenable: Listenable.merge([_controller, _focus]),
+                      builder: (context, _) {
+                        final text = _controller.text;
+                        final active = _focus.hasFocus
+                            ? text.length.clamp(0, widget.length - 1)
+                            : -1;
+                        return Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            for (var i = 0; i < widget.length; i++) ...[
+                              if (i > 0) const SizedBox(width: CodeBoxes._gap),
+                              // Boxes are up to 46 wide and shrink on
+                              // narrow screens rather than overflow.
+                              Flexible(
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: CodeBoxes.boxWidth,
+                                  ),
+                                  child: Container(
                                     key: ValueKey('code-box-$i'),
-                                    width: width,
                                     height: CodeBoxes.boxHeight,
                                     alignment: Alignment.center,
                                     decoration: BoxDecoration(
@@ -122,49 +121,51 @@ class _CodeBoxesState extends State<CodeBoxes> {
                                       ),
                                     ),
                                   ),
-                                ],
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                      // The one real field: it covers the row, so a tap on
-                      // any box focuses it. Its text and cursor are hidden.
-                      Positioned.fill(
-                        child: TextField(
-                          controller: _controller,
-                          focusNode: _focus,
-                          autofillHints: const [AutofillHints.oneTimeCode],
-                          keyboardType: TextInputType.number,
-                          textInputAction: TextInputAction.done,
-                          enableInteractiveSelection: false,
-                          showCursor: false,
-                          cursorColor: const Color(0x00000000),
-                          style: const TextStyle(
-                            color: Color(0x00000000),
-                            fontSize: 1,
-                          ),
-                          decoration: const InputDecoration(
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            filled: false,
-                            counterText: '',
-                            contentPadding: EdgeInsets.zero,
-                          ),
-                          inputFormatters: [
-                            // Pasted spaces and anything that is not a digit
-                            // go; then the length cap ignores the overflow.
-                            FilteringTextInputFormatter.digitsOnly,
-                            LengthLimitingTextInputFormatter(widget.length),
+                                ),
+                              ),
+                            ],
                           ],
-                          onChanged: _changed,
-                        ),
-                      ),
-                    ],
+                        );
+                      },
+                    ),
                   ),
-                );
-              },
+                  // The one real field: it covers the row, so a tap on
+                  // any box focuses it. Its text and cursor are hidden.
+                  Positioned.fill(
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _focus,
+                      autofillHints: const [AutofillHints.oneTimeCode],
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      // Selection stays on so long-press offers Paste; the
+                      // text, cursor and selection are all invisible.
+                      enableInteractiveSelection: true,
+                      showCursor: false,
+                      cursorColor: const Color(0x00000000),
+                      style: const TextStyle(
+                        color: Color(0x00000000),
+                        fontSize: 1,
+                      ),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        filled: false,
+                        counterText: '',
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      inputFormatters: [
+                        // Pasted spaces and anything that is not a digit
+                        // go; then the length cap ignores the overflow.
+                        FilteringTextInputFormatter.digitsOnly,
+                        LengthLimitingTextInputFormatter(widget.length),
+                      ],
+                      onChanged: _changed,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -175,7 +176,7 @@ class _CodeBoxesState extends State<CodeBoxes> {
             child: Text(
               widget.errorText!,
               style: theme.textTheme.bodySmall?.copyWith(
-                color: colors.bad,
+                color: colors.errorText,
                 fontWeight: FontWeight.w600,
               ),
             ),

@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/theme/tokens.dart';
 import 'package:market/core/ui/code_boxes.dart';
@@ -96,6 +97,42 @@ void main() {
 
     expect(_decorationOf(tester, 2).border!.top.color, Tokens.light.accent);
     expect(_decorationOf(tester, 4).border!.top.color, Tokens.light.line);
+  });
+
+  testWidgets('code_boxes_offer_a_paste_action_and_clean_what_is_pasted', (
+    tester,
+  ) async {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.getData') {
+          return <String, dynamic>{'text': '12 3456 78'};
+        }
+        if (call.method == 'Clipboard.hasStrings') {
+          return <String, dynamic>{'value': true};
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    final changes = <String>[];
+    await pumpApp(tester, CodeBoxes(onChanged: changes.add));
+
+    await tester.longPress(find.byType(TextField));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Paste'), findsOneWidget);
+
+    await tester.tap(find.text('Paste'));
+    await tester.pumpAndSettle();
+
+    expect(changes.last, '123456');
   });
 
   testWidgets('code_boxes_are_labelled_for_screen_readers', (tester) async {
