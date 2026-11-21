@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use crate::auth::sms_termii::{self, TermiiConfig};
 use crate::couriers::shipbubble::{self, ShipbubbleConfig};
 use crate::moderation::claude::{self, ClaudeConfig};
 use crate::notify::fcm::FcmConfig;
@@ -36,6 +37,10 @@ pub struct Config {
     /// Which SMS provider sends sign-up and reset codes (`SMS_PROVIDER`); `None` when unset
     /// (production then refuses to serve; elsewhere codes go to the log).
     pub sms_provider: Option<String>,
+    /// Termii settings; `Some` exactly when `SMS_PROVIDER=termii`.
+    pub termii: Option<TermiiConfig>,
+    /// What the app is told at start-up: minimum versions, links, a maintenance notice.
+    pub app: crate::app_config::AppClientConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -49,6 +54,7 @@ impl std::fmt::Debug for Config {
             .field("fcm", &self.fcm)
             .field("s3", &self.s3)
             .field("sms_provider", &self.sms_provider)
+            .field("termii", &self.termii)
             .finish_non_exhaustive()
     }
 }
@@ -269,8 +275,72 @@ fn fcm_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FcmConfig>
     Ok(Some(cfg))
 }
 
+/// Which SMS provider sends codes (`SMS_PROVIDER`), and its settings. Unset means none:
+/// production then refuses to serve, elsewhere codes go to the log. A name that is not a
+/// provider this server has an adapter for is refused (and not echoed back).
+fn sms_config(
+    var: &impl Fn(&str) -> Option<String>,
+) -> Result<(Option<String>, Option<TermiiConfig>)> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(provider) = get("SMS_PROVIDER").map(|v| v.to_lowercase()) else {
+        return Ok((None, None));
+    };
+    match provider.as_str() {
+        "termii" => {
+            let api_key = get("TERMII_API_KEY")
+                .context("TERMII_API_KEY is required when SMS_PROVIDER is termii")?;
+            let sender_id = get("TERMII_SENDER_ID")
+                .context("TERMII_SENDER_ID is required when SMS_PROVIDER is termii")?;
+            // Alphanumeric sender IDs are 3 to 11 characters.
+            if !(3..=11).contains(&sender_id.chars().count())
+                || !sender_id.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                bail!("TERMII_SENDER_ID must be 3 to 11 letters and digits");
+            }
+            let base_url =
+                get("TERMII_BASE_URL").unwrap_or_else(|| sms_termii::DEFAULT_BASE_URL.into());
+            if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
+                bail!("TERMII_BASE_URL must be an https URL");
+            }
+            Ok((
+                Some(provider),
+                Some(TermiiConfig {
+                    api_key: Secret::new(&api_key),
+                    sender_id,
+                    base_url,
+                    connect_timeout: sms_termii::CONNECT_TIMEOUT,
+                    timeout: sms_termii::REQUEST_TIMEOUT,
+                    insecure_http_for_tests: false,
+                }),
+            ))
+        }
+        _ => bail!("SMS_PROVIDER must be one of: termii"),
+    }
+}
+
+/// True for `http://localhost`, `http://127.0.0.1` and `http://[::1]` (optionally with a port
+/// and path): the only plain-http addresses a developer's own machine can serve.
+fn is_local_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if authority.starts_with('[') {
+        authority.split_once(']').map_or("", |(h, _)| h).to_string() + "]"
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+}
+
 /// Object storage for photos. All seven variables are set together or none is.
-fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> {
+/// `dev` (APP_ENV development or test) additionally allows a MinIO on this machine over
+/// plain http; every other address, and every other environment, needs https.
+fn s3_config(var: &impl Fn(&str) -> Option<String>, dev: bool) -> Result<Option<S3Config>> {
     const NAMES: [&str; 7] = [
         "S3_ENDPOINT",
         "S3_REGION",
@@ -304,10 +374,13 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> 
         ("S3_ENDPOINT", &endpoint),
         ("UPLOADS_PUBLIC_BASE_URL", &base),
     ] {
-        if !url.starts_with("https://") || url.contains(char::is_whitespace) {
+        let allowed = url.starts_with("https://") || (dev && is_local_http(url));
+        if !allowed || url.contains(char::is_whitespace) {
             bail!("{name} must be an https URL");
         }
     }
+    // Only a local MinIO in development gets here with plain http.
+    let plain_http = endpoint.starts_with("http://");
     let path_style = !matches!(get("S3_PATH_STYLE").as_deref(), Some("false" | "0"));
     Ok(Some(S3Config {
         endpoint,
@@ -320,7 +393,7 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> 
         path_style,
         connect_timeout: s3::CONNECT_TIMEOUT,
         timeout: s3::REQUEST_TIMEOUT,
-        insecure_http_for_tests: false,
+        insecure_http_for_tests: plain_http,
     }))
 }
 
@@ -358,7 +431,8 @@ impl Config {
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
         let claude = claude_config(&var)?;
         let fcm = fcm_config(&var)?;
-        let s3 = s3_config(&var)?;
+        let s3 = s3_config(&var, DEV_ECHO_ENVS.contains(&app_env.as_str()))?;
+        let (sms_provider, termii) = sms_config(&var)?;
         Ok(Self {
             public_redirect_url,
             mono,
@@ -372,9 +446,9 @@ impl Config {
             field_key,
             index_key,
             otp_dev_echo,
-            sms_provider: var("SMS_PROVIDER")
-                .map(|v| v.trim().to_lowercase())
-                .filter(|v| !v.is_empty()),
+            app: crate::app_config::AppClientConfig::from_lookup(&var)?,
+            sms_provider,
+            termii,
         })
     }
 }
@@ -441,6 +515,119 @@ mod tests {
         ("S3_SECRET_ACCESS_KEY", "never-logged-secret"),
         ("UPLOADS_PUBLIC_BASE_URL", "https://cdn.example.test"),
     ];
+
+    const TERMII_VARS: [(&str, &str); 3] = [
+        ("SMS_PROVIDER", "termii"),
+        ("TERMII_API_KEY", "TLkey-never-logged-0123"),
+        ("TERMII_SENDER_ID", "StockApp"),
+    ];
+
+    #[test]
+    fn the_sms_provider_is_optional_and_termii_needs_its_settings() {
+        let none = load(&[]).unwrap();
+        assert!(none.sms_provider.is_none() && none.termii.is_none());
+
+        let cfg = load(&TERMII_VARS).unwrap();
+        assert_eq!(cfg.sms_provider.as_deref(), Some("termii"));
+        let termii = cfg.termii.unwrap();
+        assert_eq!(termii.sender_id, "StockApp");
+        assert_eq!(termii.base_url, "https://api.ng.termii.com");
+        assert!(!termii.insecure_http_for_tests);
+        // Case does not matter for the provider name.
+        assert!(load(&[("SMS_PROVIDER", " Termii "), TERMII_VARS[1], TERMII_VARS[2]]).is_ok());
+
+        // Leaving out a setting names it.
+        for skip in [1, 2] {
+            let partial: Vec<(&str, &str)> = TERMII_VARS
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, p)| *p)
+                .collect();
+            let err = load(&partial).unwrap_err();
+            assert!(err.to_string().contains(TERMII_VARS[skip].0), "{err}");
+        }
+        // The key never appears in the printed config.
+        assert!(!format!("{:?}", load(&TERMII_VARS).unwrap()).contains("TLkey-never-logged"));
+    }
+
+    #[test]
+    fn a_bad_sms_provider_or_sender_id_refuses_to_start() {
+        let err = load(&[("SMS_PROVIDER", "not-a-provider")]).unwrap_err();
+        assert!(err.to_string().contains("SMS_PROVIDER"), "{err}");
+        assert!(
+            !err.to_string().contains("not-a-provider"),
+            "the value is not echoed: {err}"
+        );
+
+        for bad in ["ab", "TooLongSender1", "Stock App", "Stock-App", "Stöck"] {
+            let mut vars = TERMII_VARS.to_vec();
+            vars.push(("TERMII_SENDER_ID", bad));
+            let err = load(&vars).unwrap_err();
+            assert!(err.to_string().contains("TERMII_SENDER_ID"), "{bad}: {err}");
+        }
+        for bad in [
+            "http://api.ng.termii.com",
+            "api.ng.termii.com",
+            "https://a b",
+        ] {
+            let mut vars = TERMII_VARS.to_vec();
+            vars.push(("TERMII_BASE_URL", bad));
+            let err = load(&vars).unwrap_err();
+            assert!(err.to_string().contains("TERMII_BASE_URL"), "{bad}: {err}");
+        }
+        let mut vars = TERMII_VARS.to_vec();
+        vars.push(("TERMII_BASE_URL", "https://sandbox.termii.test"));
+        assert_eq!(
+            load(&vars).unwrap().termii.unwrap().base_url,
+            "https://sandbox.termii.test"
+        );
+    }
+
+    #[test]
+    fn a_local_minio_over_http_is_allowed_only_in_development() {
+        let local = [
+            ("S3_ENDPOINT", "http://localhost:9000"),
+            (
+                "UPLOADS_PUBLIC_BASE_URL",
+                "http://127.0.0.1:9000/market-public",
+            ),
+        ];
+        let with = |env: &'static str| -> Vec<(&str, &str)> {
+            let mut v: Vec<(&str, &str)> = S3_VARS
+                .iter()
+                .filter(|(n, _)| !local.iter().any(|(l, _)| l == n))
+                .copied()
+                .collect();
+            v.extend(local);
+            v.push(("APP_ENV", env));
+            v
+        };
+        for env in ["development", "test"] {
+            let cfg = load(&with(env)).expect(env).s3.unwrap();
+            assert!(
+                cfg.insecure_http_for_tests,
+                "{env}: plain http is on for the local store"
+            );
+        }
+        for env in ["production", "staging"] {
+            let err = load(&with(env)).unwrap_err();
+            assert!(err.to_string().contains("https"), "{env}: {err}");
+        }
+        // Never another host, even in development.
+        for bad in [
+            "http://s3.example.test",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "http://user@evil.test:9000",
+        ] {
+            let mut vars = with("development");
+            vars.push(("S3_ENDPOINT", bad));
+            assert!(load(&vars).is_err(), "{bad}");
+        }
+        // An https store in development stays strict.
+        assert!(!load(&S3_VARS).unwrap().s3.unwrap().insecure_http_for_tests);
+    }
 
     #[test]
     fn photo_storage_is_optional_and_all_or_nothing() {

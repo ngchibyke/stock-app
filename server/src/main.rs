@@ -7,6 +7,8 @@ use server::{
         otp::{LogOtpSender, OtpSender},
         password::{blocking, hash_password, validate_password},
         routes::{create_owner_account, validate_display_name},
+        sms::SmsOtpSender,
+        sms_termii::TermiiSms,
     },
     build_app,
     chat::hub::ChatHub,
@@ -72,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let sms = sms_sender(config.sms_provider.as_deref())?;
+    let sms = sms_sender(&config)?;
     // Before connecting or migrating: a production server with no payment
     // provider would fail every checkout. Admin commands still run.
     if matches!(command, Command::Serve) {
@@ -156,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         chat_hub: chat_hub.clone(),
         // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
         statements: None,
+        app_config: Arc::new(config.app.clone()),
     };
 
     match command {
@@ -262,15 +265,16 @@ fn require_uploads(app_env: &str, configured: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Builds the SMS sender named by `SMS_PROVIDER`.
-///
-/// REVISIT(sms-provider): no provider adapter exists yet (decision D4 in the part 7 plan).
-/// Until one is added every name is refused, so production cannot start without one.
-fn sms_sender(name: Option<&str>) -> anyhow::Result<Option<Arc<dyn OtpSender>>> {
-    match name {
+/// Builds the SMS sender for `SMS_PROVIDER` (Termii, decision D4); `None` when unset.
+fn sms_sender(config: &Config) -> anyhow::Result<Option<Arc<dyn OtpSender>>> {
+    match config.termii.clone() {
+        Some(cfg) => {
+            tracing::info!("termii SMS provider registered");
+            Ok(Some(Arc::new(SmsOtpSender::new(Arc::new(TermiiSms::new(
+                cfg,
+            )?)))))
+        }
         None => Ok(None),
-        // The value is not echoed back.
-        Some(_) => bail!("SMS_PROVIDER does not name a supported provider"),
     }
 }
 
@@ -391,13 +395,6 @@ mod tests {
         for env in ["development", "test", "staging"] {
             assert!(require_sms(env, false).is_ok(), "{env}");
         }
-    }
-
-    #[test]
-    fn an_unknown_sms_provider_is_refused() {
-        assert!(sms_sender(None).unwrap().is_none());
-        let err = sms_sender(Some("not-a-provider")).err().unwrap();
-        assert!(!err.to_string().contains("not-a-provider"), "{err}");
     }
 
     #[test]

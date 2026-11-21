@@ -11,5 +11,56 @@ services:
     volumes:
       - market-db-data:/var/lib/postgresql/data
 
+  # Local photo storage, for trying uploads by hand. Optional: `docker compose up -d db`
+  # does not start it. Start it with
+  #   docker compose --profile storage up -d
+  # then point the server at it with the S3_* values in server/.env.example. Local use only:
+  # the credentials below are public in this file and must never be used anywhere real.
+  #
+  # Image: MinIO no longer publishes images on Docker Hub, so there is no pinned tag to put
+  # here. Set MINIO_IMAGE to an image you trust that contains both `minio` and `mc` (the
+  # default is whatever `minio/minio:latest` you already have locally; Docker will not
+  # fetch it for you). Check the image's source before you run it.
+  minio:
+    profiles: ["storage"]
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    pull_policy: never
+    container_name: market-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: market-local
+      MINIO_ROOT_PASSWORD: market-local-secret
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - market-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # One-shot helper: makes the two buckets (public for product, store and review photos,
+  # private for dispute evidence) and lets anyone read the public one. Then it exits.
+  minio-setup:
+    profiles: ["storage"]
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    pull_policy: never
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 market-local market-local-secret &&
+        mc mb --ignore-existing local/market-public local/market-private &&
+        mc anonymous set download local/market-public &&
+        mc anonymous set none local/market-private &&
+        echo "buckets ready"
+
 volumes:
   market-db-data:
+  market-minio-data:
