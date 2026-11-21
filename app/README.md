@@ -61,8 +61,11 @@ flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080
 ```
 
 `API_BASE_URL` is the address of the server. An Android emulator reaches the
-computer it runs on as `http://10.0.2.2:8080`. On a real phone use the
-computer's address on your network, or a deployed server. For local testing
+computer it runs on as `http://10.0.2.2:8080`. The app refuses plain http to
+any other address, even in a debug build, so a real phone cannot use
+`http://192.168.x.x`: either forward the port over USB (`adb reverse
+tcp:8080 tcp:8080`, then `API_BASE_URL=http://localhost:8080`) or point it
+at an https server. For local testing
 start the server with `OTP_DEV_ECHO=1` so it prints each one-time code to its
 stdout instead of sending an SMS.
 
@@ -124,5 +127,8 @@ The check refuses any `WIRE_BASE_URL` whose host is not `localhost`,
 `127.0.0.1` or `[::1]`: it signs people up and asks for SMS codes, so it must
 never run against a shared, staging or live server. There is no override.
 
-Each run uses fresh phone numbers, so it can be repeated against the same
-scratch database. Drop the scratch database when finished.
+Each run creates test accounts and addresses in the scratch database and uses
+fresh phone numbers, so it can be repeated against the same scratch database.
+Run one check at a time: the code reader takes the latest code in the log.
+The log file holds one-time codes, so keep it outside the repository and
+delete it, and drop the scratch database, when finished.
