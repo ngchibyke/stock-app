@@ -1,4 +1,4 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+﻿import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/api/api_error.dart';
@@ -68,6 +68,12 @@ final addressRepositoryProvider = Provider<AddressRepository>(
 /// it, and it is rebuilt (so emptied) whenever the person signed in changes:
 /// a signed-out person's addresses are never kept. Nothing here touches disk.
 class AddressesNotifier extends AsyncNotifier<List<Address>> {
+  /// Who is signed in right now, or null.
+  String? _signedInUserId() {
+    final state = ref.read(sessionProvider).value;
+    return state is SessionSignedIn ? state.me.id : null;
+  }
+
   @override
   Future<List<Address>> build() async {
     final userId = ref.watch(
@@ -77,7 +83,10 @@ class AddressesNotifier extends AsyncNotifier<List<Address>> {
       }),
     );
     if (userId == null) return const [];
-    return ref.read(addressRepositoryProvider).list();
+    final loaded = await ref.read(addressRepositoryProvider).list();
+    // A slow load for the person who has since signed out is dropped, never
+    // handed to whoever is signed in now.
+    return _signedInUserId() == userId ? loaded : const [];
   }
 
   /// Saves [a] and puts the result at the top of the held list, without a
@@ -86,8 +95,12 @@ class AddressesNotifier extends AsyncNotifier<List<Address>> {
     // Held open across the call, so a form opened with no list on screen is
     // not disposed while it waits.
     final link = ref.keepAlive();
+    // The person this call is for. If someone else is signed in by the time
+    // it finishes, the result belongs to nobody here and is not written.
+    final userId = _signedInUserId();
     try {
       final created = await ref.read(addressRepositoryProvider).create(a);
+      if (_signedInUserId() != userId) return created;
       final current = state.value;
       if (current != null) {
         state = AsyncData([created, ...current]);
@@ -104,12 +117,14 @@ class AddressesNotifier extends AsyncNotifier<List<Address>> {
   /// keeping the row. A 404 means it is already gone, so the row goes too.
   Future<void> remove(String id) async {
     final link = ref.keepAlive();
+    final userId = _signedInUserId();
     try {
       try {
         await ref.read(addressRepositoryProvider).remove(id);
       } on ApiError catch (e) {
         if (e.status != 404) rethrow;
       }
+      if (_signedInUserId() != userId) return;
       final current = state.value;
       if (current != null) {
         state = AsyncData([

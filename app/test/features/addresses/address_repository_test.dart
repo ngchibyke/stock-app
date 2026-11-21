@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_client.dart';
@@ -8,6 +10,7 @@ import 'package:market/features/addresses/address.dart';
 import 'package:market/features/addresses/address_repository.dart';
 
 import '../../support/app_harness.dart';
+import '../../support/fake_address_repository.dart';
 import '../../support/fakes.dart';
 
 AddressRepository _repo(FakeAdapter adapter) => ApiAddressRepository(
@@ -259,6 +262,129 @@ void main() {
       h.adapter.requests.where((r) => r.path == '/me/addresses').length,
       1,
     );
+  });
+
+  group('one person never sees another person\'s address', () {
+    const bMe = {
+      'id': 'u2',
+      'display_name': 'Bola',
+      'phone': '+2348039999999',
+      'role': 'buyer',
+      'is_seller': false,
+    };
+
+    /// Signed in as A (`u1`) with [repo] answering for everyone. Returns the
+    /// container; [switchToB] signs A out and B in.
+    Future<(ProviderContainer, Future<void> Function())> start(
+      FakeAddressRepository repo,
+    ) async {
+      final h = AppHarness(store: MemorySessionStore('tok'));
+      h.adapter.reply(200, testMe);
+      final container = ProviderContainer(
+        overrides: [
+          ...h.pageOverrides,
+          addressRepositoryProvider.overrideWithValue(repo),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(sessionProvider.future);
+      final sub = container.listen(addressesProvider, (_, _) {});
+      addTearDown(sub.close);
+
+      Future<void> switchToB() async {
+        h.adapter
+          ..reply(200, <String, dynamic>{}) // A's sign-out
+          ..reply(200, bMe); // B's /me
+        await container.read(sessionProvider.notifier).signOut();
+        await container.read(sessionProvider.notifier).signInWithToken('tok-b');
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      return (container, switchToB);
+    }
+
+    test(
+      'a_create_that_finishes_after_b_signed_in_never_reaches_bs_list',
+      () async {
+        final done = Completer<Address>();
+        final repo = FakeAddressRepository()..onCreate = (_) => done.future;
+        final (container, switchToB) = await start(repo);
+        await container.read(addressesProvider.future);
+
+        final pending = container.read(addressesProvider.notifier).create(_new);
+        await Future<void>.delayed(Duration.zero);
+        await switchToB();
+        await container.read(addressesProvider.future);
+        final before = container.read(addressesProvider);
+        expect(before.value, isEmpty);
+
+        done.complete(testAddress(id: 'a-secret'));
+        await pending;
+        await Future<void>.delayed(Duration.zero);
+
+        final after = container.read(addressesProvider);
+        expect(after.value!.map((a) => a.id), isNot(contains('a-secret')));
+        expect(after.value, isEmpty);
+        expect(identical(after, before), isTrue, reason: 'B state untouched');
+      },
+    );
+
+    test(
+      'a_remove_that_finishes_after_b_signed_in_never_touches_bs_list',
+      () async {
+        final done = Completer<void>();
+        final repo = FakeAddressRepository([testAddress(id: 'shared')])
+          ..onRemove = (_) => done.future;
+        final (container, switchToB) = await start(repo);
+        await container.read(addressesProvider.future);
+
+        final pending = container
+            .read(addressesProvider.notifier)
+            .remove('shared');
+        await Future<void>.delayed(Duration.zero);
+        // B has a row that happens to carry the same id.
+        repo.onList = () async => [testAddress(id: 'shared', name: 'Bola')];
+        await switchToB();
+        final bList = await container.read(addressesProvider.future);
+        expect(bList.map((a) => a.id), ['shared']);
+        final before = container.read(addressesProvider);
+
+        done.complete();
+        await pending;
+        await Future<void>.delayed(Duration.zero);
+
+        final after = container.read(addressesProvider);
+        expect(after.value!.map((a) => a.recipientName), ['Bola']);
+        expect(identical(after, before), isTrue, reason: 'B state untouched');
+      },
+    );
+
+    test('a_slow_list_load_for_a_never_fills_bs_state', () async {
+      final slow = Completer<List<Address>>();
+      var calls = 0;
+      final repo = FakeAddressRepository()
+        ..onList = () {
+          calls++;
+          return calls == 1
+              ? slow.future
+              : Future.value([testAddress(id: 'b1', name: 'Bola')]);
+        };
+      final (container, switchToB) = await start(repo);
+      // A's list is still loading.
+      expect(container.read(addressesProvider).isLoading, isTrue);
+
+      await switchToB();
+      expect(
+        (await container.read(addressesProvider.future)).map((a) => a.id),
+        ['b1'],
+      );
+
+      slow.complete([testAddress(id: 'a-secret', name: 'Ada Obi')]);
+      await Future<void>.delayed(Duration.zero);
+
+      final ids = container.read(addressesProvider).value!.map((a) => a.id);
+      expect(ids, ['b1']);
+    });
   });
 
   test('server_errors_map_to_api_errors', () async {

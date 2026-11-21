@@ -552,6 +552,70 @@ void main() {
       },
     );
 
+    for (final width in [400.0, 320.0]) {
+      testWidgets(
+        'the_council_menu_and_closed_field_do_not_clip_at_200_percent_on_${width.toInt()}_wide',
+        (tester) async {
+          tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+          addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+          await openForm(tester, FakeAddressRepository());
+          tester.view.physicalSize = Size(width, 1000);
+          await settle(tester);
+
+          // Open menu: every item shows its whole label inside its own box.
+          final picker = find.byType(DropdownButtonFormField<AreaCouncil>);
+          await tester.ensureVisible(picker);
+          await tester.tap(picker);
+          await settle(tester);
+          expect(tester.takeException(), isNull);
+          for (final c in AreaCouncil.values) {
+            final item = find
+                .ancestor(
+                  of: find.text(c.label).last,
+                  matching: find.byType(DropdownMenuItem<AreaCouncil>),
+                )
+                .last;
+            final textBox = tester.getRect(find.text(c.label).last);
+            final itemBox = tester.getRect(item);
+            expect(
+              itemBox.height,
+              greaterThanOrEqualTo(textBox.height),
+              reason: '${c.wire} item is shorter than its text',
+            );
+            expect(
+              textBox.right,
+              lessThanOrEqualTo(itemBox.right + 0.5),
+              reason: '${c.wire} text runs past its item',
+            );
+            expect(textBox.left, greaterThanOrEqualTo(itemBox.left - 0.5));
+            expect(itemBox.top, lessThanOrEqualTo(textBox.top + 0.5));
+            expect(itemBox.bottom, greaterThanOrEqualTo(textBox.bottom - 0.5));
+          }
+
+          // Select the longest label; the closed field shows all of it.
+          await tester.tap(find.text(AreaCouncil.amac.label).last);
+          await settle(tester);
+          expect(tester.takeException(), isNull);
+          final closed = tester.getRect(
+            find
+                .descendant(
+                  of: picker,
+                  matching: find.text(AreaCouncil.amac.label),
+                )
+                .first,
+          );
+          final field = tester.getRect(picker);
+          expect(field.contains(closed.topLeft), isTrue);
+          expect(field.contains(closed.bottomRight), isTrue);
+
+          // And it opens again with the selection in place.
+          await tester.tap(picker);
+          await settle(tester);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+
     testWidgets('the_form_survives_a_very_long_name_and_line_at_200_percent', (
       tester,
     ) async {
