@@ -358,3 +358,127 @@ fn http_endpoints_are_refused_outside_tests() {
     };
     assert!(S3Store::new(cfg).is_err());
 }
+
+/// A real S3-compatible store, as `docker compose --profile storage up -d` provides on this
+/// machine. Ignored by default (CI has none); run it with
+/// `cargo test --test s3_presign -- --ignored against_a_local_minio`.
+/// What the fakes and the mock server cannot show: that the stored signature is the one a
+/// real store accepts, that a wrong length or type is refused, and that the buckets are
+/// public and private as intended.
+#[tokio::test]
+#[ignore = "needs the local MinIO from docker-compose.yml (--profile storage)"]
+async fn against_a_local_minio() {
+    let cfg = S3Config {
+        endpoint: "http://127.0.0.1:9000".into(),
+        region: "us-east-1".into(),
+        bucket_public: "market-public".into(),
+        bucket_private: "market-private".into(),
+        access_key_id: "market-local".into(),
+        secret_access_key: Secret::new("market-local-secret"),
+        public_base_url: "http://127.0.0.1:9000/market-public".into(),
+        path_style: true,
+        connect_timeout: Duration::from_secs(2),
+        timeout: Duration::from_secs(10),
+        insecure_http_for_tests: true,
+    };
+    let s = S3Store::new(cfg).unwrap();
+    let http = reqwest::Client::new();
+    let ttl = Duration::from_secs(60);
+    let body = b"hello from the app".to_vec();
+    let unique = format!("test/{}", uuid::Uuid::new_v4());
+
+    for bucket in [Bucket::Public, Bucket::Private] {
+        let key = format!("{unique}-{bucket:?}");
+        // A phone's signed upload goes through with exactly the declared type and length.
+        let signed = s
+            .presign_put(bucket, &key, "image/jpeg", body.len() as u64, ttl)
+            .unwrap();
+        let mut put = http.put(&signed.url).body(body.clone());
+        for (name, value) in &signed.headers {
+            put = put.header(name, value);
+        }
+        let res = put.send().await.unwrap();
+        assert!(
+            res.status().is_success(),
+            "{bucket:?} signed put: {}",
+            res.status()
+        );
+
+        // A different type is refused: the signature covers it.
+        let other = s
+            .presign_put(
+                bucket,
+                &format!("{key}-b"),
+                "image/jpeg",
+                body.len() as u64,
+                ttl,
+            )
+            .unwrap();
+        let res = http
+            .put(&other.url)
+            .header("content-type", "text/html")
+            .header("content-length", body.len())
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            !res.status().is_success(),
+            "{bucket:?} wrong type: {}",
+            res.status()
+        );
+
+        // The server reads it back, with the size limit enforced.
+        assert_eq!(s.get(bucket, &key, 1024).await.unwrap(), body);
+        assert_eq!(s.get(bucket, &key, 4).await, Err(StoreError::TooLarge));
+        assert_eq!(
+            s.get(bucket, &format!("{key}-missing"), 1024).await,
+            Err(StoreError::NotFound)
+        );
+
+        // A signed read works; the same address with the signature stripped does not.
+        let url = s.presign_get(bucket, &key, ttl).unwrap();
+        let res = http.get(&url).send().await.unwrap();
+        assert_eq!(
+            res.bytes().await.unwrap().to_vec(),
+            body,
+            "{bucket:?} signed get"
+        );
+        let bare = url.split('?').next().unwrap();
+        let res = http.get(bare).send().await.unwrap();
+        match bucket {
+            Bucket::Public => assert!(res.status().is_success(), "public bucket serves it"),
+            Bucket::Private => {
+                assert!(
+                    !res.status().is_success(),
+                    "private bucket must not: {}",
+                    res.status()
+                );
+            }
+        }
+
+        // Deleting works, and deleting what is gone succeeds too.
+        s.delete(bucket, &key).await.unwrap();
+        assert_eq!(s.get(bucket, &key, 1024).await, Err(StoreError::NotFound));
+        s.delete(bucket, &key).await.unwrap();
+    }
+
+    // The server's own put (used for the re-encoded photo) lands in the public bucket.
+    let key = format!("{unique}-server-put");
+    s.put(Bucket::Public, &key, body.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    let public = s.public_url(&key).unwrap();
+    assert_eq!(
+        http.get(&public)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec(),
+        body
+    );
+    s.delete(Bucket::Public, &key).await.unwrap();
+}
