@@ -271,8 +271,25 @@ fn fcm_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<FcmConfig>
     Ok(Some(cfg))
 }
 
+/// True for `http://localhost`, `http://127.0.0.1` and `http://[::1]` (optionally with a port
+/// and path): the only plain-http addresses a developer's own machine can serve.
+fn is_local_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if authority.starts_with('[') {
+        authority.split_once(']').map_or("", |(h, _)| h).to_string() + "]"
+    } else {
+        authority.split(':').next().unwrap_or("").to_string()
+    };
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+}
+
 /// Object storage for photos. All seven variables are set together or none is.
-fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> {
+/// `dev` (APP_ENV development or test) additionally allows a MinIO on this machine over
+/// plain http; every other address, and every other environment, needs https.
+fn s3_config(var: &impl Fn(&str) -> Option<String>, dev: bool) -> Result<Option<S3Config>> {
     const NAMES: [&str; 7] = [
         "S3_ENDPOINT",
         "S3_REGION",
@@ -306,10 +323,13 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> 
         ("S3_ENDPOINT", &endpoint),
         ("UPLOADS_PUBLIC_BASE_URL", &base),
     ] {
-        if !url.starts_with("https://") || url.contains(char::is_whitespace) {
+        let allowed = url.starts_with("https://") || (dev && is_local_http(url));
+        if !allowed || url.contains(char::is_whitespace) {
             bail!("{name} must be an https URL");
         }
     }
+    // Only a local MinIO in development gets here with plain http.
+    let plain_http = endpoint.starts_with("http://");
     let path_style = !matches!(get("S3_PATH_STYLE").as_deref(), Some("false" | "0"));
     Ok(Some(S3Config {
         endpoint,
@@ -322,7 +342,7 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>) -> Result<Option<S3Config>> 
         path_style,
         connect_timeout: s3::CONNECT_TIMEOUT,
         timeout: s3::REQUEST_TIMEOUT,
-        insecure_http_for_tests: false,
+        insecure_http_for_tests: plain_http,
     }))
 }
 
@@ -360,7 +380,7 @@ impl Config {
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
         let claude = claude_config(&var)?;
         let fcm = fcm_config(&var)?;
-        let s3 = s3_config(&var)?;
+        let s3 = s3_config(&var, DEV_ECHO_ENVS.contains(&app_env.as_str()))?;
         Ok(Self {
             public_redirect_url,
             mono,
@@ -444,6 +464,51 @@ mod tests {
         ("S3_SECRET_ACCESS_KEY", "never-logged-secret"),
         ("UPLOADS_PUBLIC_BASE_URL", "https://cdn.example.test"),
     ];
+
+    #[test]
+    fn a_local_minio_over_http_is_allowed_only_in_development() {
+        let local = [
+            ("S3_ENDPOINT", "http://localhost:9000"),
+            (
+                "UPLOADS_PUBLIC_BASE_URL",
+                "http://127.0.0.1:9000/market-public",
+            ),
+        ];
+        let with = |env: &'static str| -> Vec<(&str, &str)> {
+            let mut v: Vec<(&str, &str)> = S3_VARS
+                .iter()
+                .filter(|(n, _)| !local.iter().any(|(l, _)| l == n))
+                .copied()
+                .collect();
+            v.extend(local);
+            v.push(("APP_ENV", env));
+            v
+        };
+        for env in ["development", "test"] {
+            let cfg = load(&with(env)).expect(env).s3.unwrap();
+            assert!(
+                cfg.insecure_http_for_tests,
+                "{env}: plain http is on for the local store"
+            );
+        }
+        for env in ["production", "staging"] {
+            let err = load(&with(env)).unwrap_err();
+            assert!(err.to_string().contains("https"), "{env}: {err}");
+        }
+        // Never another host, even in development.
+        for bad in [
+            "http://s3.example.test",
+            "http://localhost.evil.test",
+            "http://127.0.0.1.evil.test",
+            "http://user@evil.test:9000",
+        ] {
+            let mut vars = with("development");
+            vars.push(("S3_ENDPOINT", bad));
+            assert!(load(&vars).is_err(), "{bad}");
+        }
+        // An https store in development stays strict.
+        assert!(!load(&S3_VARS).unwrap().s3.unwrap().insecure_http_for_tests);
+    }
 
     #[test]
     fn photo_storage_is_optional_and_all_or_nothing() {
