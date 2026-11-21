@@ -207,6 +207,56 @@ void main() {
       expect(find.text(Strings.linkOpenFailed), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    for (final bad in [
+      'http://example.com/terms',
+      'javascript:alert(1)',
+      'https:///x',
+    ]) {
+      for (final isTerms in [true, false]) {
+        testWidgets('a_non_https_link_is_refused_$bad${isTerms ? '' : '_p'}', (
+          tester,
+        ) async {
+          final opener = _Opener();
+          await _openAccount(
+            tester,
+            config: isTerms
+                ? AppConfig(termsUrl: bad)
+                : AppConfig(privacyUrl: bad),
+            opener: opener,
+          );
+
+          await tester.tap(
+            find.text(isTerms ? Strings.terms : Strings.privacy),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(opener.opened, isEmpty);
+          expect(find.text(Strings.linkOpenFailed), findsOneWidget);
+        });
+      }
+    }
+
+    testWidgets('an_uppercase_https_scheme_is_still_https_and_is_opened', (
+      tester,
+    ) async {
+      // Uri.parse lowercases the scheme, so a legitimate HTTPS:// link is
+      // accepted (and opened with the lowercase scheme).
+      final opener = _Opener();
+      await _openAccount(
+        tester,
+        config: const AppConfig(termsUrl: 'HTTPS://example.com/terms'),
+        opener: opener,
+      );
+
+      await tester.tap(find.text(Strings.terms));
+      await tester.pump();
+
+      expect(opener.opened, hasLength(1));
+      expect(opener.opened.single.scheme, 'https');
+      expect(find.text(Strings.linkOpenFailed), findsNothing);
+    });
   });
 
   group('sign out', () {
