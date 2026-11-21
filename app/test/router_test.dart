@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_error.dart';
+import 'package:market/core/config/app_config.dart';
 import 'package:market/core/config/app_gate.dart';
 import 'package:market/core/session/me.dart';
 import 'package:market/core/session/session_controller.dart';
@@ -254,6 +255,85 @@ void main() {
       unawaited(h.container(tester).read(sessionProvider.notifier).signOut());
       await settle(tester);
 
+      expect(find.text(Strings.signInTitle), findsOneWidget);
+    });
+
+    // Signs in as an unverified account so the code page is open with a live
+    // credential.
+    Future<void> openVerify(WidgetTester tester, AppHarness h) async {
+      h.repo.onSignIn = (_, _) async => throw const PhoneUnverified(
+        CodeChallenge(verificationId: 'v-abc', resendAfterSecs: 30),
+      );
+      await h.pump(tester);
+      await tester.enterText(_field(Strings.phoneLabel), '0803 123 4567');
+      await tester.enterText(_field(Strings.passwordLabel), 'my-secret-pass');
+      await tester.tap(find.text(Strings.signInAction));
+      await settle(tester);
+      expect(find.text(Strings.verifyTitle), findsOneWidget);
+    }
+
+    testWidgets('verify_with_a_wiped_credential_redirects_to_sign_in', (
+      tester,
+    ) async {
+      final h = AppHarness();
+      await h.pump(tester);
+      final container = h.container(tester);
+      final credential = PendingCredential('secret-pass')..clear();
+      container
+          .read(pendingVerificationProvider.notifier)
+          .set(
+            PendingVerification(
+              challenge: const CodeChallenge(
+                verificationId: 'v',
+                resendAfterSecs: 30,
+              ),
+              phone: '0803 123 4567',
+              credential: credential,
+            ),
+          );
+
+      container.read(routerProvider).go('/verify');
+      await settle(tester);
+
+      expect(find.text(Strings.signInTitle), findsOneWidget);
+      expect(find.text(Strings.verifyTitle), findsNothing);
+      expect(_uri(tester, h), '/sign-in');
+    });
+
+    testWidgets(
+      'a_gate_flash_on_verify_ends_on_sign_in_not_on_a_broken_code_page',
+      (tester) async {
+        final h = AppHarness();
+        await openVerify(tester, h);
+
+        h.config.set(const AppConfig(maintenanceActive: true));
+        await settle(tester);
+        expect(find.text(Strings.maintenanceTitle), findsOneWidget);
+
+        h.config.set(AppConfig.empty);
+        await settle(tester);
+        expect(find.text(Strings.signInTitle), findsOneWidget);
+        expect(find.text(Strings.verifyTitle), findsNothing);
+        expect(h.container(tester).read(pendingVerificationProvider), isNull);
+      },
+    );
+
+    testWidgets('back_from_verify_then_verify_again_is_refused', (
+      tester,
+    ) async {
+      final h = AppHarness();
+      await openVerify(tester, h);
+      final container = h.container(tester);
+
+      await tester.tap(find.byTooltip(Strings.back));
+      await settle(tester);
+      expect(find.text(Strings.signInTitle), findsOneWidget);
+      expect(container.read(pendingVerificationProvider), isNull);
+
+      container.read(routerProvider).push('/verify');
+      await settle(tester);
+
+      expect(find.text(Strings.verifyTitle), findsNothing);
       expect(find.text(Strings.signInTitle), findsOneWidget);
     });
   });

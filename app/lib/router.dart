@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
@@ -72,16 +74,37 @@ class _RouterRefresh extends ChangeNotifier {
   }
 }
 
+/// Whether a code page could be built right now: a hand-off is held and its
+/// password has not been wiped.
+bool _hasLiveHandOff(ProviderContainer container) {
+  final password = container
+      .read(pendingVerificationProvider)
+      ?.credential
+      .password;
+  return password != null && password.isNotEmpty;
+}
+
 GoRouter buildRouter(ProviderContainer container) {
   final pending = pendingVerificationProvider;
   return GoRouter(
     initialLocation: homePath,
     refreshListenable: _RouterRefresh(container),
-    redirect: (context, state) => redirectFor(
-      session: container.read(sessionProvider),
-      gate: container.read(gateProvider),
-      location: state.uri.toString(),
-    ),
+    redirect: (context, state) {
+      final location = state.uri.toString();
+      final to = redirectFor(
+        session: container.read(sessionProvider),
+        gate: container.read(gateProvider),
+        location: location,
+      );
+      if (to != null) return to;
+      // Checked here as well as on the route: a code page that was pushed is
+      // not re-checked by its own route redirect when the router refreshes.
+      if (Uri.parse(location).path == verifyPath &&
+          !_hasLiveHandOff(container)) {
+        return signInPath;
+      }
+      return null;
+    },
     routes: [
       GoRoute(
         path: splashPath,
@@ -134,19 +157,28 @@ GoRouter buildRouter(ProviderContainer container) {
         // Nothing is carried in the path: with no hand-off in memory (the app
         // was restarted, or someone typed the address) there is no code to
         // enter, so the person signs in again and gets a fresh one.
+        // A wiped credential counts as no hand-off too (the code page wipes it
+        // when it goes away), so the page is only built with a live one.
         redirect: (context, state) =>
-            container.read(pending) == null ? signInPath : null,
+            _hasLiveHandOff(container) ? null : signInPath,
         builder: (context, state) {
           final held = container.read(pending);
-          if (held == null) return const SizedBox.shrink();
-          return VerifyPage(
-            challenge: held.challenge,
-            phone: held.phone,
-            credential: held.credential,
-            onVerified: () {
-              container.read(pending.notifier).clear();
-              context.go(homePath);
-            },
+          // A pushed code page is not re-checked by the redirects, so one that
+          // is rebuilt without a live hand-off sends the person to sign-in.
+          if (held == null || !_hasLiveHandOff(container)) {
+            return const _GoToSignIn();
+          }
+          return _ClearHolderOnLeave(
+            container: container,
+            child: VerifyPage(
+              challenge: held.challenge,
+              phone: held.phone,
+              credential: held.credential,
+              onVerified: () {
+                container.read(pending.notifier).clear();
+                context.go(homePath);
+              },
+            ),
           );
         },
       ),
@@ -158,6 +190,60 @@ GoRouter buildRouter(ProviderContainer container) {
       ),
     ],
   );
+}
+
+/// Replaces whatever is stacked with the sign-in page, once built.
+class _GoToSignIn extends StatefulWidget {
+  const _GoToSignIn();
+
+  @override
+  State<_GoToSignIn> createState() => _GoToSignInState();
+}
+
+class _GoToSignInState extends State<_GoToSignIn> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.go(signInPath);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+/// Drops the hand-off when the code page goes away (back, or a move to another
+/// page), so stale phone and id are not kept. A gate notice also removes the
+/// page; the route's redirect then sends the person to sign-in on return.
+class _ClearHolderOnLeave extends StatefulWidget {
+  const _ClearHolderOnLeave({required this.container, required this.child});
+
+  final ProviderContainer container;
+  final Widget child;
+
+  @override
+  State<_ClearHolderOnLeave> createState() => _ClearHolderOnLeaveState();
+}
+
+class _ClearHolderOnLeaveState extends State<_ClearHolderOnLeave> {
+  @override
+  void dispose() {
+    final container = widget.container;
+    // A provider may not change during a widget life-cycle, so this waits for
+    // the frame to end. By then the whole app may be gone; that is fine.
+    scheduleMicrotask(() {
+      try {
+        container.read(pendingVerificationProvider.notifier).clear();
+      } on StateError {
+        // The container was disposed first: nothing is held any more.
+      }
+    });
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
