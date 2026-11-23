@@ -205,4 +205,21 @@ abstract final class Strings {
     ];
     return 'Please wait ${parts.join(' ')} before trying again.';
   }
+
+  // The market.
+  static const String comingSoon = 'Coming soon';
+  static const String noReviewsYet = 'No reviews yet';
+
+  /// A rating as people say it: "4.5". Whole numbers keep their ".0".
+  static String rating(double value) => value.toStringAsFixed(1);
+
+  /// What a screen reader says for a store on the market.
+  static String openStoreLabel(String name, double? rating, int count) {
+    final reviews = rating == null || count == 0
+        ? 'no reviews yet'
+        : '${Strings.rating(rating)} stars, $count review${count == 1 ? '' : 's'}';
+    return '$name, $reviews, open';
+  }
+
+  static String comingSoonLabel(String district) => '$comingSoon, $district';
 }
