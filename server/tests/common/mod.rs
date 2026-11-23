@@ -141,6 +141,12 @@ impl TestApp {
             )),
             statements: None,
             app_config: Arc::new(server::app_config::AppClientConfig::default()),
+            market: Arc::new(
+                server::market::layout::Layout::load(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("market"),
+                )
+                .expect("the shipped market layout loads"),
+            ),
         };
         Self {
             router: build_app(state.clone()),

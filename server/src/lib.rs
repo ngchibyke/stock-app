@@ -17,6 +17,7 @@ pub mod escrow;
 pub mod extract;
 pub mod ledger;
 pub mod limits;
+pub mod market;
 pub mod moderation;
 pub mod money;
 pub mod notify;
@@ -71,6 +72,8 @@ pub struct AppState {
     pub statements: Option<Arc<dyn statement::StatementSource>>,
     /// What `GET /app/config` answers (config `APP_*`).
     pub app_config: Arc<app_config::AppClientConfig>,
+    /// The market map and its room types, checked once at startup.
+    pub market: Arc<market::layout::Layout>,
 }
 
 async fn health() -> Json<Value> {

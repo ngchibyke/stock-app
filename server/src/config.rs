@@ -41,6 +41,8 @@ pub struct Config {
     pub termii: Option<TermiiConfig>,
     /// What the app is told at start-up: minimum versions, links, a maintenance notice.
     pub app: crate::app_config::AppClientConfig,
+    /// Folder holding the market `layout.json` and `rooms/` (`MARKET_LAYOUT_DIR`).
+    pub market_layout_dir: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for Config {
@@ -449,6 +451,11 @@ impl Config {
             app: crate::app_config::AppClientConfig::from_lookup(&var)?,
             sms_provider,
             termii,
+            market_layout_dir: var("MARKET_LAYOUT_DIR")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "market".into())
+                .into(),
         })
     }
 }
