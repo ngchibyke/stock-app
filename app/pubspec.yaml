@@ -81,6 +81,9 @@ flutter:
     - assets/market/rooms/phone_shop/
     - assets/market/rooms/grocery/
 
+  shaders:
+    - shaders/depth_parallax.frag
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg
