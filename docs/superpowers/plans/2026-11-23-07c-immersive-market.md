@@ -29,7 +29,8 @@
 - **The room never shows what cannot be bought:** only products with `in_stock == true` take a slot.
 - **Personal data:** the market, layouts, rooms and tiles carry none and may be cached on disk. **The cart is personal: never written to disk, never logged.** No slug, id or search text is logged. Search text is sent only as the `q` query value, never in a path.
 - **Remote assets only over https**, from the base URL in `/app/config` (`assets.base_url`); anything else falls back to the bundled art.
-- Golden tests run only on Linux (CI is `ubuntu-latest`); they are tagged `golden` and skipped elsewhere. Baselines are made in Docker (Task 0).
+- **UI feel (owner, 2026-11-23): interactive but simple.** Every tappable control has a pressed state (one shared `Pressable`: scale 0.97 and a tint, 90 ms, none with reduced motion) and primary actions give a light haptic. Spacing only from `Tokens`, generous padding, few elements per screen. No gradients, emoji, card-in-card or filler copy. Don't overbuild.
+- No golden image tests (see the ledger ruling): key frames are checked by widget tests on the values that draw them.
 
 ## Server routes this plan uses
 
