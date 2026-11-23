@@ -222,4 +222,23 @@ abstract final class Strings {
   }
 
   static String comingSoonLabel(String district) => '$comingSoon, $district';
+
+  // Cart.
+  static const String cart = 'Cart';
+  static String cartLabel(int n) => n == 1 ? 'Cart, 1 item' : 'Cart, $n items';
+  static const String cartEmptyTitle = 'Your cart is empty';
+  static const String cartEmptyBody =
+      'Walk into a store and add what you like.';
+  static const String goToMarket = 'Go to the market';
+  static const String noLongerAvailable = 'No longer available';
+  static const String remove = 'Remove';
+  static String removeItemQuestion(String name) => 'Remove $name?';
+  static const String increaseQuantity = 'Add one';
+  static const String decreaseQuantity = 'Take one away';
+  static String eachPrice(String price) => '$price each';
+  static const String total = 'Total';
+  static const String checkoutSoon = 'Checkout opens soon.';
+  static const String cartLoadFailed = "We couldn't load your cart.";
+  static const String cartUpdateFailed =
+      "We couldn't update your cart. Try again.";
 }

@@ -21,6 +21,7 @@ import 'features/auth/reset_page.dart';
 import 'features/auth/sign_in_page.dart';
 import 'features/auth/sign_up_page.dart';
 import 'features/auth/verify_page.dart';
+import 'features/cart/cart_page.dart';
 import 'features/home/home_page.dart';
 import 'features/home/shell.dart';
 
@@ -31,7 +32,6 @@ const String signUpPath = '/sign-up';
 const String verifyPath = '/verify';
 const String forgotPath = '/forgot';
 const String resetPath = '/reset';
-const String homePath = '/home';
 const String accountPath = '/account';
 
 /// Pages a signed-out person may open.
@@ -45,7 +45,12 @@ const Set<String> _signedOutPaths = {
 
 /// Pages (and everything below them) that need a signed-in person. This covers
 /// `/addresses/new` too.
-const List<String> _signedInPrefixes = [homePath, accountPath, addressesPath];
+const List<String> _signedInPrefixes = [
+  homePath,
+  accountPath,
+  addressesPath,
+  cartPath,
+];
 
 bool _isUnder(String path, String prefix) =>
     path == prefix || path.startsWith('$prefix/');
@@ -282,6 +287,7 @@ GoRouter buildRouter(
         path: newAddressPath,
         builder: (context, state) => const AddressFormPage(),
       ),
+      GoRoute(path: cartPath, builder: (context, state) => const CartPage()),
       ...extraRoutes,
     ],
   );
