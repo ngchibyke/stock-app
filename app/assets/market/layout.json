@@ -1,0 +1,514 @@
+{
+  "version": "placeholder-1",
+  "world": {
+    "w": 2048,
+    "h": 2048
+  },
+  "tile_size": 256,
+  "max_level": 3,
+  "base_image": "base.jpg",
+  "districts": [
+    {
+      "id": "fashion",
+      "name": "Fashion"
+    },
+    {
+      "id": "phones-electronics",
+      "name": "Phones and electronics"
+    },
+    {
+      "id": "home-beauty",
+      "name": "Home and beauty"
+    },
+    {
+      "id": "food-groceries",
+      "name": "Food and groceries"
+    },
+    {
+      "id": "everything-else",
+      "name": "Everything else"
+    }
+  ],
+  "plots": [
+    {
+      "id": "fashion-1",
+      "district": "fashion",
+      "x": 88,
+      "y": 88,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-2",
+      "district": "fashion",
+      "x": 318,
+      "y": 88,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-3",
+      "district": "fashion",
+      "x": 548,
+      "y": 88,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-4",
+      "district": "fashion",
+      "x": 778,
+      "y": 88,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-5",
+      "district": "fashion",
+      "x": 88,
+      "y": 313,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-6",
+      "district": "fashion",
+      "x": 318,
+      "y": 313,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-7",
+      "district": "fashion",
+      "x": 548,
+      "y": 313,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-8",
+      "district": "fashion",
+      "x": 778,
+      "y": 313,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-9",
+      "district": "fashion",
+      "x": 88,
+      "y": 538,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-10",
+      "district": "fashion",
+      "x": 318,
+      "y": 538,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-11",
+      "district": "fashion",
+      "x": 548,
+      "y": 538,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-12",
+      "district": "fashion",
+      "x": 778,
+      "y": 538,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-13",
+      "district": "fashion",
+      "x": 88,
+      "y": 763,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-14",
+      "district": "fashion",
+      "x": 318,
+      "y": 763,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-15",
+      "district": "fashion",
+      "x": 548,
+      "y": 763,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "fashion-16",
+      "district": "fashion",
+      "x": 778,
+      "y": 763,
+      "w": 182,
+      "h": 177
+    },
+    {
+      "id": "phones-electronics-1",
+      "district": "phones-electronics",
+      "x": 1088,
+      "y": 88,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-2",
+      "district": "phones-electronics",
+      "x": 1318,
+      "y": 88,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-3",
+      "district": "phones-electronics",
+      "x": 1548,
+      "y": 88,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-4",
+      "district": "phones-electronics",
+      "x": 1778,
+      "y": 88,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-5",
+      "district": "phones-electronics",
+      "x": 1088,
+      "y": 308,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-6",
+      "district": "phones-electronics",
+      "x": 1318,
+      "y": 308,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-7",
+      "district": "phones-electronics",
+      "x": 1548,
+      "y": 308,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-8",
+      "district": "phones-electronics",
+      "x": 1778,
+      "y": 308,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-9",
+      "district": "phones-electronics",
+      "x": 1088,
+      "y": 528,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-10",
+      "district": "phones-electronics",
+      "x": 1318,
+      "y": 528,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-11",
+      "district": "phones-electronics",
+      "x": 1548,
+      "y": 528,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "phones-electronics-12",
+      "district": "phones-electronics",
+      "x": 1778,
+      "y": 528,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-1",
+      "district": "home-beauty",
+      "x": 88,
+      "y": 1068,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-2",
+      "district": "home-beauty",
+      "x": 318,
+      "y": 1068,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-3",
+      "district": "home-beauty",
+      "x": 548,
+      "y": 1068,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-4",
+      "district": "home-beauty",
+      "x": 778,
+      "y": 1068,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-5",
+      "district": "home-beauty",
+      "x": 88,
+      "y": 1288,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-6",
+      "district": "home-beauty",
+      "x": 318,
+      "y": 1288,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-7",
+      "district": "home-beauty",
+      "x": 548,
+      "y": 1288,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-8",
+      "district": "home-beauty",
+      "x": 778,
+      "y": 1288,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-9",
+      "district": "home-beauty",
+      "x": 88,
+      "y": 1508,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-10",
+      "district": "home-beauty",
+      "x": 318,
+      "y": 1508,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-11",
+      "district": "home-beauty",
+      "x": 548,
+      "y": 1508,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "home-beauty-12",
+      "district": "home-beauty",
+      "x": 778,
+      "y": 1508,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-1",
+      "district": "food-groceries",
+      "x": 1088,
+      "y": 828,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-2",
+      "district": "food-groceries",
+      "x": 1318,
+      "y": 828,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-3",
+      "district": "food-groceries",
+      "x": 1548,
+      "y": 828,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-4",
+      "district": "food-groceries",
+      "x": 1778,
+      "y": 828,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-5",
+      "district": "food-groceries",
+      "x": 1088,
+      "y": 1048,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-6",
+      "district": "food-groceries",
+      "x": 1318,
+      "y": 1048,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-7",
+      "district": "food-groceries",
+      "x": 1548,
+      "y": 1048,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-8",
+      "district": "food-groceries",
+      "x": 1778,
+      "y": 1048,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-9",
+      "district": "food-groceries",
+      "x": 1088,
+      "y": 1268,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-10",
+      "district": "food-groceries",
+      "x": 1318,
+      "y": 1268,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-11",
+      "district": "food-groceries",
+      "x": 1548,
+      "y": 1268,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "food-groceries-12",
+      "district": "food-groceries",
+      "x": 1778,
+      "y": 1268,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-1",
+      "district": "everything-else",
+      "x": 1088,
+      "y": 1568,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-2",
+      "district": "everything-else",
+      "x": 1318,
+      "y": 1568,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-3",
+      "district": "everything-else",
+      "x": 1548,
+      "y": 1568,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-4",
+      "district": "everything-else",
+      "x": 1778,
+      "y": 1568,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-5",
+      "district": "everything-else",
+      "x": 1088,
+      "y": 1788,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-6",
+      "district": "everything-else",
+      "x": 1318,
+      "y": 1788,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-7",
+      "district": "everything-else",
+      "x": 1548,
+      "y": 1788,
+      "w": 182,
+      "h": 172
+    },
+    {
+      "id": "everything-else-8",
+      "district": "everything-else",
+      "x": 1778,
+      "y": 1788,
+      "w": 182,
+      "h": 172
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/config/app_config.dart';
 import 'package:market/core/strings.dart';
+import 'package:market/features/market/market_page.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../support/app_harness.dart';
@@ -23,17 +24,11 @@ Future<AppHarness> _openApp(
 }
 
 void main() {
-  testWidgets('the_shell_shows_market_first_with_a_placeholder_and_a_link', (
-    tester,
-  ) async {
+  testWidgets('the_shell_shows_the_market_first', (tester) async {
     await _openApp(tester);
 
-    expect(find.text(Strings.marketOpeningSoon), findsOneWidget);
+    expect(find.byType(MarketPage), findsOneWidget);
     expect(find.byType(NavigationBar), findsOneWidget);
-
-    await tester.tap(find.text(Strings.addresses));
-    await settle(tester);
-    expect(find.text(Strings.addressesEmptyTitle), findsOneWidget);
   });
 
   testWidgets('the_account_row_opens_the_address_book', (tester) async {
@@ -67,7 +62,7 @@ void main() {
 
     await tester.tap(find.text(Strings.tabMarket));
     await settle(tester);
-    expect(find.text(Strings.marketOpeningSoon), findsOneWidget);
+    expect(find.byType(MarketPage), findsOneWidget);
 
     await tester.tap(find.text(Strings.tabAccount));
     await settle(tester);
@@ -104,7 +99,7 @@ void main() {
     await _openApp(tester, size: const Size(320, 640));
 
     expect(tester.takeException(), isNull);
-    expect(find.text(Strings.marketOpeningSoon), findsOneWidget);
+    expect(find.byType(MarketPage), findsOneWidget);
     await tester.tap(find.text(Strings.tabAccount));
     await settle(tester);
     expect(tester.takeException(), isNull);

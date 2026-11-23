@@ -25,6 +25,16 @@ String? _httpsUrl(Object? value) {
   return text;
 }
 
+// A version goes into asset URLs as one path segment, so only plain
+// characters are accepted.
+String? _versionSegment(Object? value) {
+  final text = _text(value);
+  if (text == null || !RegExp(r'^[A-Za-z0-9._-]{1,40}$').hasMatch(text)) {
+    return null;
+  }
+  return text.contains('..') ? null : text;
+}
+
 /// The public app configuration answered by `GET /app/config`.
 ///
 /// Parsed by hand rather than generated: every value may be null or of an
@@ -38,11 +48,14 @@ class AppConfig {
     this.supportEmail,
     this.maintenanceActive = false,
     this.maintenanceMessage,
+    this.assetsVersion,
+    this.assetsBaseUrl,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
     final min = json['min_version'];
     final maintenance = json['maintenance'];
+    final assets = json['assets'];
     return AppConfig(
       minVersionAndroid: min is Map ? _text(min['android']) : null,
       minVersionIos: min is Map ? _text(min['ios']) : null,
@@ -53,6 +66,8 @@ class AppConfig {
       maintenanceMessage: maintenance is Map
           ? _text(maintenance['message'])
           : null,
+      assetsVersion: assets is Map ? _versionSegment(assets['version']) : null,
+      assetsBaseUrl: assets is Map ? _httpsUrl(assets['base_url']) : null,
     );
   }
 
@@ -67,6 +82,11 @@ class AppConfig {
   final bool maintenanceActive;
   final String? maintenanceMessage;
 
+  /// Which art the market uses, and where it is served from. Both null means
+  /// the art bundled with the app.
+  final String? assetsVersion;
+  final String? assetsBaseUrl;
+
   /// This config as a fallback: maintenance is a live, transient server state,
   /// so it is never carried through a failed fetch. A stored minimum version
   /// stands (versions only go up).
@@ -76,6 +96,8 @@ class AppConfig {
     termsUrl: termsUrl,
     privacyUrl: privacyUrl,
     supportEmail: supportEmail,
+    assetsVersion: assetsVersion,
+    assetsBaseUrl: assetsBaseUrl,
   );
 
   /// The same shape the server sends, so a stored copy reads back through
@@ -86,6 +108,7 @@ class AppConfig {
     'privacy_url': privacyUrl,
     'support_email': supportEmail,
     'maintenance': {'active': maintenanceActive, 'message': maintenanceMessage},
+    'assets': {'version': assetsVersion, 'base_url': assetsBaseUrl},
   };
 }
 

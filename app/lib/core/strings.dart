@@ -47,14 +47,9 @@ abstract final class Strings {
       'That phone number and password do not match. Check them and try again.';
 
   // The app shell.
-  static const String home = 'Welcome';
   static const String signOut = 'Sign out';
   static const String tabMarket = 'Market';
   static const String tabAccount = 'Account';
-  static const String marketOpeningSoon = 'The market is opening soon.';
-  static const String marketOpeningBody =
-      'Browse and buy from sellers near you, right here. '
-      'In the meantime, keep your delivery addresses up to date.';
   static const String addresses = 'Addresses';
 
   // The account page.
@@ -205,4 +200,80 @@ abstract final class Strings {
     ];
     return 'Please wait ${parts.join(' ')} before trying again.';
   }
+
+  // The market.
+  static const String comingSoon = 'Coming soon';
+  static const String noReviewsYet = 'No reviews yet';
+
+  /// A rating as people say it: "4.5". Whole numbers keep their ".0".
+  static String rating(double value) => value.toStringAsFixed(1);
+
+  /// What a screen reader says for a store on the market.
+  static String openStoreLabel(String name, double? rating, int count) {
+    final reviews = rating == null || count == 0
+        ? 'no reviews yet'
+        : '${Strings.rating(rating)} stars, $count review${count == 1 ? '' : 's'}';
+    return '$name, $reviews, open';
+  }
+
+  static String comingSoonLabel(String district) => '$comingSoon, $district';
+
+  // Cart.
+  static const String cart = 'Cart';
+  static String cartLabel(int n) => n == 1 ? 'Cart, 1 item' : 'Cart, $n items';
+  static const String cartEmptyTitle = 'Your cart is empty';
+  static const String cartEmptyBody =
+      'Walk into a store and add what you like.';
+  static const String goToMarket = 'Go to the market';
+  static const String noLongerAvailable = 'No longer available';
+  static const String remove = 'Remove';
+  static String removeItemQuestion(String name) => 'Remove $name?';
+  static const String increaseQuantity = 'Add one';
+  static const String decreaseQuantity = 'Take one away';
+  static String eachPrice(String price) => '$price each';
+  static const String total = 'Total';
+  static const String checkoutSoon = 'Checkout opens soon.';
+  static const String cartLoadFailed = "We couldn't load your cart.";
+  static const String cartUpdateFailed =
+      "We couldn't update your cart. Try again.";
+
+  // A store's room.
+  static String fromPrice(String price) => 'From $price';
+  static String shelfCardLabel(String name, String price) =>
+      '$name, from $price';
+  static const String backToMarket = 'Back to market';
+  static const String storeClosed = 'This store has closed.';
+  static const String emptyShelves = 'Nothing on the shelves yet.';
+  static const String roomLoadFailed = "We couldn't open this store.";
+  static const String seeAll = 'See all';
+
+  // A product.
+  static const String addToCart = 'Add to cart';
+  static const String addedToCart = 'Added to your cart';
+  static const String noLongerBuyable = 'This item can no longer be bought';
+  static const String soldOut = 'Sold out';
+  static String onlyLeft(int n) => 'Only $n left';
+  static String photoCount(int at, int of) => '$at of $of';
+  static const String productLoadFailed = "We couldn't load this item.";
+  static String conditionLabel(String c) => switch (c) {
+    'new' => 'New',
+    'used' => 'Used',
+    'refurbished' => 'Refurbished',
+    _ => c,
+  };
+
+  // The market page and its list view.
+  static const String searchMarket = 'Search the market';
+  static const String listView = 'List view';
+  static const String offlineMarket =
+      "You're offline. Showing the market as it was.";
+  static const String marketLoadFailed = "We couldn't open the market.";
+  static const String productsTab = 'Products';
+  static const String storesTab = 'Stores';
+  static const String allCategories = 'All';
+  static String nothingMatches(String q) => 'Nothing matches "$q"';
+  static const String clearSearch = 'Clear search';
+  static const String nothingHereYet = 'Nothing here yet.';
+  static const String listLoadFailed = "We couldn't load this list.";
+  static const String storeLoadFailed = "We couldn't load this store.";
 }

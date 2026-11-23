@@ -9,7 +9,6 @@
 // stdout redirected to the file named by WIRE_OTP_LOG. The one-time codes it
 // prints are throwaway test values.
 import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_client.dart';
@@ -22,22 +21,7 @@ import 'package:market/features/addresses/address_repository.dart';
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-final _baseUrl = Platform.environment['WIRE_BASE_URL'] ?? '';
-final _otpLog = Platform.environment['WIRE_OTP_LOG'] ?? '';
-final String? _skip = (_baseUrl.isEmpty || _otpLog.isEmpty)
-    ? 'set WIRE_BASE_URL and WIRE_OTP_LOG to run the wire check'
-    : null;
-
-/// True only for an http(s) URL whose host is exactly localhost, 127.0.0.1 or
-/// ::1 (and carries no user info). The wire check signs people up and asks for
-/// SMS codes, so it must never be pointed at a shared or remote server.
-bool isLoopbackBaseUrl(String url) {
-  final uri = Uri.tryParse(url);
-  if (uri == null) return false;
-  if (uri.scheme != 'http' && uri.scheme != 'https') return false;
-  if (uri.userInfo.isNotEmpty) return false;
-  return const {'localhost', '127.0.0.1', '::1'}.contains(uri.host);
-}
+import 'wire_support.dart';
 
 /// Describes how two `POST /auth/password-reset` answers differ in shape (key
 /// set, type of `verification_id`, `resend_after_secs`), or null if they match.
@@ -62,54 +46,15 @@ String? resetShapeDifference(
   return null;
 }
 
-final _codeLine = RegExp(r'OTP code:\s*(\d{6})');
-
-List<String> _codeLines() {
-  final file = File(_otpLog);
-  if (!file.existsSync()) return const [];
-  return [
-    for (final line in file.readAsLinesSync())
-      if (_codeLine.hasMatch(line)) line,
-  ];
-}
-
-/// Runs [trigger] (which makes the server send a code) and answers the code
-/// from the NEW line that appeared in the server log afterwards.
-Future<String> _codeAfter(Future<void> Function() trigger) async {
-  final before = _codeLines().length;
-  await trigger();
-  final deadline = DateTime.now().add(const Duration(seconds: 10));
-  while (DateTime.now().isBefore(deadline)) {
-    final lines = _codeLines();
-    if (lines.length > before) {
-      return _codeLine.firstMatch(lines.last)!.group(1)!;
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 100));
-  }
-  fail('no new "OTP code" line in the server log within 10 seconds');
-}
-
-final _random = Random.secure();
-// Distinct per run, so the check can be re-run against the same scratch
-// database. Valid Nigerian mobile numbers: 0803 + 7 digits.
-final int _phoneBase =
-    (DateTime.now().millisecondsSinceEpoch ~/ 1000 % 1000000) * 10;
-int _phoneCount = 0;
-String _nextPhone() =>
-    '0803${(_phoneBase + _phoneCount++).toString().padLeft(7, '0')}';
-
-String _password() =>
-    'Wc-${List.generate(12, (_) => _random.nextInt(36).toRadixString(36)).join()}';
-
 /// One app-side stack against the real server: a real [ApiClient] whose token
 /// comes from a variable, and the real repositories.
 class _Stack {
   _Stack() {
-    if (!isLoopbackBaseUrl(_baseUrl)) {
+    if (!isLoopbackBaseUrl(wireBaseUrl)) {
       throw StateError('the wire check only talks to a loopback server');
     }
     api = ApiClient(
-      baseUrl: _baseUrl,
+      baseUrl: wireBaseUrl,
       readToken: () async => token,
       onUnauthorized: () => unauthorizedCount++,
     );
@@ -130,10 +75,10 @@ class _Stack {
 
   /// Signs up and verifies a fresh phone; leaves [token] set.
   Future<({String phone, String password})> verifiedUser(String name) async {
-    final phone = _nextPhone();
-    final password = _password();
+    final phone = nextPhone();
+    final password = freshPassword();
     late CodeChallenge challenge;
-    final code = await _codeAfter(() async {
+    final code = await codeAfter(() async {
       challenge = await auth.signUp(
         phone: phone,
         password: password,
@@ -159,7 +104,7 @@ void _wire(String name, Future<void> Function() body) {
       print('MISMATCH: $name: $e');
       fail('MISMATCH in $name: $e');
     }
-  }, skip: _skip);
+  }, skip: wireSkip);
 }
 
 void main() {
@@ -219,7 +164,7 @@ void main() {
   });
 
   setUpAll(() {
-    if (_skip == null && !isLoopbackBaseUrl(_baseUrl)) {
+    if (wireSkip == null && !isLoopbackBaseUrl(wireBaseUrl)) {
       fail(
         'WIRE_BASE_URL must be a loopback address (localhost, 127.0.0.1 or '
         '[::1]); the wire check signs people up and requests SMS codes, so '
@@ -258,10 +203,10 @@ void main() {
 
   _wire('sign_up_then_verify_then_me', () async {
     final s = _Stack();
-    final phone = _nextPhone();
-    final password = _password();
+    final phone = nextPhone();
+    final password = freshPassword();
     late CodeChallenge challenge;
-    final code = await _codeAfter(() async {
+    final code = await codeAfter(() async {
       challenge = await s.auth.signUp(
         phone: phone,
         password: password,
@@ -290,8 +235,8 @@ void main() {
     'an_unverified_sign_in_is_403_with_the_top_level_verification_id',
     () async {
       final s = _Stack();
-      final phone = _nextPhone();
-      final password = _password();
+      final phone = nextPhone();
+      final password = freshPassword();
       await s.auth.signUp(
         phone: phone,
         password: password,
@@ -330,16 +275,16 @@ void main() {
 
   _wire('a_throttled_sign_up_reclaim_is_429_with_retry_after_secs', () async {
     final s = _Stack();
-    final phone = _nextPhone();
+    final phone = nextPhone();
     await s.auth.signUp(
       phone: phone,
-      password: _password(),
+      password: freshPassword(),
       displayName: 'Wire',
     );
     try {
       await s.auth.signUp(
         phone: phone,
-        password: _password(),
+        password: freshPassword(),
         displayName: 'Wire Two',
       );
       fail('a second sign-up within 60 seconds must be throttled');
@@ -445,7 +390,7 @@ void main() {
 
     // A reset for a real account, as the raw answer the server sends.
     late Map<String, Object?> realAnswer;
-    final code = await _codeAfter(() async {
+    final code = await codeAfter(() async {
       final json = await s.api.post(
         '/auth/password-reset',
         auth: false,
@@ -465,7 +410,7 @@ void main() {
     final ghost = await s.api.post(
       '/auth/password-reset',
       auth: false,
-      body: {'phone': _nextPhone()},
+      body: {'phone': nextPhone()},
     );
     expect(ghost, isA<Map>());
     final ghostAnswer = (ghost! as Map).cast<String, Object?>();
@@ -476,13 +421,13 @@ void main() {
     );
 
     // The repository parses the same answer.
-    final viaRepo = await s.auth.requestPasswordReset(_nextPhone());
+    final viaRepo = await s.auth.requestPasswordReset(nextPhone());
     expect(viaRepo.verificationId, isNotEmpty);
     expect(viaRepo.resendAfterSecs, challenge.resendAfterSecs);
 
     // A wrong code is refused.
     final wrong = code == '000000' ? '111111' : '000000';
-    final newPassword = _password();
+    final newPassword = freshPassword();
     try {
       await s.auth.confirmPasswordReset(
         verificationId: challenge.verificationId,

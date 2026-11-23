@@ -3,8 +3,10 @@
 The Flutter app for Android and iOS. It talks to the server in `../server`.
 
 Today it does: sign-up with a phone code, sign-in, password recovery, an
-account page and an address book. The market itself (browsing, stores, buying,
-selling) is not built yet.
+account page and an address book, and the **market**: a map of the market you
+pan and pinch, a camera flight into a store's room with its products on the
+shelves, a plain list view with search, product pages and the cart. Checkout,
+orders and selling are not built yet.
 
 ## Status: not yet run on a device
 
@@ -13,8 +15,9 @@ the machine it was built on, and the Android SDK licences are not accepted
 there. What has been done:
 
 - the unit and widget tests pass (`flutter test`);
-- the real-server wire check passed (`test/wire`, see below): the app's real
-  network code was driven against a real running server.
+- the real-server wire checks passed (`test/wire`, see below): the app's real
+  network code was driven against a real running server, including the market
+  path (search, product, sizes, cart totals, the store's plot and its room).
 
 What a first run on a device should check:
 
@@ -22,7 +25,72 @@ What a first run on a device should check:
 - the keyboard and autofill behaviour on each form;
 - the code boxes with the system one-time-code suggestion;
 - text at 200 percent;
-- the shell and the account page.
+- the shell and the account page;
+- the market device checklist below.
+
+## The market
+
+The market screen is drawn from art, not from widgets: a low-resolution
+`base.jpg`, map tiles at three zoom levels, and for each store type a room
+photo with a grayscale depth map. A `MarketSource` gives the app the layout
+(plots, districts, which store stands where) and each room's products.
+
+**Placeholder art.** Until the real art exists (plan 7f) the app ships flat,
+obviously-fake art in `assets/market/`, made by a seeded generator:
+
+```
+dart run tool/placeholder_art.dart
+```
+
+It writes the tiles, `base.jpg`, `layout.json` and every room's image, depth
+map and `room.json`. The same seed always gives the same files.
+
+**Remote art.** When `/app/config` returns an `assets` block with an https
+`base_url` and a `version` (one plain path segment), the app loads art from
+`<base_url>/<version>/` (same file layout as `assets/market/`) and caches it on
+disk; otherwise it uses the bundled art. Publish a new version under a new
+folder rather than overwriting one: the version is the cache key.
+
+**Placement.** Until the server places stores (plan 7d), the app fills plots
+in plot order with active stores sorted by slug.
+
+**Tiers.** A frame-time monitor watches the flight and room drags and steps
+down, never up, when the phone cannot keep up:
+
+- `full`: the camera flight and the depth room with its shader;
+- `reduced`: the flight, and a flat room that only drifts;
+- `fade`: a short fade between the market and a flat room.
+
+The tier is remembered per phone. Reduced motion (the system setting) always
+draws as `fade`, without changing the stored tier.
+
+**The list view** (the list button, or the search bar) is the same catalog as
+a plain list with search, categories and stores: the way to shop for anyone
+who does not want the map, and with TalkBack.
+
+### Device checklist
+
+Run on a real mid-range Android phone (2 to 3 GB of RAM), release build
+(`flutter run --release`), signed in, on 4G not Wi-Fi:
+
+- [ ] First view of the market under 1.5 s from opening the tab (the base image
+      first, then tiles sharpen).
+- [ ] The flight into a store with the performance overlay on
+      (`flutter run --profile`, then press `P`): no long red bars; note
+      the tier it ends on.
+- [ ] Room drag: the depth shifts and settles back; products stay on their
+      shelves and open on tap.
+- [ ] Data used in a ten-minute session of browsing (Android settings, data
+      usage for the app): write the number down.
+- [ ] TalkBack: every store dot is read with its name, the list button and the
+      search are reachable, and a whole purchase-to-cart is possible from the
+      list view alone.
+- [ ] Text at 200 percent: the list, product page and cart still read; nothing
+      is cut off.
+- [ ] Reduced motion (Remove animations in Accessibility): a fade instead of a
+      flight, no drift in the room.
+- [ ] Airplane mode after one visit: the market shows from cache with the
+      offline line; opening a room shows its error with a retry.
 
 ## Before the first store upload
 
@@ -101,7 +169,12 @@ lib/
     account/           the account page
     addresses/         the address book and the area-council picker
     home/              the signed-in shell
-test/                  mirrors lib/; test/wire is the real-server check
+    market/            the market map, the camera flight, rooms and art
+    list/              the list view, search and the store page
+    product/           the product page
+    cart/              the cart and its button
+test/                  mirrors lib/; test/wire holds the real-server checks
+tool/                  the placeholder art generator
 ```
 
 ## Wire check
@@ -122,6 +195,21 @@ set, so the normal `flutter test` stays offline.
 ```
 flutter test test/wire/wire_check_test.dart
 ```
+
+**The market wire check** (`test/wire/market_wire_test.dart`) also needs a
+store with products. Apply the seed to the same scratch database first (it is
+safe to apply twice), then run it:
+
+```
+docker exec -i market-db psql -U market -d <scratch db> < test/wire/fixtures/market_seed.sql
+flutter test test/wire/market_wire_test.dart
+```
+
+It signs up a fresh buyer, searches for the seeded dress, checks its two sizes
+and prices, adds it to the cart and checks the server's total, then loads the
+market and the store's room through the app's market code. The seed's store
+has dummy encrypted fields: it is good for browsing and the cart, not for
+checkout.
 
 The check refuses any `WIRE_BASE_URL` whose host is not `localhost`,
 `127.0.0.1` or `[::1]`: it signs people up and asks for SMS codes, so it must

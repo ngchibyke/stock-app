@@ -10,10 +10,18 @@ import 'package:market/core/config/app_gate.dart';
 import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/session/session_store.dart';
 import 'package:market/features/auth/auth_repository.dart';
+import 'package:market/features/cart/cart_repository.dart';
+import 'package:market/features/catalog/catalog_repository.dart';
+import 'package:market/features/market/data/asset_resolver.dart';
+import 'package:market/features/market/data/json_cache.dart';
+import 'package:market/features/market/data/market_source.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
+import 'fake_asset_resolver.dart';
 import 'fake_auth_repository.dart';
+import 'fake_cart_repository.dart';
+import 'fake_catalog_repository.dart';
 import 'fakes.dart';
 
 const testMe = {
@@ -58,16 +66,28 @@ class GatedSessionStore extends MemorySessionStore {
 }
 
 /// Everything a test of the whole app needs: a fake network, a session store,
-/// a fake config and a fake auth repository.
+/// a fake config, a fake auth repository, and an in-memory catalog and cart.
 class AppHarness {
-  AppHarness({SessionStore? store, AppConfig config = AppConfig.empty})
-    : store = store ?? MemorySessionStore(),
-      config = FakeConfigNotifier(config);
+  AppHarness({
+    SessionStore? store,
+    AppConfig config = AppConfig.empty,
+    FakeCartRepository? cart,
+    FakeCatalogRepository? catalog,
+  }) : store = store ?? MemorySessionStore(),
+       config = FakeConfigNotifier(config),
+       cart = cart ?? FakeCartRepository(),
+       catalog = catalog ?? FakeCatalogRepository();
 
   final FakeAdapter adapter = FakeAdapter();
   final SessionStore store;
   final FakeConfigNotifier config;
   final FakeAuthRepository repo = FakeAuthRepository();
+
+  /// The cart and the catalog live in memory, so the market and the cart
+  /// button never take replies queued on [adapter] for other calls.
+  final FakeCartRepository cart;
+  final FakeCatalogRepository catalog;
+  final MemoryJsonCache cache = MemoryJsonCache();
   String version = '1.0.0';
 
   /// For [MarketRoot], which adds the session hooks itself.
@@ -85,6 +105,10 @@ class AppHarness {
     appConfigProvider.overrideWith(() => config),
     packageVersionProvider.overrideWith((ref) async => version),
     appPlatformProvider.overrideWithValue('android'),
+    cartRepositoryProvider.overrideWithValue(cart),
+    catalogRepositoryProvider.overrideWithValue(catalog),
+    jsonCacheProvider.overrideWith((ref) async => cache),
+    assetResolverProvider.overrideWithValue(FakeAssetResolver()),
   ];
 
   /// For a page or a container built by hand: the same plus the session hooks.
