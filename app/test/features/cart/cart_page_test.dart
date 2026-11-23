@@ -17,9 +17,9 @@ import '../../support/fakes.dart';
 
 /// Opens the app signed in on the cart page, with [repo] as the server.
 Future<AppHarness> _open(WidgetTester tester, FakeCartRepository repo) async {
-  final h = AppHarness(store: MemorySessionStore('tok'));
+  final h = AppHarness(store: MemorySessionStore('tok'), cart: repo);
   h.adapter.reply(200, testMe);
-  await h.pump(tester, extra: [cartRepositoryProvider.overrideWithValue(repo)]);
+  await h.pump(tester);
   h.container(tester).read(routerProvider).push(cartPath);
   await settle(tester);
   return h;

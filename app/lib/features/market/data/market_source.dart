@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -38,15 +40,28 @@ final marketProvider = FutureProvider<MarketSnapshot>(
   (ref) async => (await ref.watch(marketSourceProvider.future)).market(),
 );
 
-/// A room stays loaded for five minutes after the last listener leaves, so a
-/// prefetch made on the way in is still there when the camera lands.
+/// How long a room stays loaded with nobody looking at it.
+const roomKeepAlive = Duration(minutes: 5);
+
+/// A room stays loaded for [roomKeepAlive] after the last listener leaves, so
+/// a prefetch made on the way in is still there when the camera lands. A
+/// prefetch nobody opens goes after the same time; coming back resets it.
 final roomProvider = FutureProvider.autoDispose.family<RoomView, String>((
   ref,
   slug,
 ) async {
   final link = ref.keepAlive();
-  final timer = Future<void>.delayed(const Duration(minutes: 5));
-  ref.onCancel(() => timer.then((_) => link.close()));
+  Timer? timer;
+  void countDown() {
+    timer?.cancel();
+    timer = Timer(roomKeepAlive, link.close);
+  }
+
+  countDown();
+  ref
+    ..onResume(() => timer?.cancel())
+    ..onCancel(countDown)
+    ..onDispose(() => timer?.cancel());
   return (await ref.watch(marketSourceProvider.future)).room(slug);
 });
 

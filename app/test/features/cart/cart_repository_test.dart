@@ -100,15 +100,10 @@ void main() {
 
   group('the cart notifier', () {
     Future<(ProviderContainer, AppHarness, FakeCartRepository)> start() async {
-      final h = AppHarness(store: MemorySessionStore('tok'));
-      h.adapter.reply(200, testMe);
       final repo = FakeCartRepository([fakeLine('v1', quantity: 2)]);
-      final container = ProviderContainer(
-        overrides: [
-          ...h.pageOverrides,
-          cartRepositoryProvider.overrideWithValue(repo),
-        ],
-      );
+      final h = AppHarness(store: MemorySessionStore('tok'), cart: repo);
+      h.adapter.reply(200, testMe);
+      final container = ProviderContainer(overrides: h.pageOverrides);
       addTearDown(container.dispose);
       await container.read(sessionProvider.future);
       final sub = container.listen(cartProvider, (_, _) {});

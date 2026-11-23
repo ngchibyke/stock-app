@@ -18,7 +18,7 @@ final productProvider = FutureProvider.autoDispose
     );
 
 /// One product: its photos, its variants to choose from, and "Add to cart".
-class ProductPage extends ConsumerWidget {
+class ProductPage extends ConsumerStatefulWidget {
   const ProductPage({super.key, required this.productId, this.store});
 
   final String productId;
@@ -28,21 +28,33 @@ class ProductPage extends ConsumerWidget {
   final StoreSummary? store;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final product = ref.watch(productProvider(productId));
+  ConsumerState<ProductPage> createState() => _ProductPageState();
+}
+
+class _ProductPageState extends ConsumerState<ProductPage> {
+  /// This page's own cart button, where an added item flies to.
+  final GlobalKey _cartAnchor = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    final product = ref.watch(productProvider(widget.productId));
     final error = product.hasValue ? null : product.error;
     return Scaffold(
       appBar: AppBar(
-        actions: const [
-          CartButton(),
-          SizedBox(width: Tokens.s2),
+        actions: [
+          CartButton(anchor: _cartAnchor),
+          const SizedBox(width: Tokens.s2),
         ],
       ),
       body: switch (product.value) {
-        final p? => _Loaded(product: p, store: store),
+        final p? => _Loaded(
+          product: p,
+          store: widget.store,
+          cartAnchor: _cartAnchor,
+        ),
         null when error != null => ErrorState(
           message: Strings.productLoadFailed,
-          onRetry: () => ref.invalidate(productProvider(productId)),
+          onRetry: () => ref.invalidate(productProvider(widget.productId)),
         ),
         null => const _Skeleton(),
       },
@@ -71,10 +83,15 @@ class _Skeleton extends StatelessWidget {
 }
 
 class _Loaded extends ConsumerStatefulWidget {
-  const _Loaded({required this.product, required this.store});
+  const _Loaded({
+    required this.product,
+    required this.store,
+    required this.cartAnchor,
+  });
 
   final ProductDetail product;
   final StoreSummary? store;
+  final GlobalKey cartAnchor;
 
   @override
   ConsumerState<_Loaded> createState() => _LoadedState();
@@ -139,7 +156,7 @@ class _LoadedState extends ConsumerState<_Loaded> {
     if (MediaQuery.disableAnimationsOf(context)) return;
     final overlay = Overlay.maybeOf(context);
     final from = _rectOf(_addKey);
-    final to = _rectOf(ref.read(cartButtonKeyProvider));
+    final to = _rectOf(widget.cartAnchor);
     if (overlay == null || from == null || to == null) return;
     final tokens = context.tokens;
     late final OverlayEntry entry;

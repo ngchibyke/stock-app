@@ -6,6 +6,7 @@ import 'package:market/core/config/app_config.dart';
 import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/strings.dart';
 import 'package:market/features/auth/auth_errors.dart';
+import 'package:market/features/market/market_page.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'support/app_harness.dart';
@@ -110,7 +111,7 @@ void main() {
       await tester.tap(find.text(Strings.retry));
       await settle(tester);
 
-      expect(find.text(Strings.home), findsOneWidget);
+      expect(find.byType(MarketPage), findsOneWidget);
       expect(h.container(tester).read(sessionProvider).value, isNotNull);
     });
 

@@ -47,14 +47,9 @@ abstract final class Strings {
       'That phone number and password do not match. Check them and try again.';
 
   // The app shell.
-  static const String home = 'Welcome';
   static const String signOut = 'Sign out';
   static const String tabMarket = 'Market';
   static const String tabAccount = 'Account';
-  static const String marketOpeningSoon = 'The market is opening soon.';
-  static const String marketOpeningBody =
-      'Browse and buy from sellers near you, right here. '
-      'In the meantime, keep your delivery addresses up to date.';
   static const String addresses = 'Addresses';
 
   // The account page.
@@ -266,4 +261,19 @@ abstract final class Strings {
     'refurbished' => 'Refurbished',
     _ => c,
   };
+
+  // The market page and its list view.
+  static const String searchMarket = 'Search the market';
+  static const String listView = 'List view';
+  static const String offlineMarket =
+      "You're offline. Showing the market as it was.";
+  static const String marketLoadFailed = "We couldn't open the market.";
+  static const String productsTab = 'Products';
+  static const String storesTab = 'Stores';
+  static const String allCategories = 'All';
+  static String nothingMatches(String q) => 'Nothing matches "$q"';
+  static const String clearSearch = 'Clear search';
+  static const String nothingHereYet = 'Nothing here yet.';
+  static const String listLoadFailed = "We couldn't load this list.";
+  static const String storeLoadFailed = "We couldn't load this store.";
 }

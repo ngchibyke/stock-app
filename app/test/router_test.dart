@@ -13,6 +13,7 @@ import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/auth/pending_credential.dart';
 import 'package:market/features/auth/pending_reset.dart';
 import 'package:market/features/auth/pending_verification.dart';
+import 'package:market/features/market/market_page.dart';
 import 'package:market/router.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -114,6 +115,27 @@ void main() {
       expect(_go('/nowhere', session: _in), '/home');
     });
 
+    test('market_routes_need_sign_in', () {
+      for (final path in [
+        homePath,
+        listPath,
+        storeRoomPath('ada'),
+        productPath('p1'),
+        listStorePath('ada'),
+        cartPath,
+      ]) {
+        expect(_go(path), signInPath, reason: path);
+        expect(_go(path, session: _in), isNull, reason: path);
+      }
+    });
+
+    test('unknown_market_path_goes_home', () {
+      expect(_go('/home/nonsense', session: _in), homePath);
+      expect(_go('/home/store', session: _in), homePath);
+      expect(_go('/home/store/a/b', session: _in), homePath);
+      expect(_go('/home/list/store/ada', session: _in), isNull);
+    });
+
     test('a_query_string_does_not_change_which_page_it_is', () {
       expect(_go('/sign-up?x=1'), isNull);
       expect(_go('/home?tab=1', session: _in), isNull);
@@ -136,7 +158,7 @@ void main() {
       (h.store as GatedSessionStore).open();
       await settle(tester);
 
-      expect(find.text(Strings.home), findsOneWidget);
+      expect(find.byType(MarketPage), findsOneWidget);
       expect(_uri(tester, h), '/home');
     });
 
@@ -264,7 +286,7 @@ void main() {
         await tester.enterText(find.byType(TextField), '123456');
         await settle(tester);
         expect(h.repo.verifiedIds.single, 'v-abc');
-        expect(find.text(Strings.home), findsOneWidget);
+        expect(find.byType(MarketPage), findsOneWidget);
         expect(container.read(pendingVerificationProvider), isNull);
       },
     );
@@ -300,7 +322,7 @@ void main() {
         ..reply(200, testMe)
         ..reply(200, <String, dynamic>{});
       await h.pump(tester);
-      expect(find.text(Strings.home), findsOneWidget);
+      expect(find.byType(MarketPage), findsOneWidget);
 
       unawaited(h.container(tester).read(sessionProvider.notifier).signOut());
       await settle(tester);

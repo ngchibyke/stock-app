@@ -1,12 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/app.dart';
+import 'package:market/core/api/api_error.dart';
 import 'package:market/core/format/money.dart';
 import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';
 import 'package:market/features/catalog/catalog_models.dart';
-import 'package:market/features/catalog/catalog_repository.dart';
 import 'package:market/features/product/product_page.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,8 +14,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../support/app_harness.dart';
 import '../../support/fake_catalog_repository.dart';
 import '../../support/fakes.dart';
-
-const _emptyCart = {'items': <Object?>[], 'total_kobo': 0};
 
 Variant _v(
   String id,
@@ -51,13 +49,12 @@ ProductDetail _product({
 
 class _Harness {
   _Harness() : h = AppHarness(store: MemorySessionStore('tok')) {
-    h.adapter
-      ..reply(200, testMe)
-      ..reply(200, _emptyCart);
+    catalog = h.catalog;
+    h.adapter.reply(200, testMe);
   }
 
   final AppHarness h;
-  final catalog = FakeCatalogRepository();
+  late final FakeCatalogRepository catalog;
 
   Future<void> pump(WidgetTester tester, {double textScale = 1}) async {
     tester.view.physicalSize = const Size(400, 900);
@@ -66,10 +63,7 @@ class _Harness {
     await tester.pumpWidget(
       ProviderScope(
         retry: noRetry,
-        overrides: [
-          ...h.pageOverrides,
-          catalogRepositoryProvider.overrideWithValue(catalog),
-        ],
+        overrides: h.pageOverrides,
         child: MaterialApp(
           theme: lightTheme(),
           home: MediaQuery(
@@ -185,44 +179,26 @@ void main() {
   testWidgets('add_calls_cart_with_the_variant_id_only', (tester) async {
     final t = _Harness();
     t.catalog.details['p1'] = _product();
-    t.h.adapter.reply(200, {
-      'items': [
-        {
-          'variant_id': 'v-m-blue',
-          'product_id': 'p1',
-          'product_name': 'Ankara dress',
-          'attributes': {'Size': 'M'},
-          'store_id': 'id-ada',
-          'store_name': 'Store ada',
-          'unit_price_kobo': 1500000,
-          'quantity': 1,
-          'line_total_kobo': 1500000,
-          'available': true,
-        },
-      ],
-      'total_kobo': 1500000,
-    });
     await t.pump(tester);
     await _choose(tester, 'M');
     await _choose(tester, 'Blue');
     await tester.tap(_add);
     await settle(tester, frames: 30);
 
-    final put = t.h.adapter.requests.singleWhere((r) => r.method == 'PUT');
-    expect(put.path, '/cart/items');
-    expect(put.body, {'variant_id': 'v-m-blue', 'quantity': 1});
+    // Only the variant and how many: the price is never sent (the request
+    // body itself is pinned by set_sends_variant_and_quantity_only).
+    expect(t.h.cart.sets, [('v-m-blue', 1)]);
     expect(find.text(Strings.addedToCart), findsOneWidget);
   });
 
   testWidgets('unavailable_after_open_says_so', (tester) async {
     final t = _Harness();
     t.catalog.details['p1'] = _product();
-    t.h.adapter.reply(422, {
-      'error': {
-        'code': 'product_unavailable',
-        'message': 'Product unavailable.',
-      },
-    });
+    t.h.cart.failWith = ApiError(
+      status: 422,
+      code: 'product_unavailable',
+      message: 'Product unavailable.',
+    );
     await t.pump(tester);
     await _choose(tester, 'M');
     await _choose(tester, 'Blue');
@@ -235,12 +211,11 @@ void main() {
   testWidgets('a_stock_limit_shows_the_server_message', (tester) async {
     final t = _Harness();
     t.catalog.details['p1'] = _product();
-    t.h.adapter.reply(422, {
-      'error': {
-        'code': 'insufficient_stock',
-        'message': 'Only 3 left in stock.',
-      },
-    });
+    t.h.cart.failWith = ApiError(
+      status: 422,
+      code: 'insufficient_stock',
+      message: 'Only 3 left in stock.',
+    );
     await t.pump(tester);
     await _choose(tester, 'M');
     await _choose(tester, 'Red');

@@ -8,12 +8,13 @@ import '../../core/theme/tokens.dart';
 import '../../core/ui/pressable.dart';
 import 'cart_repository.dart';
 
-/// Marks where the cart button sits, so "add to cart" can fly towards it.
-final cartButtonKeyProvider = Provider<GlobalKey>((ref) => GlobalKey());
-
 /// The cart icon with its count. Opens the cart.
 class CartButton extends ConsumerWidget {
-  const CartButton({super.key});
+  const CartButton({super.key, this.anchor});
+
+  /// Set by a page that flies things into this button, to find where it is.
+  /// Each page owns its own key: several cart buttons can be alive at once.
+  final GlobalKey? anchor;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -24,7 +25,7 @@ class CartButton extends ConsumerWidget {
       radius: Tokens.minTap / 2,
       onTap: () => GoRouter.maybeOf(context)?.push(cartPath),
       child: SizedBox.square(
-        key: ref.watch(cartButtonKeyProvider),
+        key: anchor,
         dimension: Tokens.minTap,
         child: Stack(
           alignment: Alignment.center,
