@@ -21,6 +21,7 @@ class MarketView extends ConsumerStatefulWidget {
     required this.onCamera,
     required this.onOpenStore,
     required this.onPrefetch,
+    this.interactive = true,
   });
 
   final MarketSnapshot snapshot;
@@ -28,6 +29,10 @@ class MarketView extends ConsumerStatefulWidget {
   final ValueChanged<MarketCamera> onCamera;
   final ValueChanged<Placement> onOpenStore;
   final ValueChanged<Placement> onPrefetch;
+
+  /// False while the camera is flying: no gestures, and the camera is drawn
+  /// exactly as given (a flight goes deeper than the buyer may zoom).
+  final bool interactive;
 
   @override
   ConsumerState<MarketView> createState() => _MarketViewState();
@@ -89,10 +94,24 @@ class _MarketViewState extends ConsumerState<MarketView> {
           size,
           MediaQuery.devicePixelRatioOf(context),
         );
-        _current = widget.camera
-            .copyWith(viewport: size)
-            .clamped(maxZoom: _maxZoom);
+        final sized = widget.camera.copyWith(viewport: size);
+        _current = widget.interactive
+            ? sized.clamped(maxZoom: _maxZoom)
+            : sized;
         _spots = markerSpots(widget.snapshot, _current);
+        if (!widget.interactive) {
+          return IgnorePointer(
+            child: ClipRect(
+              child: ExcludeSemantics(
+                child: TileLayer(
+                  layout: layout,
+                  camera: _current,
+                  resolver: resolver,
+                ),
+              ),
+            ),
+          );
+        }
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: _onTapDown,
