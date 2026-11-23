@@ -170,6 +170,11 @@ async fn main() -> anyhow::Result<()> {
         market,
     };
 
+    if matches!(command, Command::Serve) {
+        let placed = server::market::placement::place_missing(&state.db, &state.market).await?;
+        tracing::info!(placed, "stores placed on the market map");
+    }
+
     match command {
         Command::Serve => serve(state, &config).await,
         Command::CreateOwner(flags) => create_owner(state, &flags).await,
