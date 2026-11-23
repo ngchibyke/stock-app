@@ -13,10 +13,14 @@ class RecordedRequest {
     required this.path,
     required this.headers,
     required this.body,
+    this.query = const {},
   });
 
   final String method;
   final String path;
+
+  /// The decoded query values.
+  final Map<String, String> query;
   final Map<String, dynamic> headers;
   final Object? body;
 }
@@ -56,6 +60,7 @@ class FakeAdapter implements HttpClientAdapter {
       RecordedRequest(
         method: options.method,
         path: options.uri.path,
+        query: options.uri.queryParameters,
         headers: Map<String, dynamic>.from(options.headers),
         body: options.data,
       ),

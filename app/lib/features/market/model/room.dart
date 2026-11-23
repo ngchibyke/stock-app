@@ -98,6 +98,29 @@ class StoreType {
     return null;
   }
 
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'room_image': roomImage,
+    'depth_image': depthImage,
+    'light': {
+      'tint':
+          '#${(lightTint.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}',
+      'shadow_opacity': shadowOpacity,
+    },
+    'slots': [
+      for (final s in slots)
+        {
+          'id': s.id,
+          'x': s.rect.left,
+          'y': s.rect.top,
+          'w': s.rect.width,
+          'h': s.rect.height,
+          'depth': s.depth,
+          'tilt_y': s.tiltY,
+        },
+    ],
+  };
+
   static Color _hex(Object? v) {
     final s = readString(v);
     final m = s == null ? null : RegExp(r'^#([0-9a-fA-F]{6})$').firstMatch(s);
@@ -152,4 +175,13 @@ class RoomView {
   final StoreType type;
   final List<PlacedProduct> placed;
   final bool hasMore;
+
+  Map<String, dynamic> toJson() => {
+    'store': store.toJson(),
+    'store_type': type.toJson(),
+    'placed': [
+      for (final p in placed) {'slot': p.slotId, 'product': p.product.toJson()},
+    ],
+    'has_more': hasMore,
+  };
 }

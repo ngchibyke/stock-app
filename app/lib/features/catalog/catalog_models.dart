@@ -106,3 +106,71 @@ class ProductCard {
     'store': store.toJson(),
   };
 }
+
+class Category {
+  const Category({required this.slug, required this.name});
+
+  final String slug;
+  final String name;
+}
+
+/// One buyable version of a product (a size, a colour).
+class Variant {
+  const Variant({
+    required this.id,
+    required this.attributes,
+    required this.availableStock,
+    required this.priceKobo,
+  });
+
+  final String id;
+  final Map<String, String> attributes;
+
+  /// Units a buyer can still buy.
+  final int availableStock;
+
+  /// The price a buyer pays: the variant's own, else the product's base price.
+  final int priceKobo;
+}
+
+class ProductDetail {
+  const ProductDetail({
+    required this.id,
+    required this.storeId,
+    required this.name,
+    required this.description,
+    required this.condition,
+    required this.photoUrls,
+    required this.variants,
+    this.brand,
+  });
+
+  final String id;
+  final String storeId;
+  final String name;
+  final String description;
+  final String condition;
+  final String? brand;
+  final List<String> photoUrls;
+  final List<Variant> variants;
+}
+
+class StoreDetail {
+  const StoreDetail({
+    required this.summary,
+    required this.description,
+    this.bannerUrl,
+  });
+
+  final StoreSummary summary;
+  final String description;
+  final String? bannerUrl;
+}
+
+/// One page of a cursor-paged list.
+class Page<T> {
+  const Page({required this.items, this.nextCursor});
+
+  final List<T> items;
+  final String? nextCursor;
+}
