@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/api/api_error.dart';
 import '../../core/format/money.dart';
 import '../../core/paths.dart';
 import '../../core/strings.dart';
@@ -34,11 +35,19 @@ class _CartPageState extends ConsumerState<CartPage> {
       await ref
           .read(cartProvider.notifier)
           .setQuantity(line.variantId, quantity);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
+      // 404: the product or its store went away since the cart loaded.
+      final gone = e is ApiError && e.status == 404;
       messenger
         ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text(Strings.cartUpdateFailed)));
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              gone ? Strings.noLongerBuyable : Strings.cartUpdateFailed,
+            ),
+          ),
+        );
     } finally {
       if (mounted) setState(() => _busy.remove(line.variantId));
     }

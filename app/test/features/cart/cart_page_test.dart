@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:market/core/api/api_error.dart';
 import 'package:market/core/format/money.dart';
 import 'package:market/core/paths.dart';
 import 'package:market/core/strings.dart';
@@ -72,6 +73,20 @@ void main() {
     expect(repo.sets, [('a', 2)]);
     expect(_inLine('a', find.text('2')), findsOneWidget);
     expect(_inLine('a', find.text(formatNaira(3000000))), findsOneWidget);
+  });
+
+  testWidgets('a_line_gone_from_the_server_says_so', (tester) async {
+    // 404: the product was unpublished or its store closed since the cart
+    // loaded. "Try again" would never work.
+    final repo = FakeCartRepository([fakeLine('a', quantity: 1)]);
+    await _open(tester, repo);
+    repo.failWith = ApiError(status: 404, code: 'not_found', message: '');
+    await tester.tap(
+      _inLine('a', find.bySemanticsLabel(Strings.increaseQuantity)),
+    );
+    await settle(tester);
+    expect(find.text(Strings.noLongerBuyable), findsOneWidget);
+    expect(find.text(Strings.cartUpdateFailed), findsNothing);
   });
 
   testWidgets('minus_at_1_confirms_removal', (tester) async {

@@ -224,6 +224,39 @@ void main() {
     expect(find.text('Only 3 left in stock.'), findsOneWidget);
   });
 
+  testWidgets('a_product_gone_from_the_server_says_so', (tester) async {
+    // The server answers 404 for a variant whose product was unpublished,
+    // deleted or whose store closed after the page opened.
+    final t = _Harness();
+    t.catalog.details['p1'] = _product();
+    t.h.cart.failWith = ApiError(status: 404, code: 'not_found', message: '');
+    await t.pump(tester);
+    await _choose(tester, 'M');
+    await _choose(tester, 'Blue');
+    await tester.tap(_add);
+    await settle(tester, frames: 30);
+    expect(find.text(Strings.noLongerBuyable), findsOneWidget);
+    expect(find.text(Strings.cartUpdateFailed), findsNothing);
+  });
+
+  for (final (code, message) in [
+    ('own_store_item', 'You cannot buy items from your own store'),
+    ('cart_full', 'A cart holds at most 50 different items'),
+  ]) {
+    testWidgets('${code}_shows_the_server_sentence', (tester) async {
+      final t = _Harness();
+      t.catalog.details['p1'] = _product();
+      t.h.cart.failWith = ApiError(status: 422, code: code, message: message);
+      await t.pump(tester);
+      await _choose(tester, 'M');
+      await _choose(tester, 'Blue');
+      await tester.tap(_add);
+      await settle(tester, frames: 30);
+      expect(find.text(message), findsOneWidget);
+      expect(find.text(Strings.noLongerBuyable), findsNothing);
+    });
+  }
+
   testWidgets('loading_error_with_retry', (tester) async {
     final t = _Harness();
     t.catalog.offline = true;

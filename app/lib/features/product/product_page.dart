@@ -138,11 +138,14 @@ class _LoadedState extends ConsumerState<_Loaded> {
         ..showSnackBar(const SnackBar(content: Text(Strings.addedToCart)));
     } on ApiError catch (e) {
       if (!mounted) return;
-      final text = e.status == 422
-          ? (e.code == 'insufficient_stock'
-                ? e.message
-                : Strings.noLongerBuyable)
-          : Strings.cartUpdateFailed;
+      // 404: the product, variant or store went away after the page opened.
+      // These 422s carry a sentence written for the buyer.
+      const ownWords = {'insufficient_stock', 'own_store_item', 'cart_full'};
+      final text = switch (e.status) {
+        422 when ownWords.contains(e.code) && e.message.isNotEmpty => e.message,
+        404 || 422 => Strings.noLongerBuyable,
+        _ => Strings.cartUpdateFailed,
+      };
       messenger
         ..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(content: Text(text)));
