@@ -241,4 +241,14 @@ abstract final class Strings {
   static const String cartLoadFailed = "We couldn't load your cart.";
   static const String cartUpdateFailed =
       "We couldn't update your cart. Try again.";
+
+  // A store's room.
+  static String fromPrice(String price) => 'From $price';
+  static String shelfCardLabel(String name, String price) =>
+      '$name, from $price';
+  static const String backToMarket = 'Back to market';
+  static const String storeClosed = 'This store has closed.';
+  static const String emptyShelves = 'Nothing on the shelves yet.';
+  static const String roomLoadFailed = "We couldn't open this store.";
+  static const String seeAll = 'See all';
 }

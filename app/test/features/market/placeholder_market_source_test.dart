@@ -143,4 +143,12 @@ void main() {
     await source.room('ada');
     expect(cache.keys, {'market.v1', 'room.v1.ada'});
   });
+
+  test('store_type_loads_from_the_bundle_without_the_network', () async {
+    catalog.offline = true;
+    final type = await source.storeType('grocery');
+    expect(type.id, 'grocery');
+    expect(type.slots.length, 9);
+    expect(catalog.calls, isEmpty);
+  });
 }

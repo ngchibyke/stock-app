@@ -97,6 +97,10 @@ class PlaceholderMarketSource implements MarketSource {
   }
 
   @override
+  Future<StoreType> storeType(String id) async =>
+      StoreType.fromJson(await _asset('assets/market/rooms/$id/room.json'));
+
+  @override
   Future<RoomView> room(String slug) async {
     try {
       final StoreDetail detail;
@@ -112,10 +116,7 @@ class PlaceholderMarketSource implements MarketSource {
         }
         rethrow;
       }
-      final typeId = await _typeOf(slug);
-      final type = StoreType.fromJson(
-        await _asset('assets/market/rooms/$typeId/room.json'),
-      );
+      final type = await storeType(await _typeOf(slug));
       final page = await _catalog.products(
         store: slug,
         sort: 'newest',

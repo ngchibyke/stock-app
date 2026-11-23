@@ -15,6 +15,10 @@ abstract class MarketSource {
 
   /// Throws an `ApiError` with code `store_not_found` when the store is gone.
   Future<RoomView> room(String slug);
+
+  /// A store type's room, from the app bundle: no network, so the room's
+  /// picture can show before its products arrive.
+  Future<StoreType> storeType(String id);
 }
 
 final jsonCacheProvider = FutureProvider<JsonCache>(
@@ -45,3 +49,9 @@ final roomProvider = FutureProvider.autoDispose.family<RoomView, String>((
   ref.onCancel(() => timer.then((_) => link.close()));
   return (await ref.watch(marketSourceProvider.future)).room(slug);
 });
+
+/// A store type, kept for the session (there are only a few).
+final storeTypeProvider = FutureProvider.family<StoreType, String>(
+  (ref, id) async =>
+      (await ref.watch(marketSourceProvider.future)).storeType(id),
+);
