@@ -44,6 +44,7 @@ dependencies:
   intl: ^0.20.3
   package_info_plus: ^10.2.2
   url_launcher: ^6.3.3
+  cached_network_image: ^4.0.7
 
 dev_dependencies:
   flutter_test:

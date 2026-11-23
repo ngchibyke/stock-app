@@ -70,6 +70,26 @@ void main() {
     );
   });
 
+  test('config_parses_assets_and_ignores_http_or_missing_base_url', () {
+    final good = AppConfig.fromJson({
+      'assets': {'version': 'v3', 'base_url': 'https://cdn.example'},
+    });
+    expect(good.assetsVersion, 'v3');
+    expect(good.assetsBaseUrl, 'https://cdn.example');
+    final http = AppConfig.fromJson({
+      'assets': {'version': 'v3', 'base_url': 'http://cdn.example'},
+    });
+    expect(http.assetsBaseUrl, isNull);
+    final odd = AppConfig.fromJson({
+      'assets': {'version': '../x', 'base_url': 'https://cdn.example'},
+    });
+    expect(odd.assetsVersion, isNull);
+    expect(AppConfig.fromJson({'assets': null}).assetsBaseUrl, isNull);
+    final back = AppConfig.fromJson(good.toJson());
+    expect(back.assetsVersion, 'v3');
+    expect(good.withoutMaintenance().assetsBaseUrl, 'https://cdn.example');
+  });
+
   test('a link that is not https is ignored', () {
     final config = AppConfig.fromJson({
       'terms_url': 'javascript:alert(1)',
