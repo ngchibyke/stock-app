@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/app.dart';
 import 'package:market/core/format/money.dart';
-import 'package:market/core/session/session_store.dart';
 import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';

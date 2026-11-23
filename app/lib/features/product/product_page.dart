@@ -91,10 +91,8 @@ class _LoadedState extends ConsumerState<_Loaded> {
   List<String> get _keys =>
       ({for (final v in _p.variants) ...v.attributes.keys}.toList()..sort());
 
-  List<String> _values(String key) => ({
-    for (final v in _p.variants)
-      if (v.attributes[key] case final value?) value,
-  }.toList()..sort());
+  List<String> _values(String key) =>
+      ({for (final v in _p.variants) ?v.attributes[key]}.toList()..sort());
 
   /// The variant the choices point to, once every attribute is chosen.
   Variant? get _variant {
