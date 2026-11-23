@@ -251,4 +251,19 @@ abstract final class Strings {
   static const String emptyShelves = 'Nothing on the shelves yet.';
   static const String roomLoadFailed = "We couldn't open this store.";
   static const String seeAll = 'See all';
+
+  // A product.
+  static const String addToCart = 'Add to cart';
+  static const String addedToCart = 'Added to your cart';
+  static const String noLongerBuyable = 'This item can no longer be bought';
+  static const String soldOut = 'Sold out';
+  static String onlyLeft(int n) => 'Only $n left';
+  static String photoCount(int at, int of) => '$at of $of';
+  static const String productLoadFailed = "We couldn't load this item.";
+  static String conditionLabel(String c) => switch (c) {
+    'new' => 'New',
+    'used' => 'Used',
+    'refurbished' => 'Refurbished',
+    _ => c,
+  };
 }
