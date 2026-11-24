@@ -180,6 +180,8 @@ pub struct OwnerStore {
     pub store: PublicStore,
     pub pickup_address: String,
     pub district: String,
+    /// The plot id the store holds on the market map; null while unplaced.
+    pub plot: Option<String>,
     pub pickup_area_council: Option<AreaCouncil>,
     pub pickup_postcode: Option<String>,
     pub business_phone: Option<String>,
@@ -192,6 +194,7 @@ impl std::fmt::Debug for OwnerStore {
             .field("store", &self.store)
             .field("pickup_address", &REDACTED)
             .field("district", &self.district)
+            .field("plot", &self.plot)
             .field("pickup_area_council", &self.pickup_area_council)
             .field("pickup_postcode", &REDACTED)
             .field("business_phone", &REDACTED)
@@ -266,11 +269,13 @@ impl Store {
         &self,
         cipher: &FieldCipher,
         objects: &dyn ObjectStore,
+        plot: Option<String>,
     ) -> Result<OwnerStore, AppError> {
         Ok(OwnerStore {
             store: self.public(objects),
             pickup_address: cipher.decrypt(&self.pickup_address_enc)?,
             district: self.district.clone(),
+            plot,
             pickup_area_council: self.pickup_area_council,
             pickup_postcode: self.pickup_postcode.clone(),
             business_phone: self
@@ -281,6 +286,20 @@ impl Store {
             self_delivery_fee_kobo: self.self_delivery_fee_kobo,
         })
     }
+}
+
+/// The plot each of the stores holds, for the owner view. Stores without one are absent.
+pub async fn plots_of(
+    db: &PgPool,
+    store_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>, AppError> {
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT store_id, plot_id FROM store_plots WHERE store_id = ANY($1)")
+            .bind(store_ids)
+            .fetch_all(db)
+            .await
+            .context("load store plots")?;
+    Ok(rows.into_iter().collect())
 }
 
 fn slugify(name: &str) -> String {

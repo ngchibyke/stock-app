@@ -787,3 +787,73 @@ async fn a_district_change_is_flagged_in_the_audit_row(pool: PgPool) {
     .unwrap();
     assert!(detail.get("district_changed").is_none(), "{detail}");
 }
+
+async fn mine_plot(app: &TestApp, token: &str) -> Value {
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(token))
+        .await;
+    assert_eq!(mine.status, 200, "{}", mine.json);
+    mine.json[0]
+        .get("plot")
+        .cloned()
+        .expect("owner view has a plot key")
+}
+
+#[sqlx::test]
+async fn owner_view_shows_the_plot_the_store_holds(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    // Pending: no plot yet, but the key is there and null.
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Waiting").await;
+    assert!(created.json["plot"].is_null(), "{}", created.json);
+    assert!(mine_plot(&app, &token).await.is_null());
+
+    // Active: the first free plot of the district.
+    let l = app
+        .make_active_store_with_product("08011111112", "Placed", 1000, 5)
+        .await;
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(&l.seller_token))
+        .await;
+    assert_eq!(mine.json[0]["plot"], "everything-else-1", "{}", mine.json);
+
+    // A district change shows the new plot in the PATCH answer.
+    let patched = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{}", l.store_id),
+            Some(json!({ "district": "fashion" })),
+            Some(&l.seller_token),
+        )
+        .await;
+    assert_eq!(patched.json["plot"], "fashion-1", "{}", patched.json);
+
+    // Public views never carry it.
+    let slug = mine.json[0]["slug"].as_str().unwrap();
+    let public = app
+        .request(Method::GET, &format!("/stores/{slug}"), None, None)
+        .await;
+    assert!(public.json.get("plot").is_none());
+    let directory = app.request(Method::GET, "/stores", None, None).await;
+    assert_eq!(directory.status, 200, "{}", directory.json);
+    assert!(!directory.json.to_string().contains("\"plot\""));
+}
+
+#[sqlx::test]
+async fn owner_view_plot_is_null_when_the_district_is_full(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let mut last = None;
+    for i in 0..9 {
+        last = Some(
+            app.make_active_store_with_product(
+                &format!("0803300{i:04}"),
+                &format!("Shop {i}"),
+                1000,
+                5,
+            )
+            .await,
+        );
+    }
+    let ninth = last.unwrap();
+    assert!(mine_plot(&app, &ninth.seller_token).await.is_null());
+}

@@ -59,10 +59,13 @@ async fn create(
     require_seller(&user)?;
     let store =
         service::create_store(&state.db, &state.cipher, &state.market, user.id, body).await?;
+    let plot = service::plots_of(&state.db, &[store.id])
+        .await?
+        .remove(&store.id);
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher, &*state.objects)?),
+        Json(store.owner_view(&state.cipher, &*state.objects, plot)?),
     ))
 }
 
@@ -72,9 +75,11 @@ async fn mine(
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
     let stores = service::list_mine(&state.db, user.id).await?;
+    let ids: Vec<Uuid> = stores.iter().map(|s| s.id).collect();
+    let mut plots = service::plots_of(&state.db, &ids).await?;
     let views = stores
         .iter()
-        .map(|s| s.owner_view(&state.cipher, &*state.objects))
+        .map(|s| s.owner_view(&state.cipher, &*state.objects, plots.remove(&s.id)))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
@@ -104,9 +109,12 @@ async fn update(
         patch,
     )
     .await?;
+    let plot = service::plots_of(&state.db, &[store.id])
+        .await?
+        .remove(&store.id);
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher, &*state.objects)?),
+        Json(store.owner_view(&state.cipher, &*state.objects, plot)?),
     ))
 }
 
