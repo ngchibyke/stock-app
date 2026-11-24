@@ -184,6 +184,12 @@ impl TestApp {
         self.router = build_app(self.state.clone());
     }
 
+    /// Runs the app with no public photo store, so no photo has an address.
+    pub fn use_no_public_photos(&mut self) {
+        self.state.objects = Arc::new(server::uploads::store::NoStore);
+        self.router = build_app(self.state.clone());
+    }
+
     /// Serves the app on a real local port, for WebSocket tests.
     pub async fn spawn_server(&self) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
