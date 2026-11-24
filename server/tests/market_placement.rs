@@ -55,30 +55,47 @@ async fn plot_rows(app: &TestApp) -> i64 {
         .unwrap()
 }
 
-async fn audit_count(app: &TestApp, action: &str, store: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = $1 AND subject_id = $2")
-        .bind(action)
-        .bind(store)
+/// The newest audit id: counts below only look at rows written after it, so they hold
+/// whether or not activation already placed the store.
+async fn mark(app: &TestApp) -> i64 {
+    sqlx::query_scalar("SELECT COALESCE(max(id), 0) FROM audit_log")
         .fetch_one(&app.pool)
         .await
         .unwrap()
+}
+
+async fn audit_count(app: &TestApp, base: i64, action: &str, store: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE id > $3 AND action = $1 AND subject_id = $2",
+    )
+    .bind(action)
+    .bind(store)
+    .bind(base)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap()
 }
 
 #[sqlx::test]
 async fn an_active_store_gets_the_first_free_plot_of_its_district(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let ids = unplaced_stores(&app, 2).await;
+    let base = mark(&app).await;
     set_district(&app, ids[0], "fashion").await;
     set_district(&app, ids[1], "fashion").await;
 
     assert_eq!(place_now(&app, ids[0]).await.as_deref(), Some("fashion-1"));
     assert_eq!(place_now(&app, ids[1]).await.as_deref(), Some("fashion-2"));
     assert_eq!(plot_of(&app, ids[0]).await.as_deref(), Some("fashion-1"));
-    assert_eq!(audit_count(&app, "market.store_placed", ids[0]).await, 1);
+    assert_eq!(
+        audit_count(&app, base, "market.store_placed", ids[0]).await,
+        1
+    );
     let detail: serde_json::Value = sqlx::query_scalar(
-        "SELECT detail FROM audit_log WHERE action = 'market.store_placed' AND subject_id = $1",
+        "SELECT detail FROM audit_log WHERE id > $2 AND action = 'market.store_placed' AND subject_id = $1",
     )
     .bind(ids[0])
+    .bind(base)
     .fetch_one(&app.pool)
     .await
     .unwrap();
@@ -110,19 +127,24 @@ async fn pending_and_deleted_stores_are_not_placed(pool: PgPool) {
 async fn placing_twice_changes_nothing(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let ids = unplaced_stores(&app, 1).await;
+    let base = mark(&app).await;
 
     let first = place_now(&app, ids[0]).await;
     let second = place_now(&app, ids[0]).await;
     assert!(first.is_some());
     assert_eq!(first, second);
     assert_eq!(plot_rows(&app).await, 1);
-    assert_eq!(audit_count(&app, "market.store_placed", ids[0]).await, 1);
+    assert_eq!(
+        audit_count(&app, base, "market.store_placed", ids[0]).await,
+        1
+    );
 }
 
 #[sqlx::test]
 async fn a_full_district_leaves_the_store_active_and_unplaced(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let ids = unplaced_stores(&app, 9).await;
+    let base = mark(&app).await;
     for id in &ids[..8] {
         assert!(place_now(&app, *id).await.is_some());
     }
@@ -135,7 +157,10 @@ async fn a_full_district_leaves_the_store_active_and_unplaced(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status, "active");
-    assert_eq!(audit_count(&app, "market.district_full", ids[8]).await, 1);
+    assert_eq!(
+        audit_count(&app, base, "market.district_full", ids[8]).await,
+        1
+    );
 }
 
 #[sqlx::test]
@@ -163,6 +188,7 @@ async fn two_stores_racing_for_the_last_plot_one_wins(pool: PgPool) {
 async fn releasing_a_plot_hands_it_to_the_oldest_waiting_store(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let ids = unplaced_stores(&app, 10).await;
+    let base = mark(&app).await;
     for id in &ids[..8] {
         assert!(place_now(&app, *id).await.is_some());
     }
@@ -178,8 +204,14 @@ async fn releasing_a_plot_hands_it_to_the_oldest_waiting_store(pool: PgPool) {
     assert_eq!(plot_of(&app, ids[2]).await, None);
     assert_eq!(plot_of(&app, ids[8]).await, Some(freed));
     assert_eq!(plot_of(&app, ids[9]).await, None);
-    assert_eq!(audit_count(&app, "market.store_unplaced", ids[2]).await, 1);
-    assert_eq!(audit_count(&app, "market.store_placed", ids[8]).await, 1);
+    assert_eq!(
+        audit_count(&app, base, "market.store_unplaced", ids[2]).await,
+        1
+    );
+    assert_eq!(
+        audit_count(&app, base, "market.store_placed", ids[8]).await,
+        1
+    );
 }
 
 #[sqlx::test]
@@ -214,4 +246,57 @@ async fn unique_plot_is_enforced_by_the_database(pool: PgPool) {
             .execute(&app.pool)
             .await;
     assert!(second.is_err());
+}
+
+#[sqlx::test]
+async fn a_store_deleted_while_another_transaction_holds_it_is_not_placed(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let ids = unplaced_stores(&app, 1).await;
+
+    // One transaction deletes the store and keeps its row locked; a placement of
+    // the same store must wait for it and then see it deleted.
+    let mut deleter = app.pool.begin().await.unwrap();
+    sqlx::query("UPDATE stores SET deleted_at = now() WHERE id = $1")
+        .bind(ids[0])
+        .execute(&mut *deleter)
+        .await
+        .unwrap();
+    let (pool, layout) = (app.pool.clone(), app.state.market.clone());
+    let placing = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        let plot = place(&mut tx, &layout, ids[0]).await.unwrap();
+        tx.commit().await.unwrap();
+        plot
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    deleter.commit().await.unwrap();
+
+    assert_eq!(placing.await.unwrap(), None);
+    assert_eq!(plot_rows(&app).await, 0);
+}
+
+#[sqlx::test]
+async fn releasing_skips_a_waiting_store_that_another_transaction_holds(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let ids = unplaced_stores(&app, 10).await;
+    for id in &ids[..8] {
+        assert!(place_now(&app, *id).await.is_some());
+    }
+    let freed = plot_of(&app, ids[2]).await.unwrap();
+
+    // The oldest waiting store is busy elsewhere (say, being deleted): the release
+    // must not wait for it, and hands the plot to the next one.
+    let mut busy = app.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM stores WHERE id = $1 FOR UPDATE")
+        .bind(ids[8])
+        .execute(&mut *busy)
+        .await
+        .unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    release(&mut tx, &app.state.market, ids[2]).await.unwrap();
+    tx.commit().await.unwrap();
+    busy.rollback().await.unwrap();
+
+    assert_eq!(plot_of(&app, ids[8]).await, None);
+    assert_eq!(plot_of(&app, ids[9]).await, Some(freed));
 }

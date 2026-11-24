@@ -32,7 +32,7 @@ pub async fn place(
 ) -> Result<Option<String>, AppError> {
     let store: Option<(String,)> = sqlx::query_as(
         "SELECT district FROM stores \
-         WHERE id = $1 AND status = 'active' AND deleted_at IS NULL",
+         WHERE id = $1 AND status = 'active' AND deleted_at IS NULL FOR SHARE",
     )
     .bind(store_id)
     .fetch_optional(&mut **tx)
@@ -54,10 +54,13 @@ pub async fn place(
         return Ok(held);
     }
 
-    let taken: Vec<String> = sqlx::query_scalar("SELECT plot_id FROM store_plots")
-        .fetch_all(&mut **tx)
-        .await
-        .context("load taken plots")?;
+    let district_plots: Vec<String> = layout.plots_in(&district).map(|p| p.id.clone()).collect();
+    let taken: Vec<String> =
+        sqlx::query_scalar("SELECT plot_id FROM store_plots WHERE plot_id = ANY($1)")
+            .bind(&district_plots)
+            .fetch_all(&mut **tx)
+            .await
+            .context("load taken plots")?;
     let free = layout
         .plots_in(&district)
         .find(|p| !taken.contains(&p.id))
@@ -145,7 +148,7 @@ pub async fn release(
          WHERE s.district = $1 AND s.status = 'active' AND s.deleted_at IS NULL \
            AND s.id <> $2 \
            AND NOT EXISTS (SELECT 1 FROM store_plots sp WHERE sp.store_id = s.id) \
-         ORDER BY s.created_at, s.id LIMIT 1",
+         ORDER BY s.created_at, s.id LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
     )
     .bind(&district)
     .bind(store_id)
