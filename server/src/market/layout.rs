@@ -235,6 +235,11 @@ impl Layout {
         self.plot_index.get(id).map(|&i| &self.plots[i])
     }
 
+    /// Where a plot sits in the file, or `None` if the layout has no such plot.
+    pub fn plot_position(&self, id: &str) -> Option<usize> {
+        self.plot_index.get(id).copied()
+    }
+
     pub fn room_type(&self, id: &str) -> Option<&RoomType> {
         self.rooms.get(id)
     }

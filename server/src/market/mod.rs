@@ -2,3 +2,6 @@
 
 pub mod layout;
 pub mod placement;
+pub mod routes;
+
+pub use routes::router;
