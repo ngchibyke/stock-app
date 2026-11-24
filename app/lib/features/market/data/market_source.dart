@@ -4,14 +4,14 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import '../../catalog/catalog_repository.dart';
+import '../../../core/api/providers.dart';
 import '../model/market.dart';
 import '../model/room.dart';
+import 'api_market_source.dart';
 import 'json_cache.dart';
-import 'placeholder_market_source.dart';
 
 /// Where the market and its rooms come from. The shapes are the contract the
-/// server's `GET /market` and `GET /stores/{slug}/room` will answer (plan 7d).
+/// server's `GET /market` and `GET /stores/{slug}/room` answer.
 abstract class MarketSource {
   Future<MarketSnapshot> market();
 
@@ -27,10 +27,10 @@ final jsonCacheProvider = FutureProvider<JsonCache>(
   (ref) async => PrefsJsonCache(await SharedPreferences.getInstance()),
 );
 
-/// The placeholder source until the server has the market routes.
+/// The market and rooms from the server's own routes.
 final marketSourceProvider = FutureProvider<MarketSource>(
-  (ref) async => PlaceholderMarketSource(
-    catalog: ref.watch(catalogRepositoryProvider),
+  (ref) async => ApiMarketSource(
+    api: ref.watch(apiClientProvider),
     cache: await ref.watch(jsonCacheProvider.future),
     loadAsset: rootBundle.loadString,
   ),

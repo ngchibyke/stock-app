@@ -13,8 +13,8 @@ import 'package:market/core/api/api_client.dart';
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/cart/cart_repository.dart';
 import 'package:market/features/catalog/catalog_repository.dart';
+import 'package:market/features/market/data/api_market_source.dart';
 import 'package:market/features/market/data/json_cache.dart';
-import 'package:market/features/market/data/placeholder_market_source.dart';
 
 import 'wire_support.dart';
 
@@ -95,8 +95,8 @@ void main() {
     expect((await cart.get()).totalKobo, 3400000);
 
     // The market: the store stands on a plot.
-    final source = PlaceholderMarketSource(
-      catalog: catalog,
+    final source = ApiMarketSource(
+      api: api,
       cache: MemoryJsonCache(),
       loadAsset: (path) => File(path).readAsString(),
     );
@@ -106,10 +106,12 @@ void main() {
       orElse: () => fail('the seeded store has no plot in the market'),
     );
     expect(market.plotOf(placement), isNotNull);
+    expect(placement.storeType, isNotEmpty);
     expect(market.fromCache, isFalse);
 
     // Its room: the three products on the shelves.
     final room = await source.room(_store);
+    expect(room.placed, isNotEmpty);
     expect(room.store.slug, _store);
     expect(room.placed.map((p) => p.product.name).toSet(), {
       'Flowtest Ankara Dress',

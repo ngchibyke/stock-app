@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:market/app.dart';
@@ -15,6 +16,7 @@ import 'package:market/features/catalog/catalog_repository.dart';
 import 'package:market/features/market/data/asset_resolver.dart';
 import 'package:market/features/market/data/json_cache.dart';
 import 'package:market/features/market/data/market_source.dart';
+import 'package:market/features/market/data/placeholder_market_source.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
@@ -108,6 +110,15 @@ class AppHarness {
     cartRepositoryProvider.overrideWithValue(cart),
     catalogRepositoryProvider.overrideWithValue(catalog),
     jsonCacheProvider.overrideWith((ref) async => cache),
+    // The app reads the server's market routes; widget tests build the same
+    // market from the in-memory catalog instead.
+    marketSourceProvider.overrideWith(
+      (ref) async => PlaceholderMarketSource(
+        catalog: catalog,
+        cache: cache,
+        loadAsset: rootBundle.loadString,
+      ),
+    ),
     assetResolverProvider.overrideWithValue(FakeAssetResolver()),
   ];
 

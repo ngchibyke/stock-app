@@ -1,6 +1,7 @@
 -- Seed for the market wire check (test/wire/market_wire_test.dart).
 --
--- One active store, `flow-test-boutique`, with three published products; the
+-- One active store, `flow-test-boutique`, in the fashion district on plot
+-- `fashion-1`, with three published products; the
 -- Ankara dress comes in two sizes. Every name is invented and there is no
 -- personal data. Safe to apply more than once: fixed ids, ON CONFLICT DO NOTHING.
 --
@@ -29,7 +30,7 @@ ON CONFLICT DO NOTHING;
 
 INSERT INTO stores (id, owner_id, name, slug, description, pickup_address_enc,
                     pickup_state, pickup_area_council, pickup_postcode,
-                    delivery_courier, delivery_self, status)
+                    delivery_courier, delivery_self, status, district)
 VALUES (
   '0b1e5eed-0000-4000-8000-000000000010',
   '0b1e5eed-0000-4000-8000-000000000001',
@@ -38,8 +39,13 @@ VALUES (
   'A made-up store for the market wire check.',
   '\x00'::bytea,
   'FCT', 'amac', 'FC00TEST001',
-  true, false, 'active'
+  true, false, 'active', 'fashion'
 )
+ON CONFLICT DO NOTHING;
+
+-- The map: an active store stands on a plot (see server/market/layout.json).
+INSERT INTO store_plots (store_id, plot_id)
+VALUES ('0b1e5eed-0000-4000-8000-000000000010', 'fashion-1')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO products (id, store_id, name, description, category, brand, condition,
