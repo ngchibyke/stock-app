@@ -19,6 +19,7 @@ async fn seller_store(app: &TestApp) -> (String, Uuid, String) {
             Some(json!({
                 "name": "Mama Put",
                 "pickup_address": "12 Unique Street, Wuse 2",
+                "district": "everything-else",
                 "pickup_state": "FCT",
                 "delivery_courier": true,
                 "business_phone": "08031234567",

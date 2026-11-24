@@ -30,6 +30,7 @@ use crate::{
     AppState, audit,
     auth::password::{blocking, verify_password},
     error::AppError,
+    market::{layout::Layout, placement},
     payments::ProviderError,
     settings,
 };
@@ -220,6 +221,7 @@ async fn lock_store(
 /// Active <-> pending follows the account; a suspended store is never touched.
 async fn sync_store_status(
     tx: &mut Transaction<'_, Postgres>,
+    layout: &Layout,
     id: Uuid,
     current: &str,
     verified: bool,
@@ -235,6 +237,10 @@ async fn sync_store_status(
         .execute(&mut **tx)
         .await
         .context("update store status")?;
+    // Going pending keeps the plot; only a store turning active is placed.
+    if next == "active" {
+        placement::place(tx, layout, id).await?;
+    }
     Ok(())
 }
 
@@ -445,7 +451,14 @@ pub async fn set_account(
     .fetch_one(&mut *tx)
     .await
     .context("upsert payout account")?;
-    sync_store_status(&mut tx, store_id, &store_status, decision.verified).await?;
+    sync_store_status(
+        &mut tx,
+        &state.market,
+        store_id,
+        &store_status,
+        decision.verified,
+    )
+    .await?;
     audit::record(
         &mut tx,
         Some(owner),
@@ -559,7 +572,7 @@ pub async fn owner_verify(
     .fetch_one(&mut *tx)
     .await
     .context("verify payout account")?;
-    sync_store_status(&mut tx, store_id, &store_status, true).await?;
+    sync_store_status(&mut tx, &state.market, store_id, &store_status, true).await?;
     audit::record(
         &mut tx,
         Some(actor),

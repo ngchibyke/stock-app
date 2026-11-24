@@ -10,6 +10,7 @@ fn store_body(name: &str) -> Value {
         "name": name,
         "description": "Fresh goods",
         "pickup_address": "12 Unique Street, Wuse 2",
+        "district": "everything-else",
         "pickup_state": "FCT",
         "delivery_courier": true,
         "business_phone": "08031234567",
@@ -269,6 +270,7 @@ fn self_body(name: &str) -> Value {
     json!({
         "name": name,
         "pickup_address": "12 Unique Street, Wuse 2",
+        "district": "everything-else",
         "pickup_state": "FCT",
         "delivery_courier": false,
         "delivery_self": true
@@ -625,4 +627,112 @@ async fn moving_the_pickup_resets_the_courier_address_code(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(code, Some(4242));
+}
+
+#[sqlx::test]
+async fn create_requires_a_known_district(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+
+    let mut missing = store_body("No District");
+    missing.as_object_mut().unwrap().remove("district");
+    let res = app
+        .request(Method::POST, "/stores", Some(missing), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+
+    let mut unknown = store_body("Bad District");
+    unknown["district"] = json!("atlantis");
+    let res = app
+        .request(Method::POST, "/stores", Some(unknown), Some(&token))
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(
+        res.json["error"]["code"], "unknown_district",
+        "{}",
+        res.json
+    );
+    assert_eq!(res.json["error"]["message"], "That district does not exist");
+
+    let mut ok = store_body("Fashionable");
+    ok["district"] = json!("fashion");
+    let res = app
+        .request(Method::POST, "/stores", Some(ok), Some(&token))
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+}
+
+#[sqlx::test]
+async fn owner_view_includes_the_district(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let mut body = store_body("Fashionable");
+    body["district"] = json!("fashion");
+    let created = app
+        .request(Method::POST, "/stores", Some(body), Some(&token))
+        .await;
+    assert_eq!(created.status, 201, "{}", created.json);
+    assert_eq!(created.json["district"], "fashion");
+
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(&token))
+        .await;
+    assert_eq!(mine.json[0]["district"], "fashion");
+
+    let slug = created.json["slug"].as_str().unwrap();
+    let public = app
+        .request(Method::GET, &format!("/stores/{slug}"), None, Some(&token))
+        .await;
+    assert!(public.json.get("district").is_none());
+}
+
+#[sqlx::test]
+async fn patch_can_change_the_district(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Mover").await;
+    let id = created.json["id"].as_str().unwrap();
+    assert_eq!(created.json["district"], "everything-else");
+
+    let patched = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "district": "fashion" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(patched.status, 200, "{}", patched.json);
+    assert_eq!(patched.json["district"], "fashion");
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(&token))
+        .await;
+    assert_eq!(mine.json[0]["district"], "fashion");
+}
+
+#[sqlx::test]
+async fn patch_with_an_unknown_district_is_rejected(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Stayer").await;
+    let id = created.json["id"].as_str().unwrap();
+
+    let res = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "district": "atlantis" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(
+        res.json["error"]["code"], "unknown_district",
+        "{}",
+        res.json
+    );
+    let mine = app
+        .request(Method::GET, "/stores/mine", None, Some(&token))
+        .await;
+    assert_eq!(mine.json[0]["district"], "everything-else");
 }

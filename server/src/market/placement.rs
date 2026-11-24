@@ -1,8 +1,13 @@
 //! Puts active stores on plots of the market map. Placements within one district
 //! are serialised by a transaction-scoped advisory lock; the UNIQUE `plot_id`
 //! column is the backstop. Lock order: users, stores, store_plots, products, ...
-//! Callers hold the store row already; this module takes no row lock on stores.
-//! Audit details carry ids only.
+//! Callers hold the store row already. `place` still takes `FOR SHARE` on the store
+//! row (a soft delete takes NO KEY UPDATE, which conflicts, so a deleted store is
+//! never placed); `release` picks the waiting store with `FOR SHARE ... SKIP LOCKED`,
+//! so a store being deleted or edited elsewhere is passed over rather than waited
+//! for, while one that is merely read-locked keeps its turn.
+//! A caller that releases in one district and places in another must first take
+//! both district locks with `lock_districts`. Audit details carry ids only.
 
 use anyhow::Context;
 use serde_json::json;
@@ -18,6 +23,22 @@ async fn lock_district(tx: &mut Transaction<'_, Postgres>, district: &str) -> Re
         .execute(&mut **tx)
         .await
         .context("lock market district")?;
+    Ok(())
+}
+
+/// Takes the advisory locks of several districts in sorted id order, so callers that
+/// need more than one cannot deadlock against each other. The locks are re-entrant
+/// within the transaction and last until it ends.
+pub async fn lock_districts(
+    tx: &mut Transaction<'_, Postgres>,
+    districts: &[&str],
+) -> Result<(), AppError> {
+    let mut sorted: Vec<&str> = districts.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for district in sorted {
+        lock_district(tx, district).await?;
+    }
     Ok(())
 }
 
@@ -148,7 +169,7 @@ pub async fn release(
          WHERE s.district = $1 AND s.status = 'active' AND s.deleted_at IS NULL \
            AND s.id <> $2 \
            AND NOT EXISTS (SELECT 1 FROM store_plots sp WHERE sp.store_id = s.id) \
-         ORDER BY s.created_at, s.id LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
+         ORDER BY s.created_at, s.id LIMIT 1 FOR SHARE OF s SKIP LOCKED",
     )
     .bind(&district)
     .bind(store_id)

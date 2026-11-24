@@ -57,7 +57,8 @@ async fn create(
     AppJson(body): AppJson<NewStore>,
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
-    let store = service::create_store(&state.db, &state.cipher, user.id, body).await?;
+    let store =
+        service::create_store(&state.db, &state.cipher, &state.market, user.id, body).await?;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -94,8 +95,15 @@ async fn update(
     AppJson(patch): AppJson<StorePatch>,
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
-    let store =
-        service::update_store(&state.db, &state.cipher, user.id, parse_id(&key)?, patch).await?;
+    let store = service::update_store(
+        &state.db,
+        &state.cipher,
+        &state.market,
+        user.id,
+        parse_id(&key)?,
+        patch,
+    )
+    .await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(store.owner_view(&state.cipher, &*state.objects)?),
@@ -108,6 +116,6 @@ async fn remove(
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
     require_seller(&user)?;
-    service::delete_store(&state.db, user.id, parse_id(&key)?).await?;
+    service::delete_store(&state.db, &state.market, user.id, parse_id(&key)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

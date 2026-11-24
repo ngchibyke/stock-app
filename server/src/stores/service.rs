@@ -10,6 +10,7 @@ use crate::{
     crypto::FieldCipher,
     delivery::area::{AreaCouncil, normalize_postcode},
     error::AppError,
+    market::{layout::Layout, placement},
     phone::normalize_ng_phone,
     uploads::{
         claim::{Kind, claim},
@@ -31,6 +32,8 @@ pub struct NewStore {
     #[serde(default)]
     pub description: String,
     pub pickup_address: String,
+    /// A district id of the market layout.
+    pub district: String,
     pub pickup_state: String,
     pub delivery_courier: bool,
     pub delivery_self: bool,
@@ -45,6 +48,8 @@ pub struct StorePatch {
     pub name: Option<String>,
     pub description: Option<String>,
     pub pickup_address: Option<String>,
+    /// A district id of the market layout; a change moves the store's plot.
+    pub district: Option<String>,
     pub pickup_state: Option<String>,
     pub delivery_courier: Option<bool>,
     pub delivery_self: Option<bool>,
@@ -136,13 +141,14 @@ pub struct Store {
     pub rating_sum: i64,
     pub logo_key: Option<String>,
     pub banner_key: Option<String>,
+    pub district: String,
 }
 
 const COLUMNS: &str = "id, owner_id, name, slug, description, pickup_address_enc, pickup_state, \
                        delivery_courier, delivery_self, status::text AS status, created_at, \
                        pickup_area_council, pickup_postcode, pickup_courier_address_code, \
                        business_phone_enc, self_delivery_fee_kobo, rating_count, rating_sum, \
-                       logo_key, banner_key";
+                       logo_key, banner_key, district";
 
 /// The public shape: never carries the pickup address.
 #[derive(Debug, Serialize)]
@@ -173,6 +179,7 @@ pub struct OwnerStore {
     #[serde(flatten)]
     pub store: PublicStore,
     pub pickup_address: String,
+    pub district: String,
     pub pickup_area_council: Option<AreaCouncil>,
     pub pickup_postcode: Option<String>,
     pub business_phone: Option<String>,
@@ -184,6 +191,7 @@ impl std::fmt::Debug for OwnerStore {
         f.debug_struct("OwnerStore")
             .field("store", &self.store)
             .field("pickup_address", &REDACTED)
+            .field("district", &self.district)
             .field("pickup_area_council", &self.pickup_area_council)
             .field("pickup_postcode", &REDACTED)
             .field("business_phone", &REDACTED)
@@ -262,6 +270,7 @@ impl Store {
         Ok(OwnerStore {
             store: self.public(objects),
             pickup_address: cipher.decrypt(&self.pickup_address_enc)?,
+            district: self.district.clone(),
             pickup_area_council: self.pickup_area_council,
             pickup_postcode: self.pickup_postcode.clone(),
             business_phone: self
@@ -380,12 +389,25 @@ fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
     }
 }
 
+fn validate_district(layout: &Layout, district: &str) -> Result<(), AppError> {
+    if layout.district(district).is_some() {
+        Ok(())
+    } else {
+        Err(AppError::Unprocessable(
+            "unknown_district",
+            "That district does not exist".into(),
+        ))
+    }
+}
+
 pub async fn create_store(
     db: &PgPool,
     cipher: &FieldCipher,
+    layout: &Layout,
     owner: Uuid,
     input: NewStore,
 ) -> Result<Store, AppError> {
+    validate_district(layout, &input.district)?;
     validate_state(&input.pickup_state)?;
     let name = validate_name(&input.name)?;
     validate_description(&input.description)?;
@@ -452,8 +474,8 @@ pub async fn create_store(
         let inserted: Option<Store> = sqlx::query_as(&format!(
             "INSERT INTO stores (owner_id, name, slug, description, pickup_address_enc, pickup_state, \
                                  delivery_courier, delivery_self, pickup_area_council, pickup_postcode, \
-                                 business_phone_enc, self_delivery_fee_kobo) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                                 business_phone_enc, self_delivery_fee_kobo, district) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
              ON CONFLICT (slug) DO NOTHING RETURNING {COLUMNS}"
         ))
         .bind(owner)
@@ -468,6 +490,7 @@ pub async fn create_store(
         .bind(&postcode)
         .bind(&phone_enc)
         .bind(input.self_delivery_fee_kobo)
+        .bind(&input.district)
         .fetch_optional(&mut *tx)
         .await
         .context("insert store")?;
@@ -517,12 +540,21 @@ pub async fn get_by_slug(db: &PgPool, slug: &str, viewer: Option<Uuid>) -> Resul
 pub async fn update_store(
     db: &PgPool,
     cipher: &FieldCipher,
+    layout: &Layout,
     owner: Uuid,
     id: Uuid,
     patch: StorePatch,
 ) -> Result<Store, AppError> {
     let mut tx = db.begin().await.context("begin")?;
     let current = lock_owned(&mut tx, owner, id).await?;
+
+    if let Some(d) = &patch.district {
+        validate_district(layout, d)?;
+    }
+    let district = patch
+        .district
+        .clone()
+        .unwrap_or_else(|| current.district.clone());
 
     if let Some(state) = &patch.pickup_state {
         validate_state(state)?;
@@ -650,7 +682,7 @@ pub async fn update_store(
                            pickup_postcode = $9, business_phone_enc = $10, \
                            self_delivery_fee_kobo = $11, pickup_courier_address_code = $12, \
                            pickup_moved_at = CASE WHEN $13 THEN now() ELSE pickup_moved_at END, \
-                           logo_key = $14, banner_key = $15 \
+                           logo_key = $14, banner_key = $15, district = $16 \
          WHERE id = $1 RETURNING {COLUMNS}"
     ))
     .bind(id)
@@ -668,9 +700,17 @@ pub async fn update_store(
     .bind(pickup_moved)
     .bind(&logo_key)
     .bind(&banner_key)
+    .bind(&district)
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;
+    if district != current.district {
+        // Both districts are locked up front, in one global order, so two sellers
+        // moving in opposite directions cannot deadlock on release then place.
+        placement::lock_districts(&mut tx, &[&current.district, &district]).await?;
+        placement::release(&mut tx, layout, id).await?;
+        placement::place(&mut tx, layout, id).await?;
+    }
     for (key, held, purpose) in [
         (&logo_key, &current.logo_key, Purpose::StoreLogo),
         (&banner_key, &current.banner_key, Purpose::StoreBanner),
@@ -748,7 +788,12 @@ pub async fn delivery_profile_on(
     })
 }
 
-pub async fn delete_store(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_store(
+    db: &PgPool,
+    layout: &Layout,
+    owner: Uuid,
+    id: Uuid,
+) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
     lock_owned(&mut tx, owner, id).await?;
     sqlx::query("UPDATE stores SET deleted_at = now() WHERE id = $1")
@@ -756,6 +801,7 @@ pub async fn delete_store(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), AppE
         .execute(&mut *tx)
         .await
         .context("soft delete store")?;
+    placement::release(&mut tx, layout, id).await?;
     audit::record(
         &mut tx,
         Some(owner),
@@ -807,6 +853,7 @@ mod debug_tests {
         let new = NewStore {
             name: "Shop".into(),
             description: String::new(),
+            district: "everything-else".into(),
             pickup_address: "12 Secret Close, Wuse".into(),
             pickup_state: "FCT".into(),
             delivery_courier: true,

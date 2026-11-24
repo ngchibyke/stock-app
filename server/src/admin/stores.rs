@@ -24,6 +24,7 @@ use crate::{
     checkout::service::busy_err,
     error::AppError,
     extract::{AppJson, AppQuery},
+    market::placement,
     orders::views::Cursor,
 };
 
@@ -256,6 +257,9 @@ async fn unsuspend(
     .execute(&mut *tx)
     .await
     .context("unsuspend store")?;
+    if next == "active" {
+        placement::place(&mut tx, &state.market, id).await?;
+    }
     audit::record(
         &mut tx,
         Some(owner.id),
