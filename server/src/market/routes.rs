@@ -88,7 +88,13 @@ async fn market(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
     let matches = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"));
+        .is_some_and(|v| {
+            // Weak comparison is the right one for GET: a leading `W/` is ignored.
+            v.split(',').any(|t| {
+                let t = t.trim();
+                t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag
+            })
+        });
     if matches {
         return Ok((
             StatusCode::NOT_MODIFIED,

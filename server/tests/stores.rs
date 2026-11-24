@@ -736,3 +736,54 @@ async fn patch_with_an_unknown_district_is_rejected(pool: PgPool) {
         .await;
     assert_eq!(mine.json[0]["district"], "everything-else");
 }
+
+#[sqlx::test]
+async fn a_district_change_is_flagged_in_the_audit_row(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (_, token) = app.make_seller("08011111111").await;
+    let created = create(&app, &token, "Mover").await;
+    let id = created.json["id"].as_str().unwrap();
+    let base: i64 = sqlx::query_scalar("SELECT COALESCE(max(id), 0) FROM audit_log")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+
+    let patched = app
+        .request(
+            Method::PATCH,
+            &format!("/stores/{id}"),
+            Some(json!({ "district": "fashion" })),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(patched.status, 200, "{}", patched.json);
+    let detail: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit_log WHERE id > $1 AND action = 'store.updated'",
+    )
+    .bind(base)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(detail["district_changed"], true, "{detail}");
+
+    // A patch that leaves the district alone carries no flag.
+    let base: i64 = sqlx::query_scalar("SELECT COALESCE(max(id), 0) FROM audit_log")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    app.request(
+        Method::PATCH,
+        &format!("/stores/{id}"),
+        Some(json!({ "description": "New words" })),
+        Some(&token),
+    )
+    .await;
+    let detail: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit_log WHERE id > $1 AND action = 'store.updated'",
+    )
+    .bind(base)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert!(detail.get("district_changed").is_none(), "{detail}");
+}

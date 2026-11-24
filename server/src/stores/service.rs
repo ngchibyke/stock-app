@@ -729,11 +729,14 @@ pub async fn update_store(
         }
     }
     // Field names only, never values.
-    let detail = if changed.is_empty() {
-        json!({})
-    } else {
-        json!({ "delivery_fields_changed": changed })
-    };
+    let mut detail = serde_json::Map::new();
+    if !changed.is_empty() {
+        detail.insert("delivery_fields_changed".into(), json!(changed));
+    }
+    if district != current.district {
+        detail.insert("district_changed".into(), json!(true));
+    }
+    let detail = serde_json::Value::Object(detail);
     audit::record(
         &mut tx,
         Some(owner),

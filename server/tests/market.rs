@@ -314,3 +314,23 @@ async fn market_read_writes_nothing(pool: PgPool) {
     assert_eq!(count(&app, "audit_log").await, audit);
     assert_eq!(count(&app, "store_plots").await, plots);
 }
+
+#[sqlx::test]
+async fn a_weak_if_none_match_also_gives_304(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    store(&app, 1).await;
+    let first = get_market(&app).await;
+    let etag = first.headers.get("etag").unwrap().to_str().unwrap();
+
+    let weak = format!("W/{etag}");
+    let again = app
+        .request_with_headers(
+            Method::GET,
+            "/market",
+            None,
+            None,
+            &[("if-none-match", weak.as_str())],
+        )
+        .await;
+    assert_eq!(again.status, 304);
+}
