@@ -74,6 +74,11 @@
 //! 15. `purge_uploads`: photo uploads still `pending` or `failed` after 24 hours
 //!     are deleted with their objects
 //!     -> [`uploads::jobs::run`](crate::uploads::jobs::run).
+//! 16. `place_market`: active stores with no plot on the market map get the free
+//!     plot of their district, and plots the layout no longer honours are
+//!     released -> [`place_missing`](crate::market::placement::place_missing).
+//!     Catches a plot that freed up
+//!     while the waiting store was locked, so it need not wait for a restart.
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -171,6 +176,7 @@ const REFUNDS: &str = "refunds";
 const BOOK_SHIPMENTS: &str = "book_shipments";
 const CANCEL_SHIPMENTS: &str = "cancel_shipments";
 const POLL_SHIPMENTS: &str = "poll_shipments";
+const PLACE_MARKET: &str = "place_market";
 /// The refund sweeper leaves a refund this long after its last send.
 const REFUND_GRACE: &str = "1 minute";
 /// Expired checkouts are re-verified for this long after expiry.
@@ -200,6 +206,7 @@ pub struct JobReport {
     pub reminders_sent: u32,
     pub statements_checked: u32,
     pub uploads_purged: u32,
+    pub stores_placed: u32,
     pub failed: u32,
 }
 
@@ -227,7 +234,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 15] = [
+    let jobs: [(&str, Job); 16] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -243,6 +250,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (reminders::CONFIRM_REMINDERS, Job::ConfirmReminders),
         (statement_job::STATEMENT_CHECK, Job::StatementCheck),
         (upload_jobs::PURGE_UPLOADS, Job::PurgeUploads),
+        (PLACE_MARKET, Job::PlaceMarket),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -273,6 +281,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::ConfirmReminders => &mut report.reminders_sent,
             Job::StatementCheck => &mut report.statements_checked,
             Job::PurgeUploads => &mut report.uploads_purged,
+            Job::PlaceMarket => &mut report.stores_placed,
         };
         *slot += stats.done;
     }
@@ -307,6 +316,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 reminders_sent = r.reminders_sent,
                 statements_checked = r.statements_checked,
                 uploads_purged = r.uploads_purged,
+                stores_placed = r.stores_placed,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -357,6 +367,7 @@ enum Job {
     ConfirmReminders,
     StatementCheck,
     PurgeUploads,
+    PlaceMarket,
 }
 
 impl Job {
@@ -377,8 +388,18 @@ impl Job {
             Job::ConfirmReminders => reminders::run(state, cancel).await,
             Job::StatementCheck => statement_job::run(state, cancel).await,
             Job::PurgeUploads => upload_jobs::run(state, cancel).await,
+            Job::PlaceMarket => place_market(state).await,
         }
     }
+}
+
+/// Job 16: places unplaced active stores on free plots (see the module docs).
+async fn place_market(state: &AppState) -> Result<Stats, AppError> {
+    let placed = crate::market::placement::place_missing(&state.db, &state.market).await?;
+    Ok(Stats {
+        done: u32::try_from(placed).unwrap_or(u32::MAX),
+        failed: 0,
+    })
 }
 
 /// Upserts the job's `job_runs` row; a failure here is only logged.

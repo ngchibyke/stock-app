@@ -1794,6 +1794,7 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "dispute_deadlines",
             "expire_checkouts",
             "payouts",
+            "place_market",
             "poll_shipments",
             "purge_uploads",
             "refunds",
@@ -1803,6 +1804,62 @@ async fn job_runs_record_last_success(pool: PgPool) {
         ]
     );
     assert!(jobs.iter().all(|(_, ok)| *ok));
+}
+
+#[sqlx::test]
+async fn place_market_job_fills_a_free_plot_for_a_waiting_store(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    // Nine active stores, one district of eight plots: the ninth waits.
+    let mut stores = Vec::new();
+    for i in 0..9 {
+        let l = app
+            .make_active_store_with_product(
+                &format!("0803200{i:04}"),
+                &format!("Shop {i}"),
+                1000,
+                5,
+            )
+            .await;
+        stores.push(l.store_id);
+    }
+    let waiting = stores[8];
+    let held = |id: Uuid| {
+        let pool = app.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT (SELECT plot_id FROM store_plots WHERE store_id = $1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(held(waiting).await, None);
+    // A plot frees up without the release hand-off (as when the waiting store
+    // was locked at that moment); its old holder is out of the running.
+    let freed = held(stores[0]).await.unwrap();
+    exec(
+        &app,
+        &format!("DELETE FROM store_plots WHERE store_id = '{}'", stores[0]),
+    )
+    .await;
+    exec(
+        &app,
+        &format!(
+            "UPDATE stores SET status = 'suspended' WHERE id = '{}'",
+            stores[0]
+        ),
+    )
+    .await;
+
+    let report = tick(&app).await;
+    assert_eq!(report.stores_placed, 1);
+    assert_eq!(held(waiting).await, Some(freed));
+
+    let again = tick(&app).await;
+    assert_eq!(again.stores_placed, 0);
+    assert_eq!(again.failed, 0);
 }
 
 #[sqlx::test]
