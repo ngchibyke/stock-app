@@ -90,6 +90,7 @@ async fn app_path_from_signup_to_search(pool: PgPool) {
             Some(json!({
                 "name": "Path Store",
                 "pickup_address": "12 Unique Street, Wuse 2",
+                "district": "everything-else",
                 "pickup_state": "FCT",
                 "delivery_courier": true,
                 "delivery_self": true,

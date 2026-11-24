@@ -42,6 +42,9 @@ pub enum AppError {
     Muted(time::OffsetDateTime),
     #[error("not found")]
     NotFound,
+    /// 404 with a specific code the client keys on (e.g. `store_not_found`).
+    #[error("not found: {0}")]
+    NotFoundCode(&'static str),
     #[error("method not allowed")]
     MethodNotAllowed,
     #[error("conflict: {0}")]
@@ -123,6 +126,7 @@ impl IntoResponse for AppError {
                 (StatusCode::FORBIDDEN, payload)
             }
             AppError::NotFound => (StatusCode::NOT_FOUND, body("not_found", "Not found")),
+            AppError::NotFoundCode(code) => (StatusCode::NOT_FOUND, body(code, "Not found")),
             AppError::MethodNotAllowed => (
                 StatusCode::METHOD_NOT_ALLOWED,
                 body("method_not_allowed", "Method not allowed"),

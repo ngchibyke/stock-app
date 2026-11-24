@@ -192,7 +192,7 @@ fn words(q: Option<&str>) -> Result<Words, AppError> {
 }
 
 #[derive(sqlx::FromRow)]
-struct Row {
+pub(crate) struct Row {
     id: Uuid,
     name: String,
     category: String,
@@ -429,7 +429,8 @@ pub async fn run(db: &PgPool, q: BrowseQuery) -> Result<Page<ProductCard>, AppEr
     })
 }
 
-fn card(r: Row) -> ProductCard {
+/// The catalog card for a row; `photo_url` is left for the caller to fill in.
+pub(crate) fn card(r: Row) -> ProductCard {
     ProductCard {
         id: r.id,
         name: r.name,

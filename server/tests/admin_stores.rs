@@ -241,3 +241,23 @@ async fn unsuspend_restores_active_or_pending_by_payout_account(pool: PgPool) {
     let back = post(&app, &unsuspend, None, &owner).await;
     assert_eq!(back.json["status"], "pending");
 }
+
+#[sqlx::test]
+async fn admin_detail_shows_the_plot_the_store_holds(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.owner_token().await;
+    let placed = app
+        .make_active_store_with_product("08031110001", "Placed", 500_000, 5)
+        .await;
+    let one = get(&app, &format!("/admin/stores/{}", placed.store_id), &owner).await;
+    assert_eq!(one.json["plot"], "everything-else-1", "{}", one.json);
+
+    sqlx::query("DELETE FROM store_plots WHERE store_id = $1")
+        .bind(placed.store_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let one = get(&app, &format!("/admin/stores/{}", placed.store_id), &owner).await;
+    assert!(one.json["plot"].is_null(), "{}", one.json);
+    assert!(one.json.get("plot").is_some());
+}

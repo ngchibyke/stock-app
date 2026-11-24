@@ -46,15 +46,15 @@ pub struct StoreCard {
 }
 
 #[derive(sqlx::FromRow)]
-struct Row {
-    id: Uuid,
-    slug: String,
-    name: String,
-    logo_key: Option<String>,
-    rating_count: i32,
-    rating_sum: i64,
-    created_at: OffsetDateTime,
-    product_count: i64,
+pub(crate) struct Row {
+    pub(crate) id: Uuid,
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) logo_key: Option<String>,
+    pub(crate) rating_count: i32,
+    pub(crate) rating_sum: i64,
+    pub(crate) created_at: OffsetDateTime,
+    pub(crate) product_count: i64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,6 +206,16 @@ pub async fn run(db: &PgPool, q: DirectoryQuery) -> Result<Page<StoreCard>, AppE
         items: rows.into_iter().map(card).collect(),
         next_cursor,
     })
+}
+
+/// The directory card for a row, its logo address filled in from `objects`.
+pub(crate) fn card_with_logo(
+    r: Row,
+    objects: &dyn crate::uploads::store::ObjectStore,
+) -> StoreCard {
+    let mut c = card(r);
+    c.logo_url = c.logo_key.as_deref().and_then(|k| objects.public_url(k));
+    c
 }
 
 fn card(r: Row) -> StoreCard {

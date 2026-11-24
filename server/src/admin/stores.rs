@@ -24,6 +24,7 @@ use crate::{
     checkout::service::busy_err,
     error::AppError,
     extract::{AppJson, AppQuery},
+    market::placement,
     orders::views::Cursor,
 };
 
@@ -136,6 +137,8 @@ struct StoreDetail {
     #[serde(with = "time::serde::rfc3339::option")]
     suspended_at: Option<OffsetDateTime>,
     payout_account_status: Option<String>,
+    /// The market plot the store holds; null while unplaced.
+    plot: Option<String>,
     product_count: i64,
     open_order_count: i64,
     #[serde(with = "time::serde::rfc3339")]
@@ -148,6 +151,7 @@ async fn detail(db: &PgPool, id: Uuid) -> Result<StoreDetail, AppError> {
                 s.status = 'suspended' AS suspended, s.suspended_reason, s.suspended_at, \
                 (SELECT pa.status::text FROM payout_accounts pa WHERE pa.store_id = s.id) \
                     AS payout_account_status, \
+                (SELECT sp.plot_id FROM store_plots sp WHERE sp.store_id = s.id) AS plot, \
                 (SELECT count(*) FROM products p \
                   WHERE p.store_id = s.id AND p.deleted_at IS NULL) AS product_count, \
                 (SELECT count(*) FROM orders o WHERE o.store_id = s.id AND o.status IN \
@@ -256,6 +260,9 @@ async fn unsuspend(
     .execute(&mut *tx)
     .await
     .context("unsuspend store")?;
+    if next == "active" {
+        placement::place(&mut tx, &state.market, id).await?;
+    }
     audit::record(
         &mut tx,
         Some(owner.id),

@@ -39,6 +39,7 @@ async fn second_store(app: &TestApp, shop: &Listing) -> Uuid {
             Some(json!({
                 "name": "Kano Shoes",
                 "pickup_address": "12 Unique Street, Wuse 2",
+                "district": "everything-else",
                 "pickup_state": "FCT",
                 "delivery_courier": true,
                 "delivery_self": true,

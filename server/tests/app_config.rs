@@ -39,6 +39,7 @@ async fn config_route_reads_settings(pool: PgPool) {
             "privacy_url": "https://shop.example/privacy",
             "support_email": "help@shop.example",
             "maintenance": { "active": true, "message": "Back at 6pm." },
+            "assets": null,
         })
     );
 }
@@ -93,7 +94,111 @@ async fn defaults_are_null_not_empty(pool: PgPool) {
             "privacy_url": null,
             "support_email": null,
             "maintenance": { "active": false, "message": null },
+            "assets": null,
         })
+    );
+}
+
+const ASSETS_URL: &str = "https://cdn.shop.example/market/";
+
+#[test]
+fn assets_are_null_when_unset() {
+    assert_eq!(parse(&[]).unwrap().assets, None);
+    assert_eq!(parse(&[]).unwrap().view()["assets"], json!(null));
+    // Blank counts as unset.
+    let blank = parse(&[
+        ("MARKET_ASSETS_VERSION", "  "),
+        ("MARKET_ASSETS_BASE_URL", ""),
+    ])
+    .unwrap();
+    assert_eq!(blank.assets, None);
+    // One blank and one set is the same as only one set.
+    assert!(
+        parse(&[
+            ("MARKET_ASSETS_VERSION", "v1"),
+            ("MARKET_ASSETS_BASE_URL", " "),
+        ])
+        .is_err()
+    );
+}
+
+#[sqlx::test]
+async fn assets_are_served_when_both_are_set(pool: PgPool) {
+    let config = parse(&[
+        ("MARKET_ASSETS_VERSION", " 2026-11.a_b "),
+        ("MARKET_ASSETS_BASE_URL", ASSETS_URL),
+    ])
+    .unwrap();
+    let assets = config.assets.clone().unwrap();
+    assert_eq!(assets.version, "2026-11.a_b");
+    assert_eq!(assets.base_url, ASSETS_URL);
+
+    let mut app = TestApp::new(pool).await;
+    app.use_app_config(config);
+    let res = app.request(Method::GET, "/app/config", None, None).await;
+    assert_eq!(res.status, 200, "body: {}", res.json);
+    assert_eq!(
+        res.json["assets"],
+        json!({ "version": "2026-11.a_b", "base_url": ASSETS_URL })
+    );
+    assert_eq!(
+        res.headers.get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=300"
+    );
+}
+
+#[test]
+fn only_one_of_the_two_is_refused() {
+    for pairs in [
+        [("MARKET_ASSETS_VERSION", "v1")],
+        [("MARKET_ASSETS_BASE_URL", ASSETS_URL)],
+    ] {
+        let err = parse(&pairs).unwrap_err().to_string();
+        assert!(
+            err.contains("MARKET_ASSETS_VERSION") && err.contains("MARKET_ASSETS_BASE_URL"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_non_https_base_url_is_refused() {
+    for bad in [
+        "http://cdn.shop.example/market/",
+        "https://",
+        "cdn.shop.example/market/",
+        "https://cdn.shop.example/mar ket/",
+    ] {
+        let err = parse(&[
+            ("MARKET_ASSETS_VERSION", "v1"),
+            ("MARKET_ASSETS_BASE_URL", bad),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("MARKET_ASSETS_BASE_URL"), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn a_bad_version_is_refused() {
+    let long = "a".repeat(41);
+    for bad in ["", "has space", "a/b", "..", "a..b", long.as_str()] {
+        let result = parse(&[
+            ("MARKET_ASSETS_VERSION", bad),
+            ("MARKET_ASSETS_BASE_URL", ASSETS_URL),
+        ]);
+        // An empty value is blank, so it is the "only one set" error; both name the variable.
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("MARKET_ASSETS_VERSION"), "{bad:?}: {err}");
+    }
+    // The longest allowed version passes.
+    let max = "a".repeat(40);
+    assert!(
+        parse(&[
+            ("MARKET_ASSETS_VERSION", max.as_str()),
+            ("MARKET_ASSETS_BASE_URL", ASSETS_URL),
+        ])
+        .is_ok()
     );
 }
 

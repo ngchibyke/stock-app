@@ -57,11 +57,15 @@ async fn create(
     AppJson(body): AppJson<NewStore>,
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
-    let store = service::create_store(&state.db, &state.cipher, user.id, body).await?;
+    let store =
+        service::create_store(&state.db, &state.cipher, &state.market, user.id, body).await?;
+    let plot = service::plots_of(&state.db, &[store.id])
+        .await?
+        .remove(&store.id);
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher, &*state.objects)?),
+        Json(store.owner_view(&state.cipher, &*state.objects, plot)?),
     ))
 }
 
@@ -71,9 +75,11 @@ async fn mine(
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
     let stores = service::list_mine(&state.db, user.id).await?;
+    let ids: Vec<Uuid> = stores.iter().map(|s| s.id).collect();
+    let mut plots = service::plots_of(&state.db, &ids).await?;
     let views = stores
         .iter()
-        .map(|s| s.owner_view(&state.cipher, &*state.objects))
+        .map(|s| s.owner_view(&state.cipher, &*state.objects, plots.remove(&s.id)))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
@@ -94,11 +100,21 @@ async fn update(
     AppJson(patch): AppJson<StorePatch>,
 ) -> Result<impl IntoResponse, AppError> {
     require_seller(&user)?;
-    let store =
-        service::update_store(&state.db, &state.cipher, user.id, parse_id(&key)?, patch).await?;
+    let store = service::update_store(
+        &state.db,
+        &state.cipher,
+        &state.market,
+        user.id,
+        parse_id(&key)?,
+        patch,
+    )
+    .await?;
+    let plot = service::plots_of(&state.db, &[store.id])
+        .await?
+        .remove(&store.id);
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(store.owner_view(&state.cipher, &*state.objects)?),
+        Json(store.owner_view(&state.cipher, &*state.objects, plot)?),
     ))
 }
 
@@ -108,6 +124,6 @@ async fn remove(
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
     require_seller(&user)?;
-    service::delete_store(&state.db, user.id, parse_id(&key)?).await?;
+    service::delete_store(&state.db, &state.market, user.id, parse_id(&key)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

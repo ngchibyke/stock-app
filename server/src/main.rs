@@ -16,6 +16,7 @@ use server::{
     couriers::shipbubble::ShipbubbleCourier,
     crypto::FieldCipher,
     escrow::jobs,
+    market::layout::Layout,
     moderation::{
         claude::ClaudeTone,
         tone::{NoTone, ToneChecker},
@@ -84,6 +85,13 @@ async fn main() -> anyhow::Result<()> {
         require_uploads(&config.app_env, config.s3.is_some())?;
         require_sms(&config.app_env, sms.is_some())?;
     }
+    // Before connecting: a broken layout is a deploy mistake, so name it and stop.
+    let market = Arc::new(Layout::load(&config.market_layout_dir).with_context(|| {
+        format!(
+            "market layout in {} is not usable",
+            config.market_layout_dir.display()
+        )
+    })?);
     let db = pool_options(10).connect(&config.database_url).await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
@@ -159,7 +167,13 @@ async fn main() -> anyhow::Result<()> {
         // REVISIT(mono-statement): install an adapter once Mono's statement API is confirmed.
         statements: None,
         app_config: Arc::new(config.app.clone()),
+        market,
     };
+
+    if matches!(command, Command::Serve) {
+        let placed = server::market::placement::place_missing(&state.db, &state.market).await?;
+        tracing::info!(placed, "stores placed on the market map");
+    }
 
     match command {
         Command::Serve => serve(state, &config).await,

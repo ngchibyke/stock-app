@@ -185,7 +185,9 @@ real running server. It is skipped unless both environment variables below are
 set, so the normal `flutter test` stays offline.
 
 1. Create a scratch database (never the development one) and start the server
-   from `../server` with `APP_ENV=development`, `OTP_DEV_ECHO=1`, that
+   from `../server` (the server reads the market layout from
+   `MARKET_LAYOUT_DIR`, default `market`, relative to where it is started)
+   with `APP_ENV=development`, `OTP_DEV_ECHO=1`, that
    database's `DATABASE_URL`, two different generated `FIELD_KEY` and
    `INDEX_KEY` values, and its stdout redirected to a log file. With
    `OTP_DEV_ECHO=1` the server prints each one-time code to stdout.
@@ -197,7 +199,7 @@ flutter test test/wire/wire_check_test.dart
 ```
 
 **The market wire check** (`test/wire/market_wire_test.dart`) also needs a
-store with products. Apply the seed to the same scratch database first (it is
+store with products and a plot. Apply the seed to the same scratch database first (it is
 safe to apply twice), then run it:
 
 ```
@@ -207,7 +209,9 @@ flutter test test/wire/market_wire_test.dart
 
 It signs up a fresh buyer, searches for the seeded dress, checks its two sizes
 and prices, adds it to the cart and checks the server's total, then loads the
-market and the store's room through the app's market code. The seed's store
+market (`GET /market`) and the store's room (`GET /stores/{slug}/room`)
+through the app's market code. The seed puts its store in the fashion district
+on plot `fashion-1` (a `store_plots` row), so it stands on the map. The seed's store
 has dummy encrypted fields: it is good for browsing and the cart, not for
 checkout.
 

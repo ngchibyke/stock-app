@@ -31,6 +31,16 @@ pub struct AppClientConfig {
     /// A notice shown while the service is down for maintenance; `maintenance.active`
     /// is true exactly when this is set.
     pub maintenance_message: Option<String>,
+    /// Which market art to use and where it is served from; `None` means the art bundled
+    /// in the app.
+    pub assets: Option<MarketAssets>,
+}
+
+/// A published set of market art: a version name and the https folder it is served from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MarketAssets {
+    pub version: String,
+    pub base_url: String,
 }
 
 /// A value from the environment, `None` when unset or blank.
@@ -65,6 +75,20 @@ fn https_url(name: &str, raw: String) -> Result<String> {
         || raw.contains(char::is_control)
     {
         bail!("{name} must be an https URL");
+    }
+    Ok(raw)
+}
+
+/// 1 to 40 characters of letters, digits, `.`, `-`, `_`; it becomes a folder name in a URL, so
+/// `..` is refused too.
+fn assets_version(name: &str, raw: String) -> Result<String> {
+    let ok = (1..=40).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && !raw.contains("..");
+    if !ok {
+        bail!("{name} must be 1 to 40 characters: letters, digits, '.', '-' or '_'");
     }
     Ok(raw)
 }
@@ -115,6 +139,16 @@ impl AppClientConfig {
             maintenance_message: get("APP_MAINTENANCE_MESSAGE")
                 .map(|v| message("APP_MAINTENANCE_MESSAGE", v))
                 .transpose()?,
+            assets: match (get("MARKET_ASSETS_VERSION"), get("MARKET_ASSETS_BASE_URL")) {
+                (None, None) => None,
+                (Some(version), Some(base_url)) => Some(MarketAssets {
+                    version: assets_version("MARKET_ASSETS_VERSION", version)?,
+                    base_url: https_url("MARKET_ASSETS_BASE_URL", base_url)?,
+                }),
+                _ => bail!(
+                    "MARKET_ASSETS_VERSION and MARKET_ASSETS_BASE_URL must be set together or not at all"
+                ),
+            },
         })
     }
 
@@ -132,6 +166,7 @@ impl AppClientConfig {
                 "active": self.maintenance_message.is_some(),
                 "message": self.maintenance_message,
             },
+            "assets": self.assets,
         })
     }
 }

@@ -141,6 +141,12 @@ impl TestApp {
             )),
             statements: None,
             app_config: Arc::new(server::app_config::AppClientConfig::default()),
+            market: Arc::new(
+                server::market::layout::Layout::load(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("market"),
+                )
+                .expect("the shipped market layout loads"),
+            ),
         };
         Self {
             router: build_app(state.clone()),
@@ -175,6 +181,12 @@ impl TestApp {
     /// Installs [`statement`](Self::statement) as the app's statement source.
     pub fn use_statement(&mut self) {
         self.state.statements = Some(self.statement.clone());
+        self.router = build_app(self.state.clone());
+    }
+
+    /// Runs the app with no public photo store, so no photo has an address.
+    pub fn use_no_public_photos(&mut self) {
+        self.state.objects = Arc::new(server::uploads::store::NoStore);
         self.router = build_app(self.state.clone());
     }
 
@@ -470,6 +482,7 @@ impl TestApp {
                 Some(json!({
                     "name": store_name,
                     "pickup_address": "12 Unique Street, Wuse 2",
+                    "district": "everything-else",
                     "pickup_state": "FCT",
                     // Both methods: self-delivery at fee 0 is what `checkout` picks by
                     // default, so part-2 tests keep their meaning (ruling P4).
