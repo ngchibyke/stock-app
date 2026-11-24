@@ -145,8 +145,9 @@ async fn placing_twice_changes_nothing(pool: PgPool) {
 #[sqlx::test]
 async fn a_full_district_leaves_the_store_active_and_unplaced(pool: PgPool) {
     let app = TestApp::new(pool).await;
-    let ids = unplaced_stores(&app, 9).await;
+    // From before the stores exist: activating the ninth already audits the full district.
     let base = mark(&app).await;
+    let ids = unplaced_stores(&app, 9).await;
     for id in &ids[..8] {
         assert!(place_now(&app, *id).await.is_some());
     }
@@ -631,4 +632,86 @@ async fn releasing_hands_the_plot_to_a_waiting_store_that_is_only_read_locked(po
     reader.rollback().await.unwrap();
 
     assert_eq!(plot_of(&app, ids[8]).await, Some(freed));
+}
+
+async fn market_audit_rows_since(app: &TestApp, base: i64) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE id > $1 AND action LIKE 'market.%'")
+        .bind(base)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_plot_the_layout_no_longer_has_is_released_and_replaced(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let ids = unplaced_stores(&app, 3).await;
+    assert_eq!(
+        place_missing(&app.pool, &app.state.market).await.unwrap(),
+        3
+    );
+    let healthy = plot_of(&app, ids[2]).await;
+    // A layout swap: one store's plot id is gone, another's plot now sits in a
+    // different district than the store's.
+    sqlx::query("UPDATE store_plots SET plot_id = 'gone-1' WHERE store_id = $1")
+        .bind(ids[0])
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    set_district(&app, ids[1], "fashion").await;
+    let base = mark(&app).await;
+
+    let placed = place_missing(&app.pool, &app.state.market).await.unwrap();
+
+    assert_eq!(placed, 2);
+    assert_eq!(
+        plot_of(&app, ids[0]).await.as_deref(),
+        Some("everything-else-1")
+    );
+    assert_eq!(plot_of(&app, ids[1]).await.as_deref(), Some("fashion-1"));
+    assert_eq!(plot_of(&app, ids[2]).await, healthy);
+    for id in &ids[..2] {
+        assert_eq!(
+            audit_count(&app, base, "market.store_unplaced", *id).await,
+            1
+        );
+        assert_eq!(audit_count(&app, base, "market.store_placed", *id).await, 1);
+    }
+    assert_eq!(
+        audit_count(&app, base, "market.store_unplaced", ids[2]).await,
+        0
+    );
+    assert_eq!(
+        audit_count(&app, base, "market.store_placed", ids[2]).await,
+        0
+    );
+
+    let base = mark(&app).await;
+    assert_eq!(
+        place_missing(&app.pool, &app.state.market).await.unwrap(),
+        0
+    );
+    assert_eq!(market_audit_rows_since(&app, base).await, 0);
+}
+
+#[sqlx::test]
+async fn a_full_district_is_audited_once_not_on_every_pass(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let base = mark(&app).await;
+    let ids = unplaced_stores(&app, 9).await;
+    for id in &ids[..8] {
+        assert!(place_now(&app, *id).await.is_some());
+    }
+
+    for _ in 0..3 {
+        assert_eq!(
+            place_missing(&app.pool, &app.state.market).await.unwrap(),
+            0
+        );
+    }
+
+    assert_eq!(
+        audit_count(&app, base, "market.district_full", ids[8]).await,
+        1
+    );
 }

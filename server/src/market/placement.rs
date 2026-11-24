@@ -88,15 +88,29 @@ pub async fn place(
         .map(|p| p.id.clone());
 
     let Some(plot) = free else {
-        audit::record(
-            tx,
-            None,
-            "market.district_full",
-            "store",
-            Some(store_id),
-            json!({ "district": district }),
+        // Audited once per wait: not again while the store's latest market row
+        // already says the same district was full.
+        let last: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT action, detail->>'district' FROM audit_log              WHERE subject_type = 'store' AND subject_id = $1 AND action LIKE 'market.%'              ORDER BY id DESC LIMIT 1",
         )
-        .await?;
+        .bind(store_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("load last market audit")?;
+        let already = last.is_some_and(|(action, d)| {
+            action == "market.district_full" && d.as_deref() == Some(district.as_str())
+        });
+        if !already {
+            audit::record(
+                tx,
+                None,
+                "market.district_full",
+                "store",
+                Some(store_id),
+                json!({ "district": district }),
+            )
+            .await?;
+        }
         return Ok(None);
     };
 
@@ -182,25 +196,96 @@ pub async fn release(
     Ok(())
 }
 
-/// Places every active, non-deleted store that has no plot, oldest first, one
-/// transaction per store. Returns how many got a plot.
+/// Drops every `store_plots` row the layout cannot honour: the plot id is not in the
+/// layout, or the plot sits in another district than the store's current one (a layout
+/// swap renamed, removed or moved it). Audited as `market.store_unplaced`; the store
+/// is placed again by `place_missing`. One transaction per row; the store row comes
+/// first, then the district locks. Returns how many rows were dropped.
+async fn release_stale(db: &PgPool, layout: &Layout) -> Result<u64, AppError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT sp.store_id, sp.plot_id, s.district          FROM store_plots sp JOIN stores s ON s.id = sp.store_id",
+    )
+    .fetch_all(db)
+    .await
+    .context("list held plots")?;
+    let mut dropped = 0;
+    for (store_id, plot, district) in rows {
+        let plot_district = layout.plot(&plot).map(|p| p.district.as_str());
+        if plot_district == Some(district.as_str()) {
+            continue;
+        }
+        let mut tx = db.begin().await.context("begin stale release")?;
+        // Re-read under the store row: the store may have moved on since the list.
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT sp.plot_id, s.district FROM stores s              JOIN store_plots sp ON sp.store_id = s.id WHERE s.id = $1 FOR SHARE OF s",
+        )
+        .bind(store_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("reload held plot")?;
+        let Some((plot, district)) = current else {
+            continue;
+        };
+        let plot_district = layout.plot(&plot).map(|p| p.district.clone());
+        if plot_district.as_deref() == Some(district.as_str()) {
+            continue;
+        }
+        let mut locks = vec![district.as_str()];
+        locks.extend(plot_district.as_deref());
+        lock_districts(&mut tx, &locks).await?;
+        let deleted = sqlx::query("DELETE FROM store_plots WHERE store_id = $1 AND plot_id = $2")
+            .bind(store_id)
+            .bind(&plot)
+            .execute(&mut *tx)
+            .await
+            .context("delete stale plot")?
+            .rows_affected();
+        if deleted == 1 {
+            audit::record(
+                &mut tx,
+                None,
+                "market.store_unplaced",
+                "store",
+                Some(store_id),
+                json!({ "plot": plot, "district": district, "reason": "layout_changed" }),
+            )
+            .await?;
+            dropped += 1;
+        }
+        tx.commit().await.context("commit stale release")?;
+    }
+    Ok(dropped)
+}
+
+/// First drops plots the layout no longer honours (`release_stale`), then places
+/// every active, non-deleted store that has no plot, oldest first, one transaction
+/// per store. A store that fails is logged (its id only) and skipped, so one bad
+/// row cannot stop the rest. Returns how many got a plot.
 pub async fn place_missing(db: &PgPool, layout: &Layout) -> Result<u64, AppError> {
+    let dropped = release_stale(db, layout).await?;
+    if dropped > 0 {
+        tracing::info!(dropped, "stale market plots released");
+    }
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT s.id FROM stores s \
-         WHERE s.status = 'active' AND s.deleted_at IS NULL \
-           AND NOT EXISTS (SELECT 1 FROM store_plots sp WHERE sp.store_id = s.id) \
-         ORDER BY s.created_at, s.id",
+        "SELECT s.id FROM stores s          WHERE s.status = 'active' AND s.deleted_at IS NULL            AND NOT EXISTS (SELECT 1 FROM store_plots sp WHERE sp.store_id = s.id)          ORDER BY s.created_at, s.id",
     )
     .fetch_all(db)
     .await
     .context("list unplaced stores")?;
     let mut placed = 0;
     for id in ids {
-        let mut tx = db.begin().await.context("begin placement")?;
-        if place(&mut tx, layout, id).await?.is_some() {
-            placed += 1;
+        match place_one(db, layout, id).await {
+            Ok(true) => placed += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(store_id = %id, error = %e, "store not placed; continuing"),
         }
-        tx.commit().await.context("commit placement")?;
     }
     Ok(placed)
+}
+
+async fn place_one(db: &PgPool, layout: &Layout, id: Uuid) -> Result<bool, AppError> {
+    let mut tx = db.begin().await.context("begin placement")?;
+    let got = place(&mut tx, layout, id).await?.is_some();
+    tx.commit().await.context("commit placement")?;
+    Ok(got)
 }
