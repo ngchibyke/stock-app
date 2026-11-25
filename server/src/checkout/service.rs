@@ -45,6 +45,7 @@ use crate::{
     payments::{self, InitiatePayment, ProviderError, payment_url_allowed},
     products::service::unit_price,
     settings,
+    stores::access::is_member_sql,
 };
 
 /// Most `pending` (unexpired) checkouts one buyer may hold: each one reserves
@@ -130,7 +131,8 @@ struct ProductRow {
     base_price_kobo: i64,
     buyable: bool,
     store_id: Uuid,
-    owner_id: Uuid,
+    /// The buyer is the store's owner or a live member of it.
+    buyer_member: bool,
 }
 
 struct Line {
@@ -244,10 +246,12 @@ pub async fn create(
     let product_ids: Vec<Uuid> = variants.values().map(|v| v.product_id).collect();
     let products: HashMap<Uuid, ProductRow> = sqlx::query_as::<_, ProductRow>(&format!(
         "SELECT p.id, p.name, p.base_price_kobo, ({BUYABLE}) AS buyable, \
-                s.id AS store_id, s.owner_id \
-         FROM products p JOIN stores s ON s.id = p.store_id WHERE p.id = ANY($1)"
+                s.id AS store_id, {} AS buyer_member \
+         FROM products p JOIN stores s ON s.id = p.store_id WHERE p.id = ANY($1)",
+        is_member_sql("$2")
     ))
     .bind(&product_ids)
+    .bind(buyer)
     .fetch_all(&mut *tx)
     .await
     .context("load products")?
@@ -270,7 +274,7 @@ pub async fn create(
             .get(&v.product_id)
             .filter(|p| p.buyable)
             .ok_or_else(|| unavailable(variant_id))?;
-        if p.owner_id == buyer {
+        if p.buyer_member {
             return Err(own_store_item());
         }
         // Available = on hand minus what other pending checkouts hold, read from the locked row.

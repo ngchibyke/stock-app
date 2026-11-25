@@ -23,6 +23,7 @@ use crate::{
         strikes::{NewFlag, Surface, ensure_can_post, record_flag},
     },
     orders::views::Cursor,
+    stores::access::{self, Action},
     uploads::{
         claim::{self, Kind, claim},
         service::Purpose,
@@ -357,21 +358,21 @@ pub async fn post_reply(
     if body.is_none() && use_suggestion.is_none() {
         return Err(AppError::Validation("give body or use_suggestion".into()));
     }
-    let row: Option<(Uuid, bool)> = sqlx::query_as(
-        "SELECT r.order_id, r.reply IS NOT NULL \
-         FROM reviews r JOIN stores s ON s.id = r.store_id \
-         WHERE r.id = $1 AND s.owner_id = $2 AND r.hidden_at IS NULL",
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    let row: Option<(Uuid, bool, Uuid)> = sqlx::query_as(
+        "SELECT order_id, reply IS NOT NULL, store_id FROM reviews \
+         WHERE id = $1 AND hidden_at IS NULL",
     )
     .bind(review)
-    .bind(user)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *conn)
     .await
     .context("read review for reply")?;
-    let (order, replied) = row.ok_or(AppError::NotFound)?;
+    let (order, replied, store) = row.ok_or(AppError::NotFound)?;
+    // Owner and managers reply; other members get 403, anyone else 404.
+    access::require(&mut conn, store, user, Action::ReplyReviews).await?;
     if replied {
         return Err(AppError::Conflict("already_replied"));
     }
-    let mut conn = state.db.acquire().await.context("acquire")?;
     ensure_can_post(&mut conn, user).await?;
     drop(conn);
 

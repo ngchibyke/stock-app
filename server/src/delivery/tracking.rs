@@ -1,10 +1,11 @@
 //! `GET /orders/{id}/tracking`: a fixed timeline, who to call, and (for the
 //! buyer) the handover code. Mostly a question of who sees what, and when.
 //!
-//! - **Audience.** The order's buyer, or the owner of its store (only once the
-//!   order has been paid, so never for a `pending_payment` order or one cancelled
-//!   unpaid). Everyone else, staff included, and any foreign or malformed id,
-//!   gets 404.
+//! - **Audience.** The order's buyer, or a member of its store who may act on it
+//!   (the owner, a manager, store-wide staff, or staff of the order's branch), only
+//!   once the order has been paid, so never for a `pending_payment` order or one
+//!   cancelled unpaid. Everyone else, platform staff and staff of another branch
+//!   included, and any foreign or malformed id, gets 404.
 //! - **Every gate is read from the database on each request** (status, delivery
 //!   method, who is asking). Nothing is cached; the route sets `no-store`.
 //! - **Buyer** sees the courier's name and phone (courier orders) or the store's
@@ -18,8 +19,9 @@
 //!   never shows the seller any buyer contact, and the seller never receives the
 //!   courier's phone.
 //! - **Audit.** Revealing contact writes `order.contact_revealed` once per
-//!   (order, viewer), not per view, and fails the request if it cannot be
-//!   written. The detail names the kind of reveal only, never a value.
+//!   (order, viewer), not per view, so each member who saw it is named, and
+//!   fails the request if it cannot be written. The detail names the kind of
+//!   reveal only, never a value.
 //!
 //! Each reveal sits behind one function ([`reveal_buyer_contact`],
 //! [`reveal_delivery_contact`]) so that a proxy number can replace the real
@@ -33,7 +35,9 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{addresses::DeliveryAddress, area::AreaCouncil, promise};
-use crate::{AppState, audit, crypto::FieldCipher, error::AppError};
+use crate::{
+    AppState, audit, crypto::FieldCipher, error::AppError, stores::access::covers_branch_sql,
+};
 
 /// Audit action for a contact reveal.
 pub const CONTACT_REVEALED: &str = "order.contact_revealed";
@@ -186,10 +190,12 @@ pub async fn staff_timeline(db: &PgPool, order_id: Uuid) -> Result<Vec<Step>, Ap
 }
 
 /// The tracking view of order `order_id` for `viewer`; 404 for anyone who is
-/// not its buyer or its store's owner.
+/// not its buyer or a member of its store who may act on it.
 pub async fn get(state: &AppState, viewer: Uuid, order_id: Uuid) -> Result<TrackingView, AppError> {
     let facts: Facts = sqlx::query_as(&format!(
-        "{FACTS_SELECT} WHERE o.id = $1 AND (o.buyer_id = $2                OR (s.owner_id = $2 AND COALESCE(o.paid_at, c.paid_at) IS NOT NULL))"
+        "{FACTS_SELECT} WHERE o.id = $1 AND (o.buyer_id = $2 \
+         OR ({} AND COALESCE(o.paid_at, c.paid_at) IS NOT NULL))",
+        covers_branch_sql("$2", "o.branch_id")
     ))
     .bind(order_id)
     .bind(viewer)

@@ -11,6 +11,7 @@ use crate::{
     audit,
     error::AppError,
     limits::{MAX_PRICE_KOBO, MAX_STOCK},
+    stores::access::{self, Action, is_member_sql},
     uploads::{
         claim::{self, Kind, claim},
         service::Purpose,
@@ -100,10 +101,10 @@ pub struct Variant {
     pub attributes: BTreeMap<String, String>,
     /// Units a buyer can still buy: on-hand stock minus units reserved by pending checkouts.
     pub available_stock: i32,
-    /// On-hand stock as the seller set it. Shown to the store owner only.
+    /// On-hand stock as the seller set it. Shown to the store's team only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stock: Option<i32>,
-    /// Units held by pending checkouts. Shown to the store owner only.
+    /// Units held by pending checkouts. Shown to the store's team only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reserved_quantity: Option<i32>,
     pub price_kobo: Option<i64>,
@@ -404,7 +405,7 @@ async fn upsert_variants(
     Ok(())
 }
 
-/// `owner_view`: the viewer owns the store, so on-hand and reserved stock are included.
+/// `owner_view`: the viewer is in the store's team, so on-hand and reserved stock are included.
 async fn load_variants(
     db: &PgPool,
     product_id: Uuid,
@@ -433,22 +434,23 @@ async fn load_variants(
         .collect::<Result<_, AppError>>()
 }
 
-/// The product with its variants. The store owner also sees on-hand and reserved
-/// stock; everyone else sees available stock only.
+/// The product with its variants. The store's owner and team also see on-hand and
+/// reserved stock; everyone else sees available stock only.
 async fn view(
     db: &PgPool,
     product: Product,
     viewer: Option<Uuid>,
 ) -> Result<ProductView, AppError> {
     let owner_view = match viewer {
-        Some(viewer) => sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM stores WHERE id = $1 AND owner_id = $2)",
-        )
+        Some(viewer) => sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM stores s WHERE s.id = $1 AND {})",
+            is_member_sql("$2")
+        ))
         .bind(product.store_id)
         .bind(viewer)
         .fetch_one(db)
         .await
-        .context("check store owner")?,
+        .context("check store team")?,
         None => false,
     };
     let variants = load_variants(db, product.id, owner_view).await?;
@@ -459,28 +461,52 @@ async fn view(
     })
 }
 
-/// Locks a live product whose live store belongs to `owner`; anything else is NotFound.
-async fn lock_owned(
-    tx: &mut Transaction<'_, Postgres>,
-    owner: Uuid,
-    id: Uuid,
-) -> Result<Product, AppError> {
+/// Locks a live product in a live store; anything else is NotFound. Who may act on
+/// it is the caller's check, made right after (a stranger gets the same NotFound).
+async fn lock_live(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<Product, AppError> {
     sqlx::query_as(&format!(
         "SELECT {PRODUCT_COLUMNS} FROM products p WHERE p.id = $1 AND p.deleted_at IS NULL \
-         AND EXISTS (SELECT 1 FROM stores s WHERE s.id = p.store_id AND s.owner_id = $2 AND s.deleted_at IS NULL) \
+         AND EXISTS (SELECT 1 FROM stores s WHERE s.id = p.store_id AND s.deleted_at IS NULL) \
          FOR NO KEY UPDATE OF p"
     ))
     .bind(id)
-    .bind(owner)
     .fetch_optional(&mut **tx)
     .await
     .context("lock product")?
     .ok_or(AppError::NotFound)
 }
 
+/// What a buyer sees as live is a manager's: on a published product a price change
+/// or a change of the variant set needs [`Action::EditLivePrices`].
+async fn variants_change_live_prices(
+    tx: &mut Transaction<'_, Postgres>,
+    product_id: Uuid,
+    variants: &[VariantInput],
+) -> Result<bool, AppError> {
+    let rows: Vec<(serde_json::Value, Option<i64>)> =
+        sqlx::query_as("SELECT attributes, price_kobo FROM product_variants WHERE product_id = $1")
+            .bind(product_id)
+            .fetch_all(&mut **tx)
+            .await
+            .context("load variant prices")?;
+    let current = rows
+        .into_iter()
+        .map(|(attrs, price)| {
+            let attrs: BTreeMap<String, String> =
+                serde_json::from_value(attrs).context("decode attributes")?;
+            Ok((attrs, price))
+        })
+        .collect::<Result<BTreeMap<_, _>, AppError>>()?;
+    let wanted: BTreeMap<BTreeMap<String, String>, Option<i64>> = variants
+        .iter()
+        .map(|v| (v.attributes.clone(), v.price_kobo))
+        .collect();
+    Ok(current != wanted)
+}
+
 pub async fn create_product(
     db: &PgPool,
-    owner: Uuid,
+    actor: Uuid,
     store_id: Uuid,
     mut input: NewProduct,
 ) -> Result<ProductView, AppError> {
@@ -498,12 +524,13 @@ pub async fn create_product(
     validate_variants(&input.variants)?;
 
     let mut tx = db.begin().await.context("begin")?;
-    // The store must be the caller's and not deleted; otherwise it does not exist for them.
+    // Anyone in the team adds products; they start unpublished. A stranger, or a
+    // deleted store, gets NotFound.
+    access::require(&mut tx, store_id, actor, Action::EditProducts).await?;
     sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM stores WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR SHARE",
+        "SELECT id FROM stores WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
     )
     .bind(store_id)
-    .bind(owner)
     .fetch_optional(&mut *tx)
     .await
     .context("check store")?
@@ -531,7 +558,7 @@ pub async fn create_product(
     .context("insert product")?;
     claim(
         &mut tx,
-        owner,
+        actor,
         Purpose::Product,
         &input.photo_keys,
         (Kind::Product, product.id),
@@ -541,7 +568,7 @@ pub async fn create_product(
     crate::branch_stock::mirror_product_to_first_branch(&mut tx, product.id).await?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "product.created",
         "product",
         Some(product.id),
@@ -549,17 +576,31 @@ pub async fn create_product(
     )
     .await?;
     tx.commit().await.context("commit")?;
-    view(db, product, Some(owner)).await
+    view(db, product, Some(actor)).await
 }
 
 pub async fn update_product(
     db: &PgPool,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
     patch: ProductPatch,
 ) -> Result<ProductView, AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    let cur = lock_owned(&mut tx, owner, id).await?;
+    let cur = lock_live(&mut tx, id).await?;
+    // Publishing is always a manager's; so is a new price once the product is live.
+    // Restating the current value is no change.
+    let action = if patch.is_published.is_some_and(|p| p != cur.is_published) {
+        Action::PublishProducts
+    } else if cur.is_published
+        && patch
+            .base_price_kobo
+            .is_some_and(|p| p != cur.base_price_kobo)
+    {
+        Action::EditLivePrices
+    } else {
+        Action::EditProducts
+    };
+    access::require(&mut tx, cur.store_id, actor, action).await?;
 
     let name = patch.name.unwrap_or(cur.name);
     let description = patch.description.unwrap_or(cur.description);
@@ -613,7 +654,7 @@ pub async fn update_product(
     // Photos the product already held are not rechecked.
     claim(
         &mut tx,
-        owner,
+        actor,
         Purpose::Product,
         &claim::added(&held_photos, &photo_keys),
         (Kind::Product, id),
@@ -621,7 +662,7 @@ pub async fn update_product(
     .await?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "product.updated",
         "product",
         Some(id),
@@ -629,19 +670,24 @@ pub async fn update_product(
     )
     .await?;
     tx.commit().await.context("commit")?;
-    view(db, product, Some(owner)).await
+    view(db, product, Some(actor)).await
 }
 
 pub async fn replace_variants(
     db: &PgPool,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
     variants: Vec<VariantInput>,
 ) -> Result<ProductView, AppError> {
     let variants = normalize_variants(variants);
     validate_variants(&variants)?;
     let mut tx = db.begin().await.context("begin")?;
-    let product = lock_owned(&mut tx, owner, id).await?;
+    let product = lock_live(&mut tx, id).await?;
+    // A stranger is NotFound before anything about the product is read.
+    access::require(&mut tx, product.store_id, actor, Action::EditProducts).await?;
+    if product.is_published && variants_change_live_prices(&mut tx, id, &variants).await? {
+        access::require(&mut tx, product.store_id, actor, Action::EditLivePrices).await?;
+    }
     upsert_variants(&mut tx, id, &variants).await?;
     crate::branch_stock::mirror_product_to_first_branch(&mut tx, id).await?;
     sqlx::query("UPDATE products SET updated_at = now() WHERE id = $1")
@@ -651,7 +697,7 @@ pub async fn replace_variants(
         .context("touch product")?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "product.variants_replaced",
         "product",
         Some(id),
@@ -659,12 +705,13 @@ pub async fn replace_variants(
     )
     .await?;
     tx.commit().await.context("commit")?;
-    view(db, product, Some(owner)).await
+    view(db, product, Some(actor)).await
 }
 
-pub async fn delete_product(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), AppError> {
+pub async fn delete_product(db: &PgPool, actor: Uuid, id: Uuid) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    lock_owned(&mut tx, owner, id).await?;
+    let product = lock_live(&mut tx, id).await?;
+    access::require(&mut tx, product.store_id, actor, Action::DeleteProducts).await?;
     sqlx::query("UPDATE products SET deleted_at = now(), updated_at = now() WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -672,7 +719,7 @@ pub async fn delete_product(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), Ap
         .context("soft delete product")?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "product.deleted",
         "product",
         Some(id),
@@ -683,7 +730,7 @@ pub async fn delete_product(db: &PgPool, owner: Uuid, id: Uuid) -> Result<(), Ap
     Ok(())
 }
 
-/// Public when published and in an active store; the store owner also sees their own products.
+/// Public when published and in an active store; the store's team also sees its products.
 pub async fn get_product(
     db: &PgPool,
     id: Uuid,
@@ -692,7 +739,8 @@ pub async fn get_product(
     let product: Product = sqlx::query_as(&format!(
         "SELECT {PRODUCT_COLUMNS} FROM products p WHERE p.id = $1 AND p.deleted_at IS NULL AND EXISTS ( \
            SELECT 1 FROM stores s WHERE s.id = p.store_id AND s.deleted_at IS NULL AND ( \
-             s.owner_id = $2 OR (p.is_published AND s.status = 'active')))"
+             {} OR (p.is_published AND s.status = 'active')))",
+        is_member_sql("$2")
     ))
     .bind(id)
     .bind(viewer)
@@ -712,8 +760,9 @@ pub async fn list_store_products(
     let products: Vec<Product> = sqlx::query_as(&format!(
         "SELECT {PRODUCT_COLUMNS} FROM products p JOIN stores s ON s.id = p.store_id \
          WHERE s.slug = $1 AND s.deleted_at IS NULL AND p.deleted_at IS NULL \
-           AND (s.owner_id = $2 OR (p.is_published AND s.status = 'active')) \
-         ORDER BY p.created_at, p.id"
+           AND ({} OR (p.is_published AND s.status = 'active')) \
+         ORDER BY p.created_at, p.id",
+        is_member_sql("$2")
     ))
     .bind(slug)
     .bind(viewer)

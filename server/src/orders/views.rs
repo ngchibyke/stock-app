@@ -5,7 +5,8 @@
 //!   payout data, and no platform cut (as at checkout).
 //! - [`SellerOrderView`]: the same plus the platform cut, the buyer's display
 //!   name only (no id, phone or address), the expected payout and the
-//!   payout's status. Refund mechanics are hidden behind a coarse `cancelled`
+//!   payout's status, and who in the store's team did each step (`done_by`,
+//!   from the audit log). Refund mechanics are hidden behind a coarse `cancelled`
 //!   status. The expected payout uses the fee schedule snapshotted on the
 //!   order when it was paid (the live one only for orders paid before the
 //!   snapshot existed), is never below 0, and is left out once the order is
@@ -17,13 +18,17 @@
 //! Every query puts the principal in the SQL, so a missing order and someone
 //! else's order are indistinguishable (both `NotFound`).
 //!
+//! **Who is the seller.** The store's owner, a manager, store-wide staff, or
+//! staff of the order's branch (`stores::access`); staff of another branch get
+//! `NotFound` for the order and do not see it in the store's list.
+//!
 //! **Staff reads.** Owner and Support may read any paid order through
 //! [`get_for_viewer`]; when the order is not their own (as buyer or store
-//! owner), the read writes an `admin.viewed` audit row (`view: "order"`), like
+//! member), the read writes an `admin.viewed` audit row (`view: "order"`), like
 //! every admin list. Support gets the seller view without the buyer's display
 //! name; the Owner keeps it (pending DPO review).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -38,6 +43,7 @@ use crate::{
     error::AppError,
     money::{self, FeeSchedule},
     settings,
+    stores::access::{self, Action, covers_branch_sql},
 };
 
 pub const DEFAULT_LIMIT: i64 = 20;
@@ -55,6 +61,21 @@ pub struct ItemView {
 pub struct PayoutView {
     pub status: String,
 }
+
+/// The member who did a step: their id and display name, nothing else.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoneBy {
+    pub user_id: Uuid,
+    pub display_name: String,
+}
+
+/// Seller steps and the audit action that names who did each.
+const STEP_ACTIONS: [(&str, &str); 4] = [
+    ("order.ready", "ready"),
+    ("order.seller_picked_up", "picked_up"),
+    ("order.seller_out_for_delivery", "out_for_delivery"),
+    ("order.delivered", "delivered"),
+];
 
 #[derive(Debug, Serialize)]
 pub struct DisputeSummary {
@@ -111,6 +132,10 @@ pub struct SellerOrderView {
     pub expected_payout_kobo: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payout: Option<PayoutView>,
+    /// Step (`ready`, `picked_up`, `out_for_delivery`, `delivered`) to the member
+    /// who did it, where the audit names one. Left out when none does.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub done_by: BTreeMap<&'static str, DoneBy>,
 }
 
 /// Staff reading an order through [`get_for_viewer`].
@@ -180,7 +205,8 @@ struct Row {
     id: Uuid,
     store_id: Uuid,
     buyer_id: Uuid,
-    store_owner_id: Uuid,
+    /// The viewer may act on this order as a member of its store.
+    viewer_member: bool,
     status: String,
     items_total_kobo: i64,
     delivery_fee_kobo: i64,
@@ -255,7 +281,10 @@ impl Row {
     }
 }
 
-const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_owner_id, \
+/// The order query; `viewer_member` is an SQL boolean over `s` and `o`.
+fn select(viewer_member: &str) -> String {
+    format!(
+        "SELECT o.id, o.store_id, o.buyer_id, ({viewer_member}) AS viewer_member, \
         o.status::text AS status, \
         o.items_total_kobo, o.delivery_fee_kobo, COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
         o.platform_cut_kobo, \
@@ -273,7 +302,42 @@ const SELECT: &str = "SELECT o.id, o.store_id, o.buyer_id, s.owner_id AS store_o
      JOIN stores s ON s.id = o.store_id \
      LEFT JOIN payouts p ON p.order_id = o.id \
      LEFT JOIN disputes d ON d.order_id = o.id \
-     LEFT JOIN refunds rf ON rf.order_id = o.id";
+     LEFT JOIN refunds rf ON rf.order_id = o.id"
+    )
+}
+
+/// Who did each seller step of the orders, from the audit log (first entry per step).
+async fn done_by_for(
+    db: &PgPool,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, BTreeMap<&'static str, DoneBy>>, AppError> {
+    let actions: Vec<&str> = STEP_ACTIONS.iter().map(|(a, _)| *a).collect();
+    let rows: Vec<(Uuid, String, Uuid, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (a.subject_id, a.action) a.subject_id, a.action, a.actor_id, \
+                u.display_name \
+         FROM audit_log a JOIN users u ON u.id = a.actor_id \
+         WHERE a.subject_type = 'order' AND a.subject_id = ANY($1) AND a.action = ANY($2) \
+         ORDER BY a.subject_id, a.action, a.id",
+    )
+    .bind(ids)
+    .bind(&actions)
+    .fetch_all(db)
+    .await
+    .context("load step actors")?;
+    let mut map: HashMap<Uuid, BTreeMap<&'static str, DoneBy>> = HashMap::new();
+    for (order_id, action, user_id, display_name) in rows {
+        if let Some((_, step)) = STEP_ACTIONS.iter().find(|(a, _)| *a == action) {
+            map.entry(order_id).or_default().insert(
+                step,
+                DoneBy {
+                    user_id,
+                    display_name,
+                },
+            );
+        }
+    }
+    Ok(map)
+}
 
 async fn items_for(db: &PgPool, ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<ItemView>>, AppError> {
     let rows: Vec<(Uuid, String, Value, i64, i32)> = sqlx::query_as(
@@ -350,6 +414,7 @@ async fn build(
     } else {
         None
     };
+    let mut done_by = done_by_for(db, &ids).await?;
     rows.into_iter()
         .map(|r| {
             let order = core(&r, items.remove(&r.id).unwrap_or_default(), true)?;
@@ -359,6 +424,7 @@ async fn build(
                 expected_payout_kobo: r.expected_payout(live.as_ref()),
                 buyer_display_name: buyer_name.then_some(r.buyer_display_name),
                 payout: r.payout_status.map(|status| PayoutView { status }),
+                done_by: done_by.remove(&r.id).unwrap_or_default(),
             }))
         })
         .collect()
@@ -392,9 +458,10 @@ pub async fn list_for_buyer(
 ) -> Result<Page<OrderView>, AppError> {
     let cur = before.map(Cursor::decode).transpose()?;
     let rows: Vec<Row> = sqlx::query_as(&format!(
-        "{SELECT} WHERE o.buyer_id = $1 \
+        "{} WHERE o.buyer_id = $1 \
          AND ($2::timestamptz IS NULL OR (o.created_at, o.id) < ($2, $3::uuid)) \
-         ORDER BY o.created_at DESC, o.id DESC LIMIT $4"
+         ORDER BY o.created_at DESC, o.id DESC LIMIT $4",
+        select("false")
     ))
     .bind(buyer)
     .bind(cur.as_ref().map(|c| c.0))
@@ -406,44 +473,41 @@ pub async fn list_for_buyer(
     page(db, rows, limit, Audience::Buyer).await
 }
 
-/// A store's orders. The owner is part of the query: a store that is missing
-/// or not `owner`'s yields `NotFound`.
+/// A store's orders, for a member of it: all of them, or only their branch's for
+/// staff tied to one. A store that is missing, deleted or not theirs yields
+/// `NotFound`.
 pub async fn list_for_store(
     db: &PgPool,
-    owner: Uuid,
+    viewer: Uuid,
     store_id: Uuid,
     limit: i64,
     before: Option<&str>,
 ) -> Result<Page<OrderView>, AppError> {
     let cur = before.map(Cursor::decode).transpose()?;
-    let owned: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM stores WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(store_id)
-    .bind(owner)
-    .fetch_optional(db)
-    .await
-    .context("check store owner")?;
-    owned.ok_or(AppError::NotFound)?;
+    let mut conn = db.acquire().await.context("acquire")?;
+    access::require(&mut conn, store_id, viewer, Action::ViewStore).await?;
+    drop(conn);
     let rows: Vec<Row> = sqlx::query_as(&format!(
-        "{SELECT} WHERE o.store_id = $1 AND s.owner_id = $5 \
+        "{} WHERE o.store_id = $1 AND {} \
          AND o.status <> 'pending_payment' \
          AND ($2::timestamptz IS NULL OR (o.created_at, o.id) < ($2, $3::uuid)) \
-         ORDER BY o.created_at DESC, o.id DESC LIMIT $4"
+         ORDER BY o.created_at DESC, o.id DESC LIMIT $4",
+        select("true"),
+        covers_branch_sql("$5", "o.branch_id")
     ))
     .bind(store_id)
     .bind(cur.as_ref().map(|c| c.0))
     .bind(cur.as_ref().map(|c| c.1))
     .bind(limit + 1)
-    .bind(owner)
+    .bind(viewer)
     .fetch_all(db)
     .await
     .context("list store orders")?;
     page(db, rows, limit, Audience::Seller { buyer_name: true }).await
 }
 
-/// One order for `viewer`: the buyer sees the buyer view; the store's owner and
-/// owner/support staff (`staff`) see the seller view. The principal is part of
+/// One order for `viewer`: the buyer sees the buyer view; a member who may act on
+/// it (see the module docs) and owner/support staff (`staff`) see the seller view. The principal is part of
 /// the query, so a missing order and someone else's order are both
 /// `NotFound`. A staff read of an order that is not the viewer's own is
 /// audited (`admin.viewed`, written before the response, so a failure fails
@@ -454,9 +518,11 @@ pub async fn get_for_viewer(
     staff: Option<StaffRole>,
     order_id: Uuid,
 ) -> Result<OrderView, AppError> {
+    let member = covers_branch_sql("$2", "o.branch_id");
     let row: Option<Row> = sqlx::query_as(&format!(
-        "{SELECT} WHERE o.id = $1 AND (o.buyer_id = $2 OR \
-         ((s.owner_id = $2 OR $3) AND o.status <> 'pending_payment'))"
+        "{} WHERE o.id = $1 AND (o.buyer_id = $2 OR \
+         (({member} OR $3) AND o.status <> 'pending_payment'))",
+        select(&member)
     ))
     .bind(order_id)
     .bind(viewer)
@@ -467,7 +533,7 @@ pub async fn get_for_viewer(
     let row = row.ok_or(AppError::NotFound)?;
     let audience = if row.buyer_id == viewer {
         Audience::Buyer
-    } else if row.store_owner_id == viewer {
+    } else if row.viewer_member {
         Audience::Seller { buyer_name: true }
     } else {
         // Only staff get here: the query admits no one else.

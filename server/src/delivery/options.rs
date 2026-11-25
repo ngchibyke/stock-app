@@ -59,7 +59,10 @@ use crate::{
     limits::MAX_CHECKOUT_TOTAL_KOBO,
     products::service::unit_price,
     settings,
-    stores::service::{StoreDelivery, delivery_profile, delivery_profile_on},
+    stores::{
+        access::is_member_sql,
+        service::{StoreDelivery, delivery_profile, delivery_profile_on},
+    },
 };
 
 /// Most courier rates offered per store (ruling T6f).
@@ -208,8 +211,9 @@ async fn load_cart(db: &PgPool, buyer: Uuid) -> Result<Vec<(Uuid, StoreCart)>, A
          JOIN product_variants v ON v.id = c.variant_id \
          JOIN products p ON p.id = v.product_id \
          JOIN stores s ON s.id = p.store_id \
-         WHERE c.user_id = $1 AND s.owner_id <> $1 AND {BUYABLE} \
-         ORDER BY s.name, s.id, c.variant_id"
+         WHERE c.user_id = $1 AND NOT {} AND {BUYABLE} \
+         ORDER BY s.name, s.id, c.variant_id",
+        is_member_sql("$1")
     ))
     .bind(buyer)
     .fetch_all(db)

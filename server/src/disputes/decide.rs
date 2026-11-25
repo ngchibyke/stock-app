@@ -214,6 +214,6 @@ pub async fn decide(
     }
 
     let mut conn = state.db.acquire().await.context("acquire")?;
-    let (view, _, _) = load(&mut conn, state, dispute_id).await?;
+    let (view, _) = load(&mut conn, state, dispute_id).await?;
     Ok(view)
 }

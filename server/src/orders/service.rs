@@ -1,5 +1,6 @@
 //! Order delivery transitions: plain state changes; the routes check who may
-//! make them (the store's owner) and the order's delivery method.
+//! make them (a member of the store who may act on the order) and the order's
+//! delivery method.
 //!
 //! - [`mark_picked_up`]: `paid -> picked_up` (sets `picked_up_at`).
 //! - [`mark_out_for_delivery`]: `picked_up -> out_for_delivery` (sets
@@ -226,7 +227,7 @@ pub enum Handover {
 /// audit row before the error is returned. On success the code is cleared
 /// (single use) and the auto-release deadline is snapshotted, as in
 /// [`mark_delivered`]. Releasing the money is the caller's next step, outside
-/// this transaction. `actor` is the seller, for the audit.
+/// this transaction. `actor` is the member who entered it, for the audit.
 pub async fn deliver_with_code(
     db: &PgPool,
     cipher: &FieldCipher,

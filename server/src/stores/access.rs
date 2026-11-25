@@ -6,7 +6,7 @@ use anyhow::Context;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::error::AppError;
+use crate::{auth::AuthUser, error::AppError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -128,6 +128,31 @@ pub async fn require(
         Ok(member)
     } else {
         Err(AppError::Forbidden("not_allowed"))
+    }
+}
+
+/// The gate in front of the seller routes: a seller, or a live member of a live store
+/// (accepting an invite does not make someone a seller). Anyone else keeps today's
+/// 403 `not_a_seller`; which store they may touch is still [`require`]'s answer.
+pub async fn require_seller_or_member(
+    conn: &mut PgConnection,
+    user: &AuthUser,
+) -> Result<(), AppError> {
+    if user.is_seller {
+        return Ok(());
+    }
+    let member: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM store_members m JOIN stores s ON s.id = m.store_id \
+         WHERE m.user_id = $1 AND m.removed_at IS NULL AND s.deleted_at IS NULL)",
+    )
+    .bind(user.id)
+    .fetch_one(&mut *conn)
+    .await
+    .context("check store membership")?;
+    if member {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("not_a_seller"))
     }
 }
 

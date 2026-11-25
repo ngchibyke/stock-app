@@ -7,7 +7,13 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::service::{self, NewStore, PublicStore, StorePatch};
+use anyhow::Context;
+use serde::Serialize;
+
+use super::{
+    access::require_seller_or_member,
+    service::{self, NewStore, OwnerStore, PublicStore, StorePatch},
+};
 use crate::{
     AppState,
     auth::{AuthUser, extractor::bearer_token},
@@ -47,6 +53,27 @@ pub(crate) fn require_seller(user: &AuthUser) -> Result<(), AppError> {
     }
 }
 
+/// [`require_seller_or_member`] on a pooled connection, for the seller routes.
+pub(crate) async fn require_seller_or_team(
+    state: &AppState,
+    user: &AuthUser,
+) -> Result<(), AppError> {
+    if user.is_seller {
+        return Ok(());
+    }
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    require_seller_or_member(&mut conn, user).await
+}
+
+/// One of `GET /stores/mine`: the store as its team sees it, and the caller's place.
+#[derive(Debug, Serialize)]
+struct MineView {
+    #[serde(flatten)]
+    store: OwnerStore,
+    my_role: String,
+    my_branch_id: Option<Uuid>,
+}
+
 fn parse_id(key: &str) -> Result<Uuid, AppError> {
     key.parse().map_err(|_| AppError::NotFound)
 }
@@ -73,14 +100,24 @@ async fn mine(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let stores = service::list_mine(&state.db, user.id).await?;
-    let ids: Vec<Uuid> = stores.iter().map(|s| s.id).collect();
+    let ids: Vec<Uuid> = stores.iter().map(|s| s.store.id).collect();
     let mut plots = service::plots_of(&state.db, &ids).await?;
     let views = stores
-        .iter()
-        .map(|s| s.owner_view(&state.cipher, &*state.objects, plots.remove(&s.id)))
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(|m| {
+            Ok(MineView {
+                store: m.store.owner_view(
+                    &state.cipher,
+                    &*state.objects,
+                    plots.remove(&m.store.id),
+                )?,
+                my_role: m.my_role,
+                my_branch_id: m.my_branch_id,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
 
@@ -99,7 +136,7 @@ async fn update(
     Path(key): Path<String>,
     AppJson(patch): AppJson<StorePatch>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let store = service::update_store(
         &state.db,
         &state.cipher,
@@ -123,7 +160,7 @@ async fn remove(
     user: AuthUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     service::delete_store(&state.db, &state.market, user.id, parse_id(&key)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

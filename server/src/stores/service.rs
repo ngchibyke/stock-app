@@ -12,6 +12,7 @@ use crate::{
     error::AppError,
     market::{layout::Layout, placement},
     phone::normalize_ng_phone,
+    stores::access::{self, Action, is_member_sql},
     uploads::{
         claim::{Kind, claim},
         service::Purpose,
@@ -62,6 +63,23 @@ pub struct StorePatch {
     pub logo_key: Option<String>,
     /// A ready `store_banner` upload's key; blank removes the banner.
     pub banner_key: Option<String>,
+}
+
+impl StorePatch {
+    /// Anything touching money, delivery or the market plot is the owner's alone:
+    /// the pickup fields (which edit the first branch), the self-delivery fee, the
+    /// delivery flags, the business phone and the district.
+    fn touches_owner_fields(&self) -> bool {
+        self.pickup_address.is_some()
+            || self.pickup_state.is_some()
+            || self.pickup_area_council.is_some()
+            || self.pickup_postcode.is_some()
+            || self.self_delivery_fee_kobo.is_some()
+            || self.delivery_courier.is_some()
+            || self.delivery_self.is_some()
+            || self.business_phone.is_some()
+            || self.district.is_some()
+    }
 }
 
 const REDACTED: &str = "[redacted]";
@@ -549,21 +567,42 @@ pub async fn create_store(
     Ok(store)
 }
 
-pub async fn list_mine(db: &PgPool, owner: Uuid) -> Result<Vec<Store>, AppError> {
+/// A live store the user owns or works at, with their place in it.
+#[derive(Debug, sqlx::FromRow)]
+pub struct MyStore {
+    #[sqlx(flatten)]
+    pub store: Store,
+    /// `owner`, `manager` or `staff`.
+    pub my_role: String,
+    /// Only for staff tied to one branch.
+    pub my_branch_id: Option<Uuid>,
+}
+
+/// The stores the user owns or is a live member of, oldest first.
+pub async fn list_mine(db: &PgPool, user: Uuid) -> Result<Vec<MyStore>, AppError> {
     Ok(sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores WHERE owner_id = $1 AND deleted_at IS NULL ORDER BY created_at, id"
+        "SELECT {COLUMNS}, my_role, my_branch_id FROM ( \
+           SELECT s.*, \
+                  CASE WHEN s.owner_id = $1 THEN 'owner' ELSE m.role::text END AS my_role, \
+                  CASE WHEN s.owner_id = $1 THEN NULL ELSE m.branch_id END AS my_branch_id \
+           FROM stores s \
+           LEFT JOIN store_members m \
+             ON m.store_id = s.id AND m.user_id = $1 AND m.removed_at IS NULL \
+           WHERE s.deleted_at IS NULL AND (s.owner_id = $1 OR m.id IS NOT NULL) \
+         ) stores ORDER BY created_at, id"
     ))
-    .bind(owner)
+    .bind(user)
     .fetch_all(db)
     .await
     .context("list stores")?)
 }
 
-/// Active stores are public; the owner can also see their own store in any status.
+/// Active stores are public; the owner and the team can also see the store in any status.
 pub async fn get_by_slug(db: &PgPool, slug: &str, viewer: Option<Uuid>) -> Result<Store, AppError> {
     sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores \
-         WHERE slug = $1 AND deleted_at IS NULL AND (status = 'active' OR owner_id = $2)"
+        "SELECT {COLUMNS} FROM stores s \
+         WHERE slug = $1 AND deleted_at IS NULL AND (status = 'active' OR {})",
+        is_member_sql("$2")
     ))
     .bind(slug)
     .bind(viewer)
@@ -577,12 +616,19 @@ pub async fn update_store(
     db: &PgPool,
     cipher: &FieldCipher,
     layout: &Layout,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
     patch: StorePatch,
 ) -> Result<Store, AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    let current = lock_owned(&mut tx, owner, id).await?;
+    // A request with any owner-only field is refused whole.
+    let action = if patch.touches_owner_fields() {
+        Action::EditOwnerFields
+    } else {
+        Action::EditStoreDetails
+    };
+    access::require(&mut tx, id, actor, action).await?;
+    let current = lock_live(&mut tx, id).await?;
 
     if let Some(d) = &patch.district {
         validate_district(layout, d)?;
@@ -773,7 +819,7 @@ pub async fn update_store(
         {
             claim(
                 &mut tx,
-                owner,
+                actor,
                 purpose,
                 std::slice::from_ref(key),
                 (Kind::Store, id),
@@ -792,7 +838,7 @@ pub async fn update_store(
     let detail = serde_json::Value::Object(detail);
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "store.updated",
         "store",
         Some(id),
@@ -847,11 +893,12 @@ pub async fn delivery_profile_on(
 pub async fn delete_store(
     db: &PgPool,
     layout: &Layout,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    lock_owned(&mut tx, owner, id).await?;
+    access::require(&mut tx, id, actor, Action::DeleteStore).await?;
+    lock_live(&mut tx, id).await?;
     sqlx::query("UPDATE stores SET deleted_at = now() WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -860,7 +907,7 @@ pub async fn delete_store(
     placement::release(&mut tx, layout, id).await?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "store.deleted",
         "store",
         Some(id),
@@ -871,17 +918,12 @@ pub async fn delete_store(
     Ok(())
 }
 
-/// Locks a live store row owned by `owner`; anything else is NotFound (existence is not revealed).
-async fn lock_owned(
-    tx: &mut Transaction<'_, Postgres>,
-    owner: Uuid,
-    id: Uuid,
-) -> Result<Store, AppError> {
+/// Locks a live store row; a deleted one is NotFound. The caller has checked who may.
+async fn lock_live(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<Store, AppError> {
     sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        "SELECT {COLUMNS} FROM stores WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE"
     ))
     .bind(id)
-    .bind(owner)
     .fetch_optional(&mut **tx)
     .await
     .context("lock store")?

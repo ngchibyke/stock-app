@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::service::{self, PayoutAccountView, SetPayoutAccount, VerifyPayoutAccount};
 use crate::{
     AppState, admin::Owner, auth::AuthUser, error::AppError, extract::AppJson,
-    stores::routes::require_seller,
+    stores::routes::require_seller_or_team,
 };
 
 pub fn router() -> Router<AppState> {
@@ -28,7 +28,7 @@ async fn set(
     Path(key): Path<String>,
     AppJson(body): AppJson<SetPayoutAccount>,
 ) -> Result<Json<PayoutAccountView>, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     Ok(Json(
         service::set_account(&state, user.id, parse_id(&key)?, body).await?,
     ))
@@ -39,7 +39,7 @@ async fn show(
     user: AuthUser,
     Path(key): Path<String>,
 ) -> Result<Json<PayoutAccountView>, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     Ok(Json(
         service::get_for_owner(&state, user.id, parse_id(&key)?).await?,
     ))

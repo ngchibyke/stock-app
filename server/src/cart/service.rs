@@ -6,7 +6,10 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{error::AppError, limits::MAX_LINE_QUANTITY, money::checked_sum, products};
+use crate::{
+    error::AppError, limits::MAX_LINE_QUANTITY, money::checked_sum, products,
+    stores::access::is_member_sql,
+};
 
 /// Most distinct lines one cart may hold.
 pub const MAX_CART_LINES: i64 = 50;
@@ -123,17 +126,20 @@ pub async fn set_item(
         return get(db, user).await;
     }
 
-    let owner: Uuid = sqlx::query_scalar(&format!(
-        "SELECT s.owner_id FROM product_variants v \
+    // The store's owner and team cannot buy from it.
+    let member: bool = sqlx::query_scalar(&format!(
+        "SELECT {} FROM product_variants v \
          JOIN products p ON p.id = v.product_id JOIN stores s ON s.id = p.store_id \
-         WHERE v.id = $1 AND {BUYABLE}"
+         WHERE v.id = $1 AND {BUYABLE}",
+        is_member_sql("$2")
     ))
     .bind(variant_id)
+    .bind(user)
     .fetch_optional(db)
     .await
     .context("check variant")?
     .ok_or(AppError::NotFound)?;
-    if owner == user {
+    if member {
         return Err(own_store_item());
     }
 
