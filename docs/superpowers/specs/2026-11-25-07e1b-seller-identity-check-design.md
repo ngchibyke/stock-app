@@ -53,7 +53,7 @@ This part builds on 7e-1's roles: managers and staff verify too.
 **Flow (one attempt)**
 1. The app shows the notice (section 8), and the seller agrees.
 2. The app sends the NIN to `POST /me/identity/start` over TLS. The server:
-   - validates the format (11 digits);
+   - validates the format: exactly 11 digits, nothing else. Anything longer or shorter, or with letters, is refused before any other work (owner, 2026-11-25). The app's NIN field (7e-2) accepts digits only and stops at 11, the same as the phone fields;
    - computes `nin_idx = HMAC(NIN_INDEX_KEY, nin)`, using a key of its own, separate from the phone `INDEX_KEY`;
    - refuses with no provider call if `nin_idx` is banned, or belongs to another account's passed check (both give the same response, see section 6);
    - checks the attempt caps;
