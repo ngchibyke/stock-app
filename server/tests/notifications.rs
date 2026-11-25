@@ -133,7 +133,7 @@ async fn inbox_copy_comes_from_kind(pool: PgPool) {
     }
     let page = inbox(&app, &token, "?limit=100").await;
     let items = page.json["items"].as_array().unwrap();
-    assert_eq!(items.len(), 14);
+    assert_eq!(items.len(), Kind::ALL.len());
     for kind in Kind::ALL {
         let item = items
             .iter()

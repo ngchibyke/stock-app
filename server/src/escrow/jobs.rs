@@ -79,6 +79,9 @@
 //!     released -> [`place_missing`](crate::market::placement::place_missing).
 //!     Catches a plot that freed up
 //!     while the waiting store was locked, so it need not wait for a restart.
+//! 17. `purge_invites`: store invites that expired unanswered, or were declined
+//!     or revoked, more than 30 days ago are deleted
+//!     -> [`stores::team::purge_invites`](crate::stores::team::purge_invites).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -134,6 +137,7 @@ use crate::{
     notify::reminders,
     settings,
     statement::job as statement_job,
+    stores::team,
     uploads::jobs as upload_jobs,
 };
 
@@ -207,6 +211,7 @@ pub struct JobReport {
     pub statements_checked: u32,
     pub uploads_purged: u32,
     pub stores_placed: u32,
+    pub invites_purged: u32,
     pub failed: u32,
 }
 
@@ -234,7 +239,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 16] = [
+    let jobs: [(&str, Job); 17] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -251,6 +256,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (statement_job::STATEMENT_CHECK, Job::StatementCheck),
         (upload_jobs::PURGE_UPLOADS, Job::PurgeUploads),
         (PLACE_MARKET, Job::PlaceMarket),
+        (team::PURGE_INVITES, Job::PurgeInvites),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -282,6 +288,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::StatementCheck => &mut report.statements_checked,
             Job::PurgeUploads => &mut report.uploads_purged,
             Job::PlaceMarket => &mut report.stores_placed,
+            Job::PurgeInvites => &mut report.invites_purged,
         };
         *slot += stats.done;
     }
@@ -317,6 +324,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 statements_checked = r.statements_checked,
                 uploads_purged = r.uploads_purged,
                 stores_placed = r.stores_placed,
+                invites_purged = r.invites_purged,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -368,6 +376,7 @@ enum Job {
     StatementCheck,
     PurgeUploads,
     PlaceMarket,
+    PurgeInvites,
 }
 
 impl Job {
@@ -389,6 +398,7 @@ impl Job {
             Job::StatementCheck => statement_job::run(state, cancel).await,
             Job::PurgeUploads => upload_jobs::run(state, cancel).await,
             Job::PlaceMarket => place_market(state).await,
+            Job::PurgeInvites => team::purge_invites(state, cancel).await,
         }
     }
 }

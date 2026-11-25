@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/stores", axum::routing::post(create))
         .route("/stores/mine", get(mine))
         .route("/stores/{key}", get(show).patch(update).delete(remove))
+        .merge(super::team::router())
 }
 
 /// Optional authentication: no credentials means anonymous; bad credentials are still rejected.

@@ -1796,6 +1796,7 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "payouts",
             "place_market",
             "poll_shipments",
+            "purge_invites",
             "purge_uploads",
             "refunds",
             "reverify_checkouts",

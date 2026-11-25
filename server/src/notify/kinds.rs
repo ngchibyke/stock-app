@@ -1,4 +1,4 @@
-//! The fourteen kinds of notice and their fixed copy. Notices store no text:
+//! The fifteen kinds of notice and their fixed copy. Notices store no text:
 //! the title and body come from the kind when they are read or pushed.
 
 use serde::Serialize;
@@ -20,10 +20,11 @@ pub enum Kind {
     DisputeDecided,
     ModerationWarning,
     ModerationMuted,
+    StoreInvite,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 14] = [
+    pub const ALL: [Kind; 15] = [
         Kind::OrderPaid,
         Kind::OrderPickedUp,
         Kind::OrderOutForDelivery,
@@ -38,6 +39,7 @@ impl Kind {
         Kind::DisputeDecided,
         Kind::ModerationWarning,
         Kind::ModerationMuted,
+        Kind::StoreInvite,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -56,6 +58,7 @@ impl Kind {
             Kind::DisputeDecided => "dispute_decided",
             Kind::ModerationWarning => "moderation_warning",
             Kind::ModerationMuted => "moderation_muted",
+            Kind::StoreInvite => "store_invite",
         }
     }
 
@@ -79,6 +82,7 @@ impl Kind {
             Kind::DisputeDecided => "Report decided",
             Kind::ModerationWarning => "Message not sent",
             Kind::ModerationMuted => "Posting paused",
+            Kind::StoreInvite => "Store team invite",
         }
     }
 
@@ -112,6 +116,9 @@ impl Kind {
                 "A recent message broke the market's rules. Repeated breaks lead to a mute."
             }
             Kind::ModerationMuted => "You can't post for a while because of repeated rule breaks.",
+            Kind::StoreInvite => {
+                "A store invited you to join its team. Open the app to accept or decline."
+            }
         }
     }
 }
@@ -122,7 +129,7 @@ mod tests {
 
     #[test]
     fn kinds_have_the_exact_copy() {
-        let table: [(&str, &str, &str); 14] = [
+        let table: [(&str, &str, &str); 15] = [
             (
                 "order_paid",
                 "Paid \u{2014} please ship",
@@ -193,6 +200,11 @@ mod tests {
                 "Posting paused",
                 "You can't post for a while because of repeated rule breaks.",
             ),
+            (
+                "store_invite",
+                "Store team invite",
+                "A store invited you to join its team. Open the app to accept or decline.",
+            ),
         ];
         for (kind, title, body) in table {
             let k = Kind::parse(kind).unwrap_or_else(|| panic!("unknown kind {kind}"));
@@ -200,6 +212,6 @@ mod tests {
             assert_eq!(k.title(), title);
             assert_eq!(k.body(), body);
         }
-        assert_eq!(Kind::ALL.len(), 14);
+        assert_eq!(Kind::ALL.len(), 15);
     }
 }
