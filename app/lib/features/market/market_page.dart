@@ -9,6 +9,7 @@ import '../../core/ui/pressable.dart';
 import '../../core/ui/states.dart';
 import '../cart/cart_button.dart';
 import '../catalog/catalog_models.dart';
+import '../location/location_banner.dart';
 import 'data/asset_resolver.dart';
 import 'data/market_source.dart';
 import 'journey/journey_controller.dart';
@@ -105,6 +106,13 @@ class _MarketPageState extends ConsumerState<MarketPage> {
             builder: (context, _) => journey.state is AtMarket
                 ? _Overlay(offline: snapshot?.fromCache ?? false)
                 : const SizedBox.shrink(),
+          ),
+          // Kept in the tree so the check runs once; shown only at the market.
+          ListenableBuilder(
+            listenable: journey,
+            builder: (context, child) =>
+                Offstage(offstage: journey.state is! AtMarket, child: child),
+            child: const LocationNotice(),
           ),
         ],
       ),
