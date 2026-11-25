@@ -33,4 +33,27 @@ void main() {
       }
     });
   });
+
+  group('PhoneInputFormatter', () {
+    String type(String text) => const PhoneInputFormatter()
+        .formatEditUpdate(TextEditingValue.empty, TextEditingValue(text: text))
+        .text;
+
+    test('never lets more than 11 digits in', () {
+      expect(type('080312345678999'), '08031234567');
+    });
+
+    test('keeps digits only', () {
+      expect(type('0803-123 45a67'), '08031234567');
+    });
+
+    test('turns a full +234 number into the 11-digit form', () {
+      expect(type('+2348031234567'), '08031234567');
+      expect(type('2348031234567'), '08031234567');
+    });
+
+    test('leaves a short number as typed', () {
+      expect(type('0803'), '0803');
+    });
+  });
 }
