@@ -292,6 +292,10 @@ async fn begin(
             .await
             .map_err(db_err("restore stock"))?;
     }
+    if restore {
+        let ids: Vec<Uuid> = items.iter().map(|(id, _, _)| *id).collect();
+        crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
+    }
     let reference = payments::new_reference(REFERENCE_PREFIX);
     let refund_id: Uuid = sqlx::query_scalar(
         "INSERT INTO refunds (order_id, reference, provider, amount_kobo, reason) \

@@ -372,6 +372,7 @@ async fn apply(
                     .await
                     .map_err(db_err("take stock"))?;
             }
+            crate::branch_stock::mirror_to_first_branch(&mut tx, &ids).await?;
         } else {
             refund = true;
         }
@@ -566,6 +567,8 @@ async fn release_reserved(conn: &mut PgConnection, items: &[(Uuid, i32)]) -> Res
         .await
         .map_err(db_err("release reservation"))?;
     }
+    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
     Ok(())
 }
 

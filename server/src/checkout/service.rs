@@ -368,6 +368,11 @@ pub async fn create(
                 .context("reserve stock")?;
         }
     }
+    let reserved_ids: Vec<Uuid> = orders
+        .iter()
+        .flat_map(|(_, o)| o.lines.iter().map(|l| l.variant_id))
+        .collect();
+    crate::branch_stock::mirror_to_first_branch(&mut tx, &reserved_ids).await?;
 
     let mut created = None;
     for _ in 0..REFERENCE_ATTEMPTS {
@@ -409,9 +414,9 @@ pub async fn create(
                                  delivery_method, delivery_option_id, delivery_address_enc, \
                                  delivery_area, promised_date, courier_request_token, \
                                  courier_id, service_code, courier_quote_kobo, \
-                                 courier_sender_code) \
+                                 courier_sender_code, branch_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
-                     $17) \
+                     $17, (SELECT id FROM store_branches WHERE store_id = $2 AND position = 0)) \
              RETURNING id",
         )
         .bind(checkout_id)
@@ -646,7 +651,8 @@ pub(crate) async fn lock_reserved(
 /// transaction that moves the checkout `pending -> paid`; that transition is the
 /// gate, so this must run only when it succeeded (never twice).
 pub async fn commit_reserved(conn: &mut PgConnection, checkout_id: Uuid) -> Result<(), AppError> {
-    for (variant_id, quantity) in lock_reserved(conn, checkout_id).await? {
+    let items = lock_reserved(conn, checkout_id).await?;
+    for (variant_id, quantity) in &items {
         sqlx::query(
             "UPDATE product_variants \
              SET stock = stock - $2, reserved_quantity = reserved_quantity - $2 WHERE id = $1",
@@ -657,6 +663,8 @@ pub async fn commit_reserved(conn: &mut PgConnection, checkout_id: Uuid) -> Resu
         .await
         .context("commit reserved stock")?;
     }
+    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
     Ok(())
 }
 
@@ -694,6 +702,8 @@ pub async fn expire_and_restore(
         .await
         .context("release reservation")?;
     }
+    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
     sqlx::query(
         "UPDATE orders SET status = 'cancelled', cancelled_at = now() \
          WHERE checkout_id = $1 AND status = 'pending_payment'",

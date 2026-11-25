@@ -519,6 +519,23 @@ pub async fn create_store(
         }
     }
     let store = store.ok_or_else(|| anyhow::anyhow!("could not allocate a store slug"))?;
+    // The store's first branch (position 0) carries the pickup details it was created with.
+    sqlx::query(
+        "INSERT INTO store_branches (store_id, name, pickup_address_enc, pickup_area_council, \
+                                     pickup_postcode, business_phone_enc, self_delivery_fee_kobo, \
+                                     position) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+    )
+    .bind(store.id)
+    .bind(&name)
+    .bind(&address_enc)
+    .bind(area)
+    .bind(&postcode)
+    .bind(&phone_enc)
+    .bind(input.self_delivery_fee_kobo)
+    .execute(&mut *tx)
+    .await
+    .context("insert first branch")?;
     audit::record(
         &mut tx,
         Some(owner),
@@ -723,6 +740,23 @@ pub async fn update_store(
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;
+    // The first branch keeps its own copy of the pickup fields; keep it in step.
+    sqlx::query(
+        "UPDATE store_branches SET pickup_address_enc = $2, pickup_area_council = $3, \
+                                   pickup_postcode = $4, business_phone_enc = $5, \
+                                   self_delivery_fee_kobo = $6, pickup_courier_address_code = $7 \
+         WHERE store_id = $1 AND position = 0",
+    )
+    .bind(id)
+    .bind(&address_enc)
+    .bind(area)
+    .bind(&postcode)
+    .bind(&phone_enc)
+    .bind(fee)
+    .bind(courier_code)
+    .execute(&mut *tx)
+    .await
+    .context("update first branch")?;
     if district != current.district {
         // Both districts are locked up front, in one global order, so two sellers
         // moving in opposite directions cannot deadlock on release then place.

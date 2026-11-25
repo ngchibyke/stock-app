@@ -3,6 +3,7 @@ pub mod admin;
 pub mod app_config;
 pub mod audit;
 pub mod auth;
+pub mod branch_stock;
 pub mod cart;
 pub mod catalog;
 pub mod chat;

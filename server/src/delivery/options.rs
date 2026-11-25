@@ -390,6 +390,15 @@ async fn cache_store_code(
                 .execute(&mut *tx)
                 .await
                 .context("cache store courier code")?;
+            sqlx::query(
+                "UPDATE store_branches SET pickup_courier_address_code = $2 \
+                 WHERE store_id = $1 AND position = 0",
+            )
+            .bind(store_id)
+            .bind(code)
+            .execute(&mut *tx)
+            .await
+            .context("cache branch courier code")?;
         }
     }
     tx.commit().await.context("commit")?;
@@ -676,9 +685,10 @@ pub async fn options_for(
                 "INSERT INTO delivery_options \
                  (buyer_id, store_id, address_id, method, fee_kobo, cart_fingerprint, \
                   courier_id, service_code, request_token, courier_name, delivery_eta, \
-                  charged_kobo, courier_sender_code, promised_date, expires_at) \
+                  charged_kobo, courier_sender_code, promised_date, expires_at, branch_id) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                         now() + make_interval(mins => $15)) \
+                         now() + make_interval(mins => $15), \
+                         (SELECT id FROM store_branches WHERE store_id = $2 AND position = 0)) \
                  RETURNING id",
             )
             .bind(buyer)

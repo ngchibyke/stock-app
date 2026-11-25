@@ -538,6 +538,7 @@ pub async fn create_product(
     )
     .await?;
     insert_variants(&mut tx, product.id, &input.variants).await?;
+    crate::branch_stock::mirror_product_to_first_branch(&mut tx, product.id).await?;
     audit::record(
         &mut tx,
         Some(owner),
@@ -642,6 +643,7 @@ pub async fn replace_variants(
     let mut tx = db.begin().await.context("begin")?;
     let product = lock_owned(&mut tx, owner, id).await?;
     upsert_variants(&mut tx, id, &variants).await?;
+    crate::branch_stock::mirror_product_to_first_branch(&mut tx, id).await?;
     sqlx::query("UPDATE products SET updated_at = now() WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
