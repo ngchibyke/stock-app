@@ -368,8 +368,9 @@ pub async fn post_reply(
     .await
     .context("read review for reply")?;
     let (order, replied, store) = row.ok_or(AppError::NotFound)?;
-    // Owner and managers reply; other members get 403, anyone else 404.
-    access::require(&mut conn, store, user, Action::ReplyReviews).await?;
+    // Owner and managers reply, even once the store is deleted (the review outlives it);
+    // other members get 403, anyone else 404.
+    access::require_even_if_deleted(&mut conn, store, user, Action::ReplyReviews).await?;
     if replied {
         return Err(AppError::Conflict("already_replied"));
     }

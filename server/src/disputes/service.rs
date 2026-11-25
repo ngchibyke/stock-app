@@ -675,7 +675,8 @@ async fn lock_both(
     Ok((tx, locked))
 }
 
-/// The seller answers once, before `seller_respond_by`: the owner or a manager
+/// The seller answers once, before `seller_respond_by`: the owner or a manager, also
+/// for a deleted store's order (the dispute outlives it)
 /// (other members get 403, anyone else 404).
 pub async fn respond(
     state: &AppState,
@@ -685,7 +686,7 @@ pub async fn respond(
 ) -> Result<DisputeView, AppError> {
     let (order_id, store_id) = order_of(state, dispute_id, None).await?;
     let mut conn = state.db.acquire().await.context("acquire")?;
-    access::require(&mut conn, store_id, seller, Action::AnswerDisputes).await?;
+    access::require_even_if_deleted(&mut conn, store_id, seller, Action::AnswerDisputes).await?;
     drop(conn);
     check_statement(&s)?;
     let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;

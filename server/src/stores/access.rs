@@ -81,15 +81,26 @@ pub async fn membership(
     store_id: Uuid,
     user: Uuid,
 ) -> Result<Option<Membership>, AppError> {
+    load_membership(conn, store_id, user, false).await
+}
+
+/// [`membership`]; `deleted_too` also answers for a deleted store.
+async fn load_membership(
+    conn: &mut PgConnection,
+    store_id: Uuid,
+    user: Uuid,
+    deleted_too: bool,
+) -> Result<Option<Membership>, AppError> {
     let row: Option<(Uuid, Option<String>, Option<Uuid>)> = sqlx::query_as(
         "SELECT s.owner_id, m.role::text, m.branch_id \
          FROM stores s \
          LEFT JOIN store_members m \
            ON m.store_id = s.id AND m.user_id = $2 AND m.removed_at IS NULL \
-         WHERE s.id = $1 AND s.deleted_at IS NULL",
+         WHERE s.id = $1 AND ($3 OR s.deleted_at IS NULL)",
     )
     .bind(store_id)
     .bind(user)
+    .bind(deleted_too)
     .fetch_optional(&mut *conn)
     .await
     .context("load store membership")?;
@@ -121,9 +132,23 @@ pub async fn require(
     user: Uuid,
     action: Action,
 ) -> Result<Membership, AppError> {
-    let member = membership(conn, store_id, user)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    check(load_membership(conn, store_id, user, false).await?, action)
+}
+
+/// [`require`] that still answers once the store is deleted, for the seller's side of
+/// what outlives it: an order's dispute and its review (a deleted store's orders keep
+/// their steps, tracking and return too). Non-members still get 404, other members 403.
+pub async fn require_even_if_deleted(
+    conn: &mut PgConnection,
+    store_id: Uuid,
+    user: Uuid,
+    action: Action,
+) -> Result<Membership, AppError> {
+    check(load_membership(conn, store_id, user, true).await?, action)
+}
+
+fn check(member: Option<Membership>, action: Action) -> Result<Membership, AppError> {
+    let member = member.ok_or(AppError::NotFound)?;
     if member.can(action) {
         Ok(member)
     } else {

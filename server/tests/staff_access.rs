@@ -420,6 +420,70 @@ impl Team {
         order
     }
 
+    /// A buyer's open dispute on a delivered self-delivery order at branch A.
+    async fn dispute(&self) -> Uuid {
+        let order = self.out_for_delivery().await;
+        let enc: Vec<u8> = sqlx::query_scalar("SELECT handover_code_enc FROM orders WHERE id = $1")
+            .bind(order)
+            .fetch_one(&self.app.pool)
+            .await
+            .unwrap();
+        let code = self.app.state.cipher.decrypt(&enc).unwrap();
+        service::deliver_with_code(
+            &self.app.pool,
+            &self.app.state.cipher,
+            self.ids[OWNER],
+            order,
+            &code,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let body = self
+            .app
+            .ready_photos_in(
+                &self.buyer,
+                "dispute",
+                json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
+            )
+            .await;
+        let res = self
+            .app
+            .request(
+                Method::POST,
+                &format!("/orders/{order}/dispute"),
+                Some(body),
+                Some(&self.buyer),
+            )
+            .await;
+        assert_eq!(res.status, 201, "{}", res.json);
+        res.json["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    /// (order, review): the buyer's review of a completed order at branch A.
+    async fn review(&self) -> (Uuid, Uuid) {
+        let order = self.paid_order("self").await;
+        sqlx::query("UPDATE orders SET status = 'completed', delivered_at = now() WHERE id = $1")
+            .bind(order)
+            .execute(&self.app.pool)
+            .await
+            .unwrap();
+        let res = self
+            .app
+            .request(
+                Method::POST,
+                &format!("/orders/{order}/review"),
+                Some(json!({ "stars": 5 })),
+                Some(&self.buyer),
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.json);
+        (
+            order,
+            res.json["review"]["id"].as_str().unwrap().parse().unwrap(),
+        )
+    }
+
     async fn new_product_body(&self, who: usize) -> Value {
         let photo = self.app.ready_photo_for(&self.tokens[who], "product").await;
         json!({
@@ -770,43 +834,8 @@ async fn seller_route_permission_matrix(pool: PgPool) {
     .await;
 
     // --- A dispute on a delivered order at branch A.
-    let disputed = t.out_for_delivery().await;
-    let enc: Vec<u8> = sqlx::query_scalar("SELECT handover_code_enc FROM orders WHERE id = $1")
-        .bind(disputed)
-        .fetch_one(&t.app.pool)
-        .await
-        .unwrap();
-    let code = t.app.state.cipher.decrypt(&enc).unwrap();
-    service::deliver_with_code(
-        &t.app.pool,
-        &t.app.state.cipher,
-        t.ids[OWNER],
-        disputed,
-        &code,
-        OffsetDateTime::now_utc(),
-    )
-    .await
-    .unwrap();
-    let body = t
-        .app
-        .ready_photos_in(
-            &t.buyer,
-            "dispute",
-            json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": ["evidence/1.jpg"] }),
-        )
-        .await;
-    let res = t
-        .app
-        .request(
-            Method::POST,
-            &format!("/orders/{disputed}/dispute"),
-            Some(body),
-            Some(&t.buyer),
-        )
-        .await;
-    assert_eq!(res.status, 201, "{}", res.json);
-    let dispute = res.json["id"].as_str().unwrap().to_string();
-    let dispute_id: Uuid = dispute.parse().unwrap();
+    let dispute_id = t.dispute().await;
+    let dispute = dispute_id.to_string();
     t.check(
         Method::GET,
         &format!("/disputes/{dispute}"),
@@ -864,23 +893,7 @@ async fn seller_route_permission_matrix(pool: PgPool) {
     assert_eq!(actors[0], Some(t.ids[STAFF_A]));
 
     // --- A review: replying is a manager's.
-    let reviewed = t.paid_order("self").await;
-    sqlx::query("UPDATE orders SET status = 'completed', delivered_at = now() WHERE id = $1")
-        .bind(reviewed)
-        .execute(&t.app.pool)
-        .await
-        .unwrap();
-    let res = t
-        .app
-        .request(
-            Method::POST,
-            &format!("/orders/{reviewed}/review"),
-            Some(json!({ "stars": 5 })),
-            Some(&t.buyer),
-        )
-        .await;
-    assert_eq!(res.status, 200, "{}", res.json);
-    let review: Uuid = res.json["review"]["id"].as_str().unwrap().parse().unwrap();
+    let (reviewed, review) = t.review().await;
     let reply = format!("/reviews/{review}/reply");
     t.check(
         Method::POST,
@@ -1191,4 +1204,60 @@ async fn removed_member_gets_404_on_next_step(pool: PgPool) {
         )
         .await;
     assert_eq!(res.status, 404, "{}", res.json);
+}
+
+/// A dispute and a review outlive their store: after it is deleted, the owner and
+/// managers still answer the dispute and reply to the review (as order steps and
+/// `/return-received` still work), staff still get 403 and outsiders 404.
+#[sqlx::test]
+async fn deleted_store_dispute_and_review_still_answered(pool: PgPool) {
+    let t = team(pool).await;
+    let first = t.dispute().await;
+    let second = t.dispute().await;
+    let (_, review) = t.review().await;
+    sqlx::query("UPDATE stores SET deleted_at = now() WHERE id = $1")
+        .bind(t.store_id)
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+
+    let answer = json!({ "body": "We packed it with care; please send it back." });
+    t.check(
+        Method::POST,
+        &format!("/disputes/{first}/response"),
+        Some(answer.clone()),
+        &[
+            (WIDE, 403),
+            (STAFF_A, 403),
+            (REMOVED, 404),
+            (STRANGER, 404),
+            (OWNER, 200),
+        ],
+    )
+    .await;
+    t.check(
+        Method::POST,
+        &format!("/disputes/{second}/response"),
+        Some(answer),
+        &[(STAFF_B, 403), (MANAGER, 200)],
+    )
+    .await;
+    for (dispute, who) in [(first, OWNER), (second, MANAGER)] {
+        assert_eq!(
+            t.audit_actors("dispute.seller_responded", dispute).await,
+            vec![Some(t.ids[who])]
+        );
+    }
+    t.check(
+        Method::POST,
+        &format!("/reviews/{review}/reply"),
+        Some(json!({ "body": "Thank you" })),
+        &[
+            (STAFF_A, 403),
+            (REMOVED, 404),
+            (STRANGER, 404),
+            (OWNER, 200),
+        ],
+    )
+    .await;
 }
