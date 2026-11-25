@@ -26,10 +26,10 @@ String displayPhone(String e164) {
 /// A hint for the form only; the server normalises and decides.
 bool looksLikeNigerianPhone(String input) => _nationalForm(input) != null;
 
-/// Keeps a phone field to digits and at most 11 of them (`0XXXXXXXXXX`).
+/// Keeps a phone field to at most 11 digits (`0XXXXXXXXXX`). Spaces,
+/// hyphens and a leading `+` may be typed and are kept; letters are dropped.
 /// A number typed or pasted as `+234…`/`234…` is turned into the 0 form
-/// once it is longer than 11 digits, so a full international number still
-/// fits.
+/// once it has more than 11 digits, so a full international number fits.
 class PhoneInputFormatter extends TextInputFormatter {
   const PhoneInputFormatter();
 
@@ -40,15 +40,21 @@ class PhoneInputFormatter extends TextInputFormatter {
     TextEditingValue oldValue,
     TextEditingValue newValue,
   ) {
-    var digits = newValue.text.replaceAll(RegExp(r'\D'), '');
-    if (digits.length > maxDigits && digits.startsWith('234')) {
-      digits = '0${digits.substring(3)}';
+    final kept = newValue.text.replaceAll(RegExp(r'[^0-9 +-]'), '');
+    var digits = kept.replaceAll(RegExp(r'\D'), '');
+    String text;
+    if (digits.length <= maxDigits) {
+      text = kept;
+    } else {
+      if (digits.startsWith('234')) digits = '0${digits.substring(3)}';
+      text = digits.length > maxDigits
+          ? digits.substring(0, maxDigits)
+          : digits;
     }
-    if (digits.length > maxDigits) digits = digits.substring(0, maxDigits);
-    if (digits == newValue.text) return newValue;
+    if (text == newValue.text) return newValue;
     return TextEditingValue(
-      text: digits,
-      selection: TextSelection.collapsed(offset: digits.length),
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
     );
   }
 }

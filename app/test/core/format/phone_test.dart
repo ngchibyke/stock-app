@@ -43,8 +43,8 @@ void main() {
       expect(type('080312345678999'), '08031234567');
     });
 
-    test('keeps digits only', () {
-      expect(type('0803-123 45a67'), '08031234567');
+    test('keeps spaces and hyphens, drops letters', () {
+      expect(type('0803-123 45a67'), '0803-123 4567');
     });
 
     test('turns a full +234 number into the 11-digit form', () {
@@ -54,6 +54,7 @@ void main() {
 
     test('leaves a short number as typed', () {
       expect(type('0803'), '0803');
+      expect(type('0803 123 4567'), '0803 123 4567');
     });
   });
 }
