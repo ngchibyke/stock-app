@@ -20,17 +20,28 @@ class LocationNotice extends ConsumerStatefulWidget {
 class _LocationNoticeState extends ConsumerState<LocationNotice> {
   bool _show = false;
 
+  bool _started = false;
+
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Waits until the market itself is on top: a store or product opened
+    // over it (a shared link on first launch) is not interrupted.
+    final onTop = ModalRoute.of(context)?.isCurrent ?? true;
+    if (!_started && onTop) {
+      _started = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+    }
   }
 
   Future<void> _start() async {
-    final prefs = await ref.read(locationPrefsProvider.future);
+    if (!mounted) return;
+    // Read before any wait: the market may be gone by the time one ends.
     final check = ref.read(locationCheckProvider);
+    final now = ref.read(locationClockProvider);
+    final prefs = await ref.read(locationPrefsProvider.future);
+    if (!mounted) return;
     if (!prefs.asked) {
-      if (!mounted) return;
       final allow = await showModalBottomSheet<bool>(
         context: context,
         isScrollControlled: true,
@@ -38,17 +49,18 @@ class _LocationNoticeState extends ConsumerState<LocationNotice> {
       );
       await prefs.markAsked();
       if (allow != true || !await check.requestPermission()) return;
+      if (!mounted) return;
     }
-    final today = ref.read(locationClockProvider)();
-    if (prefs.closedOn(today)) return;
+    if (prefs.closedOn(now())) return;
     final area = await check.currentArea();
     if (mounted && area == Area.outside) setState(() => _show = true);
   }
 
   Future<void> _close() async {
     setState(() => _show = false);
+    final now = ref.read(locationClockProvider);
     final prefs = await ref.read(locationPrefsProvider.future);
-    await prefs.closeToday(ref.read(locationClockProvider)());
+    await prefs.closeToday(now());
   }
 
   @override

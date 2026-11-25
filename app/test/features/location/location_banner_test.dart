@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/strings.dart';
@@ -9,15 +11,19 @@ import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _FakeCheck implements LocationCheck {
-  _FakeCheck({this.area = Area.outside, this.grant = true});
+  _FakeCheck({this.area = Area.outside, this.grant = true, this.gate});
 
   final Area area;
   final bool grant;
+
+  /// When set, the system prompt stays open until this completes.
+  final Completer<void>? gate;
   int permissionRequests = 0;
 
   @override
   Future<bool> requestPermission() async {
     permissionRequests++;
+    await gate?.future;
     return grant;
   }
 
@@ -33,9 +39,10 @@ void main() {
     Area area = Area.outside,
     bool grant = true,
     Map<String, Object> stored = const {},
+    Completer<void>? gate,
   }) async {
     SharedPreferences.setMockInitialValues(stored);
-    final check = _FakeCheck(area: area, grant: grant);
+    final check = _FakeCheck(area: area, grant: grant, gate: gate);
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -135,5 +142,47 @@ void main() {
     await tester.tap(find.text(Strings.locationNotNow));
     await tester.pumpAndSettle();
     expect(find.text(Strings.locationAskTitle), findsNothing);
+  });
+
+  testWidgets('the market going away mid-check is quiet', (tester) async {
+    final gate = Completer<void>();
+    await pump(tester, gate: gate);
+    await tester.tap(find.text(Strings.locationAllow));
+    await tester.pump();
+    // Signed out (say) while the system prompt is open.
+    await tester.pumpWidget(const SizedBox());
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('no sheet over a page opened on top of the market', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          locationCheckProvider.overrideWithValue(_FakeCheck()),
+          locationClockProvider.overrideWithValue(() => now),
+        ],
+        child: MaterialApp(
+          theme: lightTheme(),
+          initialRoute: '/store',
+          routes: {
+            '/': (_) => const Scaffold(body: LocationNotice()),
+            '/store': (_) => const Scaffold(body: Text('A store')),
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('A store'), findsOneWidget);
+    expect(find.text(Strings.locationAskTitle), findsNothing);
+
+    // Back to the market: now it asks.
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pumpAndSettle();
+    expect(find.text(Strings.locationAskTitle), findsOneWidget);
   });
 }
