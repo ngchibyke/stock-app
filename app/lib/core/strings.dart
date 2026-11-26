@@ -275,4 +275,15 @@ abstract final class Strings {
   static const String nothingHereYet = 'Nothing here yet.';
   static const String listLoadFailed = "We couldn't load this list.";
   static const String storeLoadFailed = "We couldn't load this store.";
+
+  // Location hint (the market).
+  static const String locationAskTitle = 'We deliver in Abuja';
+  static const String locationAskBody =
+      'Allow location to see if we reach you.';
+  static const String locationAllow = 'Allow';
+  static const String locationNotNow = 'Not now';
+  static const String locationComingSoon =
+      'Coming soon to your location. You can still order for delivery '
+      'anywhere in Abuja.';
+  static const String locationClose = 'Close';
 }

@@ -160,6 +160,7 @@ class _SignInPageState extends ConsumerState<SignInPage> {
               controller: _phone,
               errorText: _phoneError,
               keyboardType: TextInputType.phone,
+              formatters: const [PhoneInputFormatter()],
               action: TextInputAction.next,
             ),
             const SizedBox(height: Tokens.s4),

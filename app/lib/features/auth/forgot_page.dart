@@ -90,6 +90,7 @@ class _ForgotPageState extends ConsumerState<ForgotPage> {
             controller: _phone,
             errorText: _phoneError,
             keyboardType: TextInputType.phone,
+            formatters: const [PhoneInputFormatter()],
             action: TextInputAction.done,
             onSubmitted: (_) => _submit(),
           ),

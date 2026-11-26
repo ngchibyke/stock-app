@@ -2,6 +2,8 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Taking product photos in the selling area; asked for only when the camera opens. -->
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Rough location only, for the "coming soon to your location" hint. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <application
         android:label="market"
         android:allowBackup="false"

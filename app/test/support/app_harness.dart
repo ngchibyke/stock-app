@@ -13,6 +13,8 @@ import 'package:market/core/session/session_store.dart';
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/cart/cart_repository.dart';
 import 'package:market/features/catalog/catalog_repository.dart';
+import 'package:market/features/location/location_check.dart';
+import 'package:market/features/location/location_prefs.dart';
 import 'package:market/features/market/data/asset_resolver.dart';
 import 'package:market/features/market/data/json_cache.dart';
 import 'package:market/features/market/data/market_source.dart';
@@ -22,6 +24,7 @@ import 'package:market/features/chat/chat_repository.dart';
 import 'package:market/features/sell/sell_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fake_asset_resolver.dart';
 import 'fake_buy.dart';
@@ -142,6 +145,12 @@ class AppHarness {
       ),
     ),
     assetResolverProvider.overrideWithValue(FakeAssetResolver()),
+    // The location question counts as answered and no location is known, so
+    // app-level tests see the market as before; the hint has its own tests.
+    locationCheckProvider.overrideWithValue(const _NoLocation()),
+    locationPrefsProvider.overrideWith(
+      (ref) async => _Answered(await SharedPreferences.getInstance()),
+    ),
   ];
 
   /// For a page or a container built by hand: the same plus the session hooks.
@@ -169,4 +178,25 @@ Future<void> settle(WidgetTester tester, {int frames = 6}) async {
   for (var i = 0; i < frames; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
+}
+
+class _NoLocation implements LocationCheck {
+  const _NoLocation();
+
+  @override
+  Future<bool> requestPermission() async => false;
+
+  @override
+  Future<Area> currentArea() async => Area.unknown;
+}
+
+/// Already asked, and writes nothing: tests check what reaches the disk.
+class _Answered extends LocationPrefs {
+  _Answered(super.prefs);
+
+  @override
+  bool get asked => true;
+
+  @override
+  Future<void> markAsked() async {}
 }
