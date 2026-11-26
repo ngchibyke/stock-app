@@ -247,6 +247,7 @@ class _AddressFormPageState extends ConsumerState<AddressFormPage> {
                 controller: _phone,
                 errorText: _phoneError,
                 keyboardType: TextInputType.phone,
+                formatters: const [PhoneInputFormatter()],
                 action: TextInputAction.next,
                 onChanged: (_) => _clearError(_Field.phone),
               ),

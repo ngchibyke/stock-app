@@ -1,3 +1,5 @@
+import 'package:flutter/services.dart';
+
 final RegExp _separators = RegExp(r'[\s-]');
 final RegExp _digitsOnly = RegExp(r'^\d+$');
 
@@ -23,3 +25,36 @@ String displayPhone(String e164) {
 
 /// A hint for the form only; the server normalises and decides.
 bool looksLikeNigerianPhone(String input) => _nationalForm(input) != null;
+
+/// Keeps a phone field to at most 11 digits (`0XXXXXXXXXX`). Spaces,
+/// hyphens and a leading `+` may be typed and are kept; letters are dropped.
+/// A number typed or pasted as `+234…`/`234…` is turned into the 0 form
+/// once it has more than 11 digits, so a full international number fits.
+class PhoneInputFormatter extends TextInputFormatter {
+  const PhoneInputFormatter();
+
+  static const int maxDigits = 11;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final kept = newValue.text.replaceAll(RegExp(r'[^0-9 +-]'), '');
+    var digits = kept.replaceAll(RegExp(r'\D'), '');
+    String text;
+    if (digits.length <= maxDigits) {
+      text = kept;
+    } else {
+      if (digits.startsWith('234')) digits = '0${digits.substring(3)}';
+      text = digits.length > maxDigits
+          ? digits.substring(0, maxDigits)
+          : digits;
+    }
+    if (text == newValue.text) return newValue;
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+}
