@@ -9,6 +9,7 @@ import { Card, ErrorNote, Toggle } from "../ui/kit";
 import { PageHeader } from "../ui/PageHeader";
 import { SkeletonForm } from "../ui/Skeleton";
 import { Banner } from "../ui/Controls";
+import { PartnerCard } from "./Partner";
 
 export interface Settings {
   platform_cut_bps: number;
@@ -180,6 +181,7 @@ export function Settings() {
               </div>
             </Card>
           ))}
+          <PartnerCard />
         </div>
       )}
       <AnimatePresence>
