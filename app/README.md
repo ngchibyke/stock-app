@@ -74,8 +74,7 @@ The chat screens (`lib/features/chat/`, design `docs/superpowers/specs/2026-11-2
 start from "Ask the seller" on a product, "Message the seller" on a paid order, Account (Messages) and the
 Chats tab in the Sell area. The server decides everything: the app shows what it is told (delivered, held,
 blocked, a suggested rewrite) and never judges text itself. Nothing in them has been run on a device, and the
-tone check needs a language-model key, so a held or rewritten message has only been seen in widget and server
-tests. A device run should check:
+real tone model has not been called (the wire check uses a scripted one), so how well it judges is untested. A device run should check:
 
 - the live link: a message from the other side arrives without a refresh; switching the phone to flight mode
   and back shows "Reconnecting" and then catches up with nothing twice (polling every 5 s fills the gap);
@@ -289,9 +288,13 @@ own tests only.
 **The chat wire check** (`test/wire/chat_wire_test.dart`) drives the real chat repository and socket: a
 buyer asks about a product, the owner sees it (the buyer stays anonymous), answers, the buyer's socket
 receives the answer, history catches up by sequence number, read marks clear the unread count and a stranger
-gets 404. It needs the same server setup and `WIRE_DATABASE_URL` as the selling check (the fake identity
-provider), and inserts one active store and product directly in the scratch database, because there is no
-photo store locally. The tone check is not configured locally, so every message is delivered.
+gets 404. It also checks the owner's inbox notice (it carries the conversation id and fixed words, never the
+buyer's text) and the moderation states: a rewrite offer sent by its id, a held message (pending for the sender
+only) and a blocked one with a strike. It needs the same server setup and `WIRE_DATABASE_URL` as the selling
+check (the fake identity provider) plus `TONE_PROVIDER=fake` (development only: the tone check goes by marker,
+`[[mild]]` rewrite, `[[serious]]` block, `[[down]]` outage; it is used only with no `ANTHROPIC_API_KEY`, and
+production refuses to start without that key). It inserts one active store and product directly in the scratch
+database, because there is no photo store locally.
 
 **The buying wire check** (`test/wire/buy_wire_test.dart`) goes as far as a local server allows: the
 payment return page in the app config, an address, delivery options for an empty cart (the server refuses it
