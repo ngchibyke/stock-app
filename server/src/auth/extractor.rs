@@ -44,13 +44,23 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     (!token.is_empty()).then_some(token)
 }
 
+/// The routes a person whose deletion is pending may still use.
+fn allowed_while_deleting(path: &str) -> bool {
+    path == "/me/deletion"
+        || path == "/me/export"
+        || path.starts_with("/me/export/")
+        || path == "/auth/sign-out"
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
         let token = bearer_token(&parts.headers).ok_or(AppError::Unauthorized)?;
-        let row: Option<(Uuid, Uuid, Role, bool, bool)> = sqlx::query_as(
-            "SELECT u.id, s.id, u.role, u.is_seller, u.phone_verified_at IS NOT NULL \
+        let row: Option<(Uuid, Uuid, Role, bool, bool, bool)> = sqlx::query_as(
+            "SELECT u.id, s.id, u.role, u.is_seller, u.phone_verified_at IS NOT NULL, \
+                    EXISTS (SELECT 1 FROM deletion_requests d \
+                            WHERE d.user_id = u.id AND d.status = 'pending') \
              FROM sessions s JOIN users u ON u.id = s.user_id \
              WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() \
                AND u.deleted_at IS NULL",
@@ -59,8 +69,13 @@ impl FromRequestParts<AppState> for AuthUser {
         .fetch_optional(&state.db)
         .await
         .map_err(anyhow::Error::from)?;
-        let (id, session_id, role, is_seller, phone_verified) =
+        let (id, session_id, role, is_seller, phone_verified, deletion_pending) =
             row.ok_or(AppError::Unauthorized)?;
+        // While a deletion is waiting out its cooling-off, the account can only look at
+        // or cancel the request, take its data, and sign out.
+        if deletion_pending && !allowed_while_deleting(parts.uri.path()) {
+            return Err(AppError::Forbidden("deletion_pending"));
+        }
         Ok(AuthUser {
             id,
             session_id,

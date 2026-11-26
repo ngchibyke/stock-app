@@ -20,6 +20,14 @@ class SessionSignedIn extends SessionState {
   final Me me;
 }
 
+/// Signed in, but the person asked to delete the account and the cooling-off is running.
+/// The server answers every route except the request itself with 403 `deletion_pending`,
+/// so the app shows one screen with the date and a way to keep the account.
+class SessionDeleting extends SessionState {
+  const SessionDeleting(this.dueAt);
+  final DateTime? dueAt;
+}
+
 /// Holds who is signed in. While it restores the stored session it is
 /// loading. At start a 401 on `/me` means signed out (token cleared); any
 /// other failure (offline, timeout, 5xx) is surfaced as an error and the token
@@ -39,7 +47,7 @@ class SessionController extends AsyncNotifier<SessionState> {
       final token = await _store.read();
       if (token == null || token.isEmpty) return const SessionSignedOut();
       try {
-        return SessionSignedIn(await _loadMe());
+        return await _load();
       } on ApiError catch (e) {
         if (e.status == 401) {
           await _store.clear();
@@ -50,6 +58,38 @@ class SessionController extends AsyncNotifier<SessionState> {
     } finally {
       _restoring = false;
     }
+  }
+
+  /// Who is signed in, or the waiting-for-deletion state when the server says so.
+  Future<SessionState> _load() async {
+    try {
+      return SessionSignedIn(await _loadMe());
+    } on ApiError catch (e) {
+      if (e.status == 403 && e.code == 'deletion_pending') {
+        return SessionDeleting(await _deletionDate());
+      }
+      rethrow;
+    }
+  }
+
+  Future<DateTime?> _deletionDate() async {
+    try {
+      final json = await ref.read(apiClientProvider).get('/me/deletion');
+      final due = json is Map ? json['due_at'] : null;
+      return due is String ? DateTime.tryParse(due) : null;
+    } on ApiError {
+      return null;
+    }
+  }
+
+  /// The person asked to delete the account (or the app learned it is waiting).
+  void markDeleting(DateTime? dueAt) {
+    state = AsyncData(SessionDeleting(dueAt));
+  }
+
+  /// The person kept the account: load who they are again.
+  Future<void> keepAccount() async {
+    state = AsyncData(await _load());
   }
 
   Future<Me> _loadMe() async {
@@ -69,8 +109,7 @@ class SessionController extends AsyncNotifier<SessionState> {
   Future<void> signInWithToken(String token) async {
     await _store.write(token);
     try {
-      final me = await _loadMe();
-      state = AsyncData(SessionSignedIn(me));
+      state = AsyncData(await _load());
     } catch (_) {
       await _store.clear();
       state = const AsyncData(SessionSignedOut());

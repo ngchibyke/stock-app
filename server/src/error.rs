@@ -40,6 +40,9 @@ pub enum AppError {
     /// 403 `muted`, carrying when the mute ends.
     #[error("muted")]
     Muted(time::OffsetDateTime),
+    /// 409 `deletion_blocked`, listing what has to be finished first (codes only).
+    #[error("deletion blocked")]
+    DeletionBlocked(Vec<&'static str>),
     #[error("not found")]
     NotFound,
     /// 404 with a specific code the client keys on (e.g. `store_not_found`).
@@ -124,6 +127,14 @@ impl IntoResponse for AppError {
                         .unwrap_or_default()
                 );
                 (StatusCode::FORBIDDEN, payload)
+            }
+            AppError::DeletionBlocked(reasons) => {
+                let mut payload = body(
+                    "deletion_blocked",
+                    "Finish what is still open before deleting the account",
+                );
+                payload["error"]["reasons"] = json!(reasons);
+                (StatusCode::CONFLICT, payload)
             }
             AppError::NotFound => (StatusCode::NOT_FOUND, body("not_found", "Not found")),
             AppError::NotFoundCode(code) => (StatusCode::NOT_FOUND, body(code, "Not found")),

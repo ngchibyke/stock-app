@@ -68,6 +68,21 @@ a device, and no real payment or push has ever been sent. A device run should ch
 - stock changing between the options and Pay (409 `allocation_changed`): the options refresh and nothing is
   charged.
 
+## Privacy and data
+
+Account, Privacy and data (`lib/features/privacy/`, design `docs/superpowers/specs/2026-11-26-08-data-rights-design.md`)
+lets a person take a copy of their data and delete their account. Nothing in it has been run on a device. A device
+run should check:
+
+- **Download my data:** ask with the password, see "being put together", come back after a few minutes and
+  tap Save or share. The system share sheet opens with `my-data.json`; saving it to Files or Drive works, and
+  the app keeps no copy. The file opens as readable JSON and holds your own data only.
+- **Delete my account:** the explanation, then the password. With an open order, report, store or payout the page
+  lists what to finish, in words. Otherwise the app moves to the waiting screen with the date, and nothing else
+  can be opened. Killing and reopening the app, or signing in again, still lands on that screen. "Keep my account"
+  brings everything back. Signing in on another phone is signed out when the request is made.
+- text at 200%, TalkBack and VoiceOver on both flows, and a very slow connection during the request.
+
 ## Chat
 
 The chat screens (`lib/features/chat/`, design `docs/superpowers/specs/2026-11-26-07e4-chat-app-design.md`)
@@ -295,6 +310,14 @@ check (the fake identity provider) plus `TONE_PROVIDER=fake` (development only: 
 `[[mild]]` rewrite, `[[serious]]` block, `[[down]]` outage; it is used only with no `ANTHROPIC_API_KEY`, and
 production refuses to start without that key). It inserts one active store and product directly in the scratch
 database, because there is no photo store locally.
+
+**The privacy wire check** (`test/wire/privacy_wire_test.dart`) runs the whole path against a real server: a wrong
+password is refused, a deletion request gates the account (403 `deletion_pending`), cancelling restores it, a
+data export is requested, built by the server's own job and downloaded, and a second request is the same file.
+Then the person asks again, the check moves the deletion date into the past in the scratch database (standing in
+for 30 days), and the server's job erases the account: the session ends, sign-in is refused and the number can
+sign up again. The jobs run once a minute, so it takes about two minutes. It needs `WIRE_DATABASE_URL` as the
+selling and chat checks do.
 
 **The buying wire check** (`test/wire/buy_wire_test.dart`) goes as far as a local server allows: the
 payment return page in the app config, an address, delivery options for an empty cart (the server refuses it
