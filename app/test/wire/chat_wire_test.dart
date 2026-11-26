@@ -49,7 +49,8 @@ Future<String> _psql(String sql) async {
     sql,
   ]);
   expect(r.exitCode, 0, reason: '${r.stderr}');
-  return (r.stdout as String).trim().split('\n').first;
+  // psql ends lines with CRLF on Windows.
+  return (r.stdout as String).trim().split('\n').first.trim();
 }
 
 void main() {
