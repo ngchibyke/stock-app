@@ -8,6 +8,7 @@ import 'package:market/features/addresses/address_repository.dart';
 import 'package:market/features/buy/buy_repository.dart';
 import 'package:market/features/buy/inbox.dart';
 import 'package:market/features/chat/chat_repository.dart';
+import 'package:market/features/privacy/privacy_repository.dart';
 import 'package:market/features/buy/payment_page.dart';
 import 'package:market/features/cart/cart_repository.dart';
 import 'package:market/features/sell/photos/photo_source.dart';
@@ -18,6 +19,7 @@ import 'package:material_ui/material_ui.dart';
 import 'fake_address_repository.dart';
 import 'fake_buy.dart';
 import 'fake_chat.dart';
+import 'fake_privacy.dart';
 import 'fake_cart_repository.dart';
 import 'fake_sell.dart';
 import 'pump_sell.dart';
@@ -62,6 +64,8 @@ class BuyEnv {
   final FakeInboxRepository inbox = FakeInboxRepository();
   final FakeWorkRepository work = FakeWorkRepository();
   final FakeChatRepository chat = FakeChatRepository();
+  final FakePrivacyRepository privacy = FakePrivacyRepository();
+  final FakeFileSharer sharer = FakeFileSharer();
   final FakeChatSocket chatSocket = FakeChatSocket();
   final FakeSellRepository sell = FakeSellRepository();
   final FakeAddressRepository addresses = FakeAddressRepository([
@@ -80,6 +84,8 @@ class BuyEnv {
     buyOrdersRepositoryProvider.overrideWithValue(orders),
     inboxRepositoryProvider.overrideWithValue(inbox),
     chatRepositoryProvider.overrideWithValue(chat),
+    privacyRepositoryProvider.overrideWithValue(privacy),
+    fileSharerProvider.overrideWithValue(sharer),
     chatSocketProvider.overrideWithValue(chatSocket),
     workRepositoryProvider.overrideWithValue(work),
     sellRepositoryProvider.overrideWithValue(sell),
