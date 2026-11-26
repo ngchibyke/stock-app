@@ -8,6 +8,10 @@ use axum::http::Method;
 use common::{TestApp, TestResponse};
 use serde_json::{Value, json};
 use server::escrow::jobs::run_due_jobs;
+use server::notify::{
+    kinds::Kind,
+    service::{self as notify, Audience},
+};
 use uuid::Uuid;
 
 use sqlx::PgPool;
@@ -871,4 +875,191 @@ async fn team_invariants_hold_in_sql(pool: PgPool) {
             "{bad}"
         );
     }
+}
+
+// ---- Task 9: team notifications ----
+
+/// Notices of `kind` raised for `order`, as the sorted users they went to.
+async fn recipients(app: &TestApp, kind: &str, order: Uuid) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM notifications WHERE kind = $1 AND order_id = $2")
+            .bind(kind)
+            .bind(order)
+            .fetch_all(&app.pool)
+            .await
+            .unwrap();
+    ids.sort();
+    ids
+}
+
+fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+    ids.sort();
+    ids
+}
+
+async fn tied_to(app: &TestApp, store: Uuid, user: Uuid, branch: Uuid) {
+    sqlx::query("UPDATE store_members SET branch_id = $1 WHERE store_id = $2 AND user_id = $3")
+        .bind(branch)
+        .bind(store)
+        .bind(user)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+}
+
+async fn tell(app: &TestApp, kind: Kind, order: Uuid, audience: Audience) {
+    let mut conn = app.pool.acquire().await.unwrap();
+    notify::tell_team(&mut conn, kind, order, audience)
+        .await
+        .unwrap();
+}
+
+/// A paid order on the store's first branch, plus a second branch.
+async fn order_with_team(app: &TestApp) -> (server_ids::Ids, Uuid) {
+    let o = app.shipped_order("courier", "picked_up").await;
+    let first: Uuid = sqlx::query_scalar("SELECT branch_id FROM orders WHERE id = $1")
+        .bind(o.order_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO store_branches (store_id, name, pickup_address_enc, pickup_area_council, position) \
+         SELECT store_id, 'Garki', pickup_address_enc, 'bwari', 1 FROM store_branches \
+         WHERE id = $1 RETURNING id",
+    )
+    .bind(first)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    (
+        server_ids::Ids {
+            order: o.order_id,
+            store: o.store_id,
+            owner: o.seller_id,
+            owner_token: o.seller_token,
+            first,
+        },
+        other,
+    )
+}
+
+mod server_ids {
+    use uuid::Uuid;
+    pub struct Ids {
+        pub order: Uuid,
+        pub store: Uuid,
+        pub owner: Uuid,
+        pub owner_token: String,
+        pub first: Uuid,
+    }
+}
+
+#[sqlx::test]
+async fn new_order_reaches_owner_managers_and_branch_staff_only(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (t, other) = order_with_team(&app).await;
+    let (manager, _) = join(&app, &t.owner_token, t.store, "08063000010", "manager").await;
+    let (wide, _) = join(&app, &t.owner_token, t.store, "08063000011", "staff").await;
+    let (here, _) = join(&app, &t.owner_token, t.store, "08063000012", "staff").await;
+    let (away, _) = join(&app, &t.owner_token, t.store, "08063000013", "staff").await;
+    tied_to(&app, t.store, here, t.first).await;
+    tied_to(&app, t.store, away, other).await;
+    // A stranger with their own store never hears of it.
+    let l = app
+        .make_active_store_with_product("08063000014", "Other Shop", 1_000, 1)
+        .await;
+
+    tell(&app, Kind::OrderNew, t.order, Audience::Order).await;
+
+    let got = recipients(&app, "order_new", t.order).await;
+    assert_eq!(got, sorted(vec![t.owner, manager, wide, here]));
+    assert!(!got.contains(&away) && !got.contains(&l.seller_id));
+}
+
+#[sqlx::test]
+async fn staff_of_a_closed_branch_get_no_order_notice(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (t, other) = order_with_team(&app).await;
+    let (staff, _) = join(&app, &t.owner_token, t.store, "08063000020", "staff").await;
+    tied_to(&app, t.store, staff, t.first).await;
+    sqlx::query("UPDATE store_branches SET closed_at = now() WHERE id = $1")
+        .bind(t.first)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let _ = other;
+    tell(&app, Kind::OrderNew, t.order, Audience::Order).await;
+    assert_eq!(recipients(&app, "order_new", t.order).await, vec![t.owner]);
+}
+
+#[sqlx::test]
+async fn dispute_reaches_owner_and_managers(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (t, _) = order_with_team(&app).await;
+    let (manager, _) = join(&app, &t.owner_token, t.store, "08063000030", "manager").await;
+    let (_staff, _) = join(&app, &t.owner_token, t.store, "08063000031", "staff").await;
+    let dispute = Uuid::new_v4();
+    let mut conn = app.pool.acquire().await.unwrap();
+    // The notice row references the dispute, so make a real one.
+    sqlx::query(
+        "INSERT INTO disputes (id, order_id, buyer_id, store_id, reason, status, seller_respond_by)          SELECT $1, o.id, o.buyer_id, o.store_id, 'damaged', 'awaiting_seller', now() + interval '2 days'          FROM orders o WHERE o.id = $2",
+    )
+    .bind(dispute)
+    .bind(t.order)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    notify::tell_team_dispute(
+        &mut conn,
+        Kind::DisputeOpened,
+        t.order,
+        dispute,
+        Audience::Managers,
+    )
+    .await
+    .unwrap();
+    let got: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM notifications WHERE kind = 'dispute_opened' AND dispute_id = $1",
+    )
+    .bind(dispute)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(sorted(got), sorted(vec![t.owner, manager]));
+}
+
+#[sqlx::test]
+async fn payout_notice_owner_only(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (t, _) = order_with_team(&app).await;
+    join(&app, &t.owner_token, t.store, "08063000040", "manager").await;
+    join(&app, &t.owner_token, t.store, "08063000041", "staff").await;
+    tell(&app, Kind::FundsReleased, t.order, Audience::OwnerOnly).await;
+    assert_eq!(
+        recipients(&app, "funds_released", t.order).await,
+        vec![t.owner]
+    );
+}
+
+#[sqlx::test]
+async fn removed_member_gets_nothing(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let (t, _) = order_with_team(&app).await;
+    let (manager, _) = join(&app, &t.owner_token, t.store, "08063000050", "manager").await;
+    let (staff, _) = join(&app, &t.owner_token, t.store, "08063000051", "staff").await;
+    sqlx::query(
+        "UPDATE store_members SET removed_at = now(), removed_by = $2 WHERE user_id = ANY($1)",
+    )
+    .bind(vec![manager, staff])
+    .bind(t.owner)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    tell(&app, Kind::OrderNew, t.order, Audience::Order).await;
+    tell(&app, Kind::FundsReleased, t.order, Audience::Managers).await;
+    assert_eq!(recipients(&app, "order_new", t.order).await, vec![t.owner]);
+    assert_eq!(
+        recipients(&app, "funds_released", t.order).await,
+        vec![t.owner]
+    );
 }

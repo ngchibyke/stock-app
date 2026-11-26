@@ -454,7 +454,7 @@ async fn each_event_raises_its_notice_order_steps(pool: PgPool) {
     // Payment: the seller alone. Each step after it: the buyer alone.
     assert_eq!(
         notices(&app, o.seller_id).await,
-        vec![("order_paid".to_string(), Some(o.order_id), None, None)]
+        vec![("order_new".to_string(), Some(o.order_id), None, None)]
     );
     assert_eq!(
         notices(&app, o.buyer_id)

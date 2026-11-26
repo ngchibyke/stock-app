@@ -83,7 +83,10 @@ use crate::{
     error::AppError,
     ledger::{self, Account, Entry},
     money::{self, FeeSchedule},
-    notify::{kinds::Kind, service as notify},
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Audience},
+    },
     payments::{self, PayoutHandle, PayoutRequest, PayoutState, ProviderError},
     settings,
 };
@@ -650,7 +653,7 @@ pub async fn release_in(
         }),
     )
     .await?;
-    notify::tell_seller(conn, Kind::FundsReleased, order_id).await?;
+    notify::tell_team(conn, Kind::FundsReleased, order_id, Audience::Managers).await?;
     Ok(ReleasedIn::Done {
         payout_id,
         status,

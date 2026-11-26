@@ -26,7 +26,7 @@ use crate::{
     moderation::filter::{Category, Scan, Severity, scan},
     notify::{
         kinds::Kind,
-        service::{self as notify, Notice},
+        service::{self as notify, Audience},
     },
     stores::access::{self, Action, covers_branch_sql},
     uploads::{
@@ -436,10 +436,12 @@ pub async fn open(
         json!({ "reason": reason.as_str(), "prior_status": order.status }),
     )
     .await?;
-    let (_, seller) = notify::order_parties(&mut tx, order_id).await?;
-    notify::enqueue(
+    notify::tell_team_dispute(
         &mut tx,
-        Notice::dispute(seller, Kind::DisputeOpened, dispute_id),
+        Kind::DisputeOpened,
+        order_id,
+        dispute_id,
+        Audience::Managers,
     )
     .await?;
     let (view, _) = load(&mut tx, state, dispute_id).await?;

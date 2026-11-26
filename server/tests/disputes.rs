@@ -1053,7 +1053,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
             .await
             .contains(&"order_delivered".to_string())
     );
-    assert_eq!(kinds(shop.seller_id).await, ["order_paid"]);
+    assert_eq!(kinds(shop.seller_id).await, ["order_new"]);
 
     // 2. The buyer reports damage, with a photo.
     let evidence = app.ready_photo_for(&buyer, "dispute").await;
@@ -1065,10 +1065,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let id = res.json["id"].as_str().unwrap().to_string();
-    assert_eq!(
-        kinds(shop.seller_id).await,
-        ["dispute_opened", "order_paid"]
-    );
+    assert_eq!(kinds(shop.seller_id).await, ["dispute_opened", "order_new"]);
 
     // 3. The seller answers; the item comes back at the seller's cost.
     let res = respond(&app, &id, &shop.seller_token, REPLY).await;
@@ -1124,7 +1121,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
             "dispute_decided",
             "dispute_opened",
             "funds_released",
-            "order_paid",
+            "order_new",
             "return_requested"
         ]
     );

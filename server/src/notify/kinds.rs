@@ -1,4 +1,4 @@
-//! The fifteen kinds of notice and their fixed copy. Notices store no text:
+//! The sixteen kinds of notice and their fixed copy. Notices store no text:
 //! the title and body come from the kind when they are read or pushed.
 
 use serde::Serialize;
@@ -21,10 +21,11 @@ pub enum Kind {
     ModerationWarning,
     ModerationMuted,
     StoreInvite,
+    OrderNew,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 15] = [
+    pub const ALL: [Kind; 16] = [
         Kind::OrderPaid,
         Kind::OrderPickedUp,
         Kind::OrderOutForDelivery,
@@ -40,6 +41,7 @@ impl Kind {
         Kind::ModerationWarning,
         Kind::ModerationMuted,
         Kind::StoreInvite,
+        Kind::OrderNew,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -59,6 +61,7 @@ impl Kind {
             Kind::ModerationWarning => "moderation_warning",
             Kind::ModerationMuted => "moderation_muted",
             Kind::StoreInvite => "store_invite",
+            Kind::OrderNew => "order_new",
         }
     }
 
@@ -83,6 +86,7 @@ impl Kind {
             Kind::ModerationWarning => "Message not sent",
             Kind::ModerationMuted => "Posting paused",
             Kind::StoreInvite => "Store team invite",
+            Kind::OrderNew => "New order \u{2014} please ship",
         }
     }
 
@@ -119,6 +123,7 @@ impl Kind {
             Kind::StoreInvite => {
                 "A store invited you to join its team. Open the app to accept or decline."
             }
+            Kind::OrderNew => "A buyer has paid. Prepare the order for delivery within 48 hours.",
         }
     }
 }
@@ -129,7 +134,7 @@ mod tests {
 
     #[test]
     fn kinds_have_the_exact_copy() {
-        let table: [(&str, &str, &str); 15] = [
+        let table: [(&str, &str, &str); 16] = [
             (
                 "order_paid",
                 "Paid \u{2014} please ship",
@@ -205,6 +210,11 @@ mod tests {
                 "Store team invite",
                 "A store invited you to join its team. Open the app to accept or decline.",
             ),
+            (
+                "order_new",
+                "New order \u{2014} please ship",
+                "A buyer has paid. Prepare the order for delivery within 48 hours.",
+            ),
         ];
         for (kind, title, body) in table {
             let k = Kind::parse(kind).unwrap_or_else(|| panic!("unknown kind {kind}"));
@@ -212,6 +222,6 @@ mod tests {
             assert_eq!(k.title(), title);
             assert_eq!(k.body(), body);
         }
-        assert_eq!(Kind::ALL.len(), 15);
+        assert_eq!(Kind::ALL.len(), 16);
     }
 }
