@@ -32,6 +32,7 @@ use crate::{
 pub const BUYER_LABEL: &str = "Buyer";
 /// How long a rewrite suggestion can be sent.
 pub const SUGGESTION_HOURS: i32 = 1;
+const RUDE_NOT_SENT: &str = "This could come across as rude, so it wasn't sent.";
 const DEFAULT_PAGE: i64 = 30;
 const MAX_PAGE: i64 = 100;
 const DEFAULT_MESSAGES: i64 = 50;
@@ -491,8 +492,9 @@ struct OwnPendingRow {
     created_at: OffsetDateTime,
 }
 
-/// The sender's own held and withheld rows, oldest first. Only ever the
-/// caller's: the other side must not learn a message was stopped.
+/// The sender's own held and withheld rows, oldest first, leaving out a stopped one
+/// whose suggested wording has been sent. Only ever the caller's: the other side must
+/// not learn a message was stopped.
 pub async fn own_pending(
     db: &PgPool,
     cipher: &FieldCipher,
@@ -509,6 +511,7 @@ pub async fn own_pending(
            FROM chat_messages m LEFT JOIN moderation_flags f ON f.id = m.flag_id \
            WHERE m.conversation_id = $1 AND m.sender_id = $2 \
              AND m.status IN ('held', 'withheld') \
+             AND f.suggestion_used_at IS NULL \
            ORDER BY m.created_at DESC LIMIT $4 \
          ) own ORDER BY created_at",
     )
@@ -521,16 +524,18 @@ pub async fn own_pending(
     .context("read own pending messages")?;
     rows.into_iter()
         .map(|r| {
+            let category = r.category.as_deref().and_then(Category::parse);
+            // The rude reason offers another version: not once the offer has lapsed.
+            let reason = match category {
+                Some(Category::Rude) if r.suggestion_enc.is_none() => Some(RUDE_NOT_SENT),
+                other => other.map(reason_copy),
+            };
             Ok(OwnPendingView {
                 id: r.id,
                 client_message_id: r.client_message_id,
                 status: r.status,
                 body: r.body_enc.map(|b| cipher.decrypt(&b)).transpose()?,
-                reason: r
-                    .category
-                    .as_deref()
-                    .and_then(Category::parse)
-                    .map(reason_copy),
+                reason,
                 flag_id: r.flag_id,
                 suggested: r.suggestion_enc.map(|b| cipher.decrypt(&b)).transpose()?,
                 created_at: r.created_at,
