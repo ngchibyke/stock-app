@@ -625,10 +625,13 @@ struct StorePlan {
     unavailable: Vec<UnavailableLine>,
 }
 
-/// The group's cheapest `(fee, promised date)`; `None` with no option.
-fn cheapest(plan: &GroupPlan) -> Option<(i64, &str)> {
+/// The group's cheapest delivery `(fee, promised date)`, courier or self only;
+/// `None` with no delivery option. Collect (fee 0) never picks the branch: it is
+/// offered on the group the delivery choice lands on (spec 7a).
+fn cheapest_delivery(plan: &GroupPlan) -> Option<(i64, &str)> {
     plan.views
         .iter()
+        .filter(|v| v.method != DeliveryMethod::Collect)
         .map(|v| (v.fee_kobo, v.promised_date.as_str()))
         .min()
 }
@@ -940,12 +943,16 @@ pub async fn options_for(
     for plan in plans {
         let mut groups = plan.groups;
         if plan.full_fill && groups.len() > 1 {
-            // The cheapest option wins, then the earliest date, then rank (the list
-            // order); a branch with nothing to offer loses to any that has.
+            // The cheapest delivery option wins, then the earliest date, then rank
+            // (the list order). A branch offering only collect is a last resort, and
+            // one with nothing to offer loses to any that has.
             let best = groups
                 .iter()
                 .enumerate()
-                .min_by_key(|&(rank, g)| (cheapest(g).is_none(), cheapest(g), rank))
+                .min_by_key(|&(rank, g)| {
+                    let delivery = cheapest_delivery(g);
+                    (delivery.is_none(), delivery, g.views.is_empty(), rank)
+                })
                 .map_or(0, |(rank, _)| rank);
             groups = vec![groups.swap_remove(best)];
         }

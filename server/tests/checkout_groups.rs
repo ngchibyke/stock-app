@@ -303,6 +303,61 @@ async fn cheapest_of_three_branches_wins(pool: PgPool) {
     );
 }
 
+fn methods_of(group: &Value) -> Vec<&str> {
+    group["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["method"].as_str().unwrap())
+        .collect()
+}
+
+/// Collect (fee 0) does not pick the branch: of two full-fill branches the one
+/// with the cheaper delivery wins, and collect is offered only where it is on.
+#[sqlx::test]
+async fn collect_does_not_win_full_fill_choice(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = shop(&app, 5).await;
+    let store = format!("/stores/{}", l.store_id);
+    patch(
+        &app,
+        &l.seller_token,
+        &store,
+        json!({ "delivery_courier": false, "self_delivery_fee_kobo": 90_000 }),
+    )
+    .await;
+    let first = first_branch(&app, l.store_id).await;
+    let garki = add_branch(&app, &l, "Garki", 50_000).await;
+    set_stock(&app, &l, garki, l.variant_id, 5).await;
+    // The dearer-delivering branch has a counter.
+    sqlx::query("UPDATE store_branches SET collect_enabled = true WHERE id = $1")
+        .bind(first)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    assert_eq!(app.set_cart(&buyer, l.variant_id, 1).await.status, 200);
+    let (_, json) = options(&app, &buyer).await;
+    let gs = groups(&json);
+    assert_eq!(gs.len(), 1, "{json}");
+    assert_eq!(branch_of(&gs[0]), garki, "{json}");
+    assert_eq!(methods_of(&gs[0]), vec!["self"], "{json}");
+
+    // With the counter at the cheaper branch, collect is offered beside delivery.
+    sqlx::query("UPDATE store_branches SET collect_enabled = (id = $1) WHERE store_id = $2")
+        .bind(garki)
+        .bind(l.store_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let (_, json) = options(&app, &buyer).await;
+    let gs = groups(&json);
+    assert_eq!(branch_of(&gs[0]), garki, "{json}");
+    let mut m = methods_of(&gs[0]);
+    m.sort_unstable();
+    assert_eq!(m, vec!["collect", "self"], "{json}");
+}
+
 #[sqlx::test]
 async fn split_makes_one_order_per_branch_one_payment(pool: PgPool) {
     let app = TestApp::new(pool).await;
