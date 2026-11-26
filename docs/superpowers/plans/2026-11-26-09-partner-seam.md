@@ -28,3 +28,9 @@ Branch: `feat/partner-seam`.
 ## Checks
 
 Server from `server/`: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the whole suite with `DATABASE_URL` set. Dashboard from `dashboard/`: lint, tests, build, and the Playwright suite. Nothing is called for real: there is no partner yet.
+
+## Status
+
+Built on `feat/partner-seam`: `server/src/partners/` (config, breaker, client, fake, gateway, usage, settings, routes, webhook, jobs), migration `0051_partner.sql`, `server/tests/partner.rs` (16 tests) and `partner_client.rs` (8 tests), the dashboard's `PartnerCard` with 9 component tests and one browser test, and the README and roadmap entries.
+
+As built, also different from the plan as written: `connected` in the status is `null` when not checked (a settings change makes no call, so an idle seam makes none); the status route's last error is the partner's last real failure, not our own refusal to call it.

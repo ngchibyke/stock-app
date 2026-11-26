@@ -34,6 +34,14 @@ Delivery and tracking (part 3):
 - **Ship deadline:** the 48-hour rule is now enforced for orders paid after `ship_deadline_enforce_from`, and overdue pickups are flagged for the owner.
 - **Owner view:** the reconciliation list shows bookings that failed or are unknown, courier cancels after pickup, overdue pickups and paid orders without a delivery method.
 
+Partner services (part 9):
+
+- **A seam, not a feature.** One gateway (`server/src/partners/`) is the only door to a service built by the owner's other company. No capability exists yet, because the partner's contract does not. With no `PARTNER_*` settings, or the switch off, every call answers "not configured" or "disabled" without a network call, and nothing else in the server changes. A partner is optional, even in production.
+- **Safety.** Https only, no redirects, 5 s connect and 10 s total timeouts, responses capped at 1 MiB, one retry for a `GET` and never for a `POST`, and a circuit breaker (open after 5 failures in a row, one test call after 30 s). Only the fields in `partners::client::ALLOWED_OUTBOUND_FIELDS` can be sent (opaque ids, barcodes, kobo, timestamps); a payload with any other field is refused before a network call. The key and the webhook secret are never logged or shown.
+- **Paid for.** Every call is counted per feature and day, and the Owner can set a monthly call budget. When it is spent calls stop and one alert a month is raised in the dashboard's alerts.
+- **Switches.** The Owner turns the partner on and off and names features, with a note for every change (audited), from the Partner card on the dashboard's Settings page, or `GET /admin/partner/status` and `PATCH /admin/partner`. `GET /app/config` carries `features`: a name is true only while the partner is configured, switched on, within budget and the breaker is closed.
+- **Webhooks.** `POST /webhooks/partner`, signed with HMAC-SHA256 over `{timestamp}.{raw body}` (`X-Partner-Timestamp` in unix seconds, `X-Partner-Signature` in hex), refused when the timestamp is more than 5 minutes off or the body is over 64 KiB, each `event_id` stored once.
+
 Chat, moderation and reviews (part 4):
 
 - **Chat:** a buyer and seller talk about a product or an order. Messages are sent over REST and pushed over a WebSocket; a client that missed a push reads from its last sequence number. Bodies are encrypted at rest.
