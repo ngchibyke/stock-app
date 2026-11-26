@@ -20,6 +20,9 @@ type Object = (Vec<u8>, String);
 pub struct FakeStore {
     objects: Mutex<HashMap<(Bucket, String), Object>>,
     down: AtomicBool,
+    cache: Mutex<HashMap<(Bucket, String), String>>,
+    fail_after: Mutex<Option<usize>>,
+    puts: std::sync::atomic::AtomicUsize,
 }
 
 fn name(bucket: Bucket) -> &'static str {
@@ -45,6 +48,21 @@ impl FakeStore {
             .lock()
             .unwrap()
             .insert((bucket, key.to_string()), (bytes, content_type.to_string()));
+    }
+
+    /// The `Cache-Control` an object was stored with, if it was stored with one.
+    pub fn cache_control(&self, bucket: Bucket, key: &str) -> Option<String> {
+        self.cache
+            .lock()
+            .unwrap()
+            .get(&(bucket, key.to_string()))
+            .cloned()
+    }
+
+    /// After this many more successful puts, every put fails (an upload cut short).
+    pub fn fail_puts_after(&self, n: usize) {
+        *self.fail_after.lock().unwrap() = Some(n);
+        self.puts.store(0, Ordering::SeqCst);
     }
 
     pub fn object(&self, bucket: Bucket, key: &str) -> Option<Vec<u8>> {
@@ -145,7 +163,28 @@ impl ObjectStore for FakeStore {
         content_type: &str,
     ) -> Result<(), StoreError> {
         self.check()?;
+        if let Some(limit) = *self.fail_after.lock().unwrap()
+            && self.puts.fetch_add(1, Ordering::SeqCst) >= limit
+        {
+            return Err(StoreError::Unavailable);
+        }
         self.put_raw(bucket, key, bytes, content_type);
+        Ok(())
+    }
+
+    async fn put_cached(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+        cache_control: &str,
+    ) -> Result<(), StoreError> {
+        self.put(bucket, key, bytes, content_type).await?;
+        self.cache
+            .lock()
+            .unwrap()
+            .insert((bucket, key.to_string()), cache_control.to_string());
         Ok(())
     }
 

@@ -59,7 +59,7 @@ fn parse_command(args: &[String]) -> anyhow::Result<Command> {
         }
         Some((cmd, rest)) if cmd == "create-owner" => Ok(Command::CreateOwner(rest.to_vec())),
         // The value is not echoed: it could be anything a user typed.
-        Some(_) => bail!("unknown command (expected: serve, create-owner)"),
+        Some(_) => bail!("unknown command (expected: serve, create-owner, art)"),
     }
 }
 
@@ -67,6 +67,10 @@ fn parse_command(args: &[String]) -> anyhow::Result<Command> {
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The art tool needs no database and none of the server's other settings.
+    if args.first().map(String::as_str) == Some("art") {
+        return server::art::run(&args[1..]).await;
+    }
     let command = parse_command(&args)?;
     tracing_subscriber::fmt()
         .with_env_filter(
