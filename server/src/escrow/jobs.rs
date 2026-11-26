@@ -9,8 +9,8 @@
 //!    checkout's own `next_reverify_at` back (5 min doubling, capped at 6h).
 //! 3. `ship_deadline`: `paid` orders past their stored `ship_by`, not held,
 //!    payment not `provider_flagged`, where the seller did not act: a
-//!    self-delivery order not yet picked up, or a courier order the seller
-//!    never marked ready (`ready_at IS NULL`) ->
+//!    self-delivery order not yet picked up, or a courier or collect order the
+//!    seller never marked ready (`ready_at IS NULL`) ->
 //!    a full refund (stock back on hand) plus a `seller_strikes` row, in one
 //!    transaction, then the refund is sent. Capped per tick, and switched off
 //!    by `platform_settings.jobs_ship_deadline_enabled` (owner kill switch;
@@ -82,6 +82,13 @@
 //! 17. `purge_invites`: store invites that expired unanswered, or were declined
 //!     or revoked, more than 30 days ago are deleted
 //!     -> [`stores::team::purge_invites`](crate::stores::team::purge_invites).
+//! 18. `expire_collections`: collect orders still `paid` at their stored
+//!     `collect_by`, not held, payment not flagged -> a full refund with stock
+//!     back at the branch and **no** strike
+//!     -> [`collect::expire_one`](crate::delivery::collect::expire_one).
+//! 19. `collect_reminders`: the buyer's day-1 and day-4 "your order is waiting"
+//!     notices, once each
+//!     -> [`collect::send_reminders`](crate::delivery::collect::send_reminders).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -129,6 +136,7 @@ use crate::{
     chat::held,
     checkout::{SettleOutcome, service::expire_and_restore, settle_payment},
     delivery::{
+        collect,
         events::{POLL_AFTER, POLLED_STATUSES, poll_one},
         shipments::{self, book_one, cancel_one},
     },
@@ -157,7 +165,7 @@ pub const PICKUP_OVERDUE: &str = "shipment.pickup_overdue";
 /// cannot drift apart.
 const SHIP_DEADLINE_SCOPE: &str = "o.delivery_method IS NOT NULL \
      AND (o.delivery_method = 'self' \
-          OR (o.delivery_method = 'courier' AND o.ready_at IS NULL)) \
+          OR (o.delivery_method IN ('courier', 'collect') AND o.ready_at IS NULL)) \
      AND o.paid_at >= (SELECT ship_deadline_enforce_from FROM platform_settings WHERE id)";
 /// Ship-deadline refunds per tick: a guard against a mass refund from one bad
 /// condition (a wrong deadline backfill, say); the rest wait for later ticks.
@@ -212,6 +220,8 @@ pub struct JobReport {
     pub uploads_purged: u32,
     pub stores_placed: u32,
     pub invites_purged: u32,
+    pub collections_expired: u32,
+    pub collect_reminders_sent: u32,
     pub failed: u32,
 }
 
@@ -239,7 +249,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 17] = [
+    let jobs: [(&str, Job); 19] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -257,6 +267,8 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (upload_jobs::PURGE_UPLOADS, Job::PurgeUploads),
         (PLACE_MARKET, Job::PlaceMarket),
         (team::PURGE_INVITES, Job::PurgeInvites),
+        (collect::EXPIRE_COLLECTIONS, Job::ExpireCollections),
+        (collect::COLLECT_REMINDERS, Job::CollectReminders),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -289,6 +301,8 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::PurgeUploads => &mut report.uploads_purged,
             Job::PlaceMarket => &mut report.stores_placed,
             Job::PurgeInvites => &mut report.invites_purged,
+            Job::ExpireCollections => &mut report.collections_expired,
+            Job::CollectReminders => &mut report.collect_reminders_sent,
         };
         *slot += stats.done;
     }
@@ -325,6 +339,8 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 uploads_purged = r.uploads_purged,
                 stores_placed = r.stores_placed,
                 invites_purged = r.invites_purged,
+                collections_expired = r.collections_expired,
+                collect_reminders = r.collect_reminders_sent,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -377,6 +393,8 @@ enum Job {
     PurgeUploads,
     PlaceMarket,
     PurgeInvites,
+    ExpireCollections,
+    CollectReminders,
 }
 
 impl Job {
@@ -399,6 +417,8 @@ impl Job {
             Job::PurgeUploads => upload_jobs::run(state, cancel).await,
             Job::PlaceMarket => place_market(state).await,
             Job::PurgeInvites => team::purge_invites(state, cancel).await,
+            Job::ExpireCollections => expire_collections(state, cancel).await,
+            Job::CollectReminders => collect::send_reminders(state, cancel).await,
         }
     }
 }
@@ -738,6 +758,34 @@ pub async fn refund_missed_ship_deadline(
         tracing::warn!(error = %e, "ship-deadline refund not sent; the sweeper retries");
     }
     Ok(true)
+}
+
+// ------------------------------------------------------ 18. expire collections
+
+/// Uncollected collect orders: a full refund each, no strike (see
+/// [`collect::expire_one`]). Capped per tick like the ship deadline, since each
+/// one refunds.
+async fn expire_collections(
+    state: &AppState,
+    cancel: &CancellationToken,
+) -> Result<Stats, AppError> {
+    let sql = format!(
+        "SELECT o.id FROM orders o JOIN checkouts c ON c.id = o.checkout_id \
+         WHERE o.status = 'paid' AND {} AND {} \
+         ORDER BY o.collect_by, o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED",
+        collect::EXPIRY_SCOPE,
+        not_pushed_back(collect::EXPIRE_COLLECTIONS, "o.id")
+    );
+    let ids = claim(state, &sql, SHIP_DEADLINE_PER_TICK).await?;
+    let mut stats = Stats::default();
+    for id in ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let result = collect::expire_one(state, id).await;
+        tally(state, &mut stats, collect::EXPIRE_COLLECTIONS, id, result).await;
+    }
+    Ok(stats)
 }
 
 // ------------------------------------------------------------- 4. auto-release

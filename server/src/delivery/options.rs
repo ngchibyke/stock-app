@@ -20,6 +20,9 @@
 //!   The address codes of the branch and of the buyer's address are fetched lazily
 //!   and cached on their rows. At most the three cheapest rates (by what the courier
 //!   charges) are offered.
+//! - Collect (7e-1, task 10) is offered, at fee 0, when the group's branch has
+//!   `collect_enabled`. Its promised date is the day the order will be ready: the
+//!   ship deadline's date, with no courier pickup ([`collect_ready_date`]).
 //! - Every provider call happens before any transaction is opened; the caches and
 //!   options are written afterwards. A provider failure leaves that group with
 //!   self-delivery only; a group left with no option says `no_delivery_option`.
@@ -57,7 +60,7 @@ use super::{
     addresses::{DeliveryAddress, load_for_checkout},
     allocate::{Line, MAX_GROUPS, allocate, group_fingerprint, load_candidates, merge_lines},
     area::AreaCouncil,
-    promise::{load_holidays, next_pickup_date, promised_date},
+    promise::{collect_ready_date, load_holidays, next_pickup_date, promised_date},
 };
 use crate::{
     AppState, audit,
@@ -99,6 +102,10 @@ pub enum DeliveryMethod {
     #[serde(rename = "self")]
     #[sqlx(rename = "self")]
     SelfDelivery,
+    /// The buyer collects from the branch (fee 0).
+    #[serde(rename = "collect")]
+    #[sqlx(rename = "collect")]
+    Collect,
 }
 
 pub fn router() -> Router<AppState> {
@@ -534,20 +541,22 @@ async fn reusable_courier(
         .collect())
 }
 
-/// The latest unexpired, unused self-delivery option for this buyer, store,
-/// address and group at the branch's current fee, if any.
-async fn reusable_self(
+/// The latest unexpired, unused self-delivery or collect option (`method`) for this
+/// buyer, store, address and group at the branch's current fee, if any.
+#[allow(clippy::too_many_arguments)]
+async fn reusable_own(
     db: &PgPool,
     buyer: Uuid,
     store_id: Uuid,
     address_id: Uuid,
     group: &str,
+    method: DeliveryMethod,
     fee_kobo: i64,
 ) -> Result<Option<OptionView>, AppError> {
     let row: Option<(Uuid, Date)> = sqlx::query_as(&format!(
         "SELECT d.id, d.promised_date FROM delivery_options d \
          WHERE d.buyer_id = $1 AND d.store_id = $2 AND d.address_id = $3 \
-           AND d.group_fingerprint = $4 AND d.method = 'self' AND d.fee_kobo = $5 \
+           AND d.group_fingerprint = $4 AND d.method = $6 AND d.fee_kobo = $5 \
            AND d.expires_at > now() + make_interval(mins => {REUSE_MARGIN_MINUTES}) \
            AND NOT {USED} \
          ORDER BY d.created_at DESC, d.id LIMIT 1"
@@ -557,12 +566,13 @@ async fn reusable_self(
     .bind(address_id)
     .bind(group)
     .bind(fee_kobo)
+    .bind(method)
     .fetch_optional(db)
     .await
-    .context("find reusable self option")?;
+    .context("find reusable own option")?;
     Ok(row.map(|(id, promised)| OptionView {
         id,
-        method: DeliveryMethod::SelfDelivery,
+        method,
         fee_kobo,
         courier_name: None,
         delivery_eta: None,
@@ -639,11 +649,40 @@ async fn plan_group(
     if profile.self_delivery
         && let Some(fee) = profile.self_fee_kobo
     {
-        own = reusable_self(&state.db, buyer, store_id, address_id, &fingerprint, fee).await?;
+        own = reusable_own(
+            &state.db,
+            buyer,
+            store_id,
+            address_id,
+            &fingerprint,
+            DeliveryMethod::SelfDelivery,
+            fee,
+        )
+        .await?;
         if own.is_none() {
             new.push(NewOption {
                 method: DeliveryMethod::SelfDelivery,
                 fee_kobo: fee,
+                rate: None,
+            });
+        }
+    }
+    let mut collect = None;
+    if profile.collect {
+        collect = reusable_own(
+            &state.db,
+            buyer,
+            store_id,
+            address_id,
+            &fingerprint,
+            DeliveryMethod::Collect,
+            0,
+        )
+        .await?;
+        if collect.is_none() {
+            new.push(NewOption {
+                method: DeliveryMethod::Collect,
+                fee_kobo: 0,
                 rate: None,
             });
         }
@@ -656,6 +695,7 @@ async fn plan_group(
     }
     let needs_quote = courier && reused.is_empty();
     reused.extend(own);
+    reused.extend(collect);
     Ok(GroupPlan {
         lines,
         fingerprint,
@@ -680,6 +720,7 @@ pub async fn options_for(
     let now = OffsetDateTime::now_utc();
     let promised = promised_date(now, settings.delivery_cutoff_minutes, &holidays);
     let pickup = next_pickup_date(now, settings.delivery_cutoff_minutes, &holidays);
+    let ready = collect_ready_date(now, settings.ship_deadline_hours);
 
     // Which branches send what, and what each group offers; a still-valid courier
     // quote is reused, not re-asked. Plain reads: nothing is locked here.
@@ -843,6 +884,11 @@ pub async fn options_for(
                         (Some(token.as_str()), Some(rate), Some(*sender))
                     }
                     None => (None, None, None),
+                };
+                let promised = if o.method == DeliveryMethod::Collect {
+                    ready
+                } else {
+                    promised
                 };
                 let id: Uuid = sqlx::query_scalar(
                     "INSERT INTO delivery_options \
@@ -1125,6 +1171,7 @@ pub async fn still_offered(
             DeliveryMethod::SelfDelivery => {
                 profile.self_delivery && profile.self_fee_kobo.is_some()
             }
+            DeliveryMethod::Collect => profile.collect,
             DeliveryMethod::Courier => {
                 state.courier.is_some()
                     && courier_offered(&profile)
@@ -1167,6 +1214,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(DeliveryMethod::Courier).unwrap(),
             "courier"
+        );
+        assert_eq!(
+            serde_json::to_value(DeliveryMethod::Collect).unwrap(),
+            "collect"
         );
     }
 }

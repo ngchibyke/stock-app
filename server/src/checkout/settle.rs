@@ -23,7 +23,8 @@
 //!
 //!    Paid: checkout and orders `paid`, deadlines and the payout fee schedule
 //!    snapshotted from the settings, each delivery order's `promised_date`
-//!    recomputed from `paid_at` (never earlier than the date shown at checkout),
+//!    recomputed from `paid_at` (never earlier than the date shown at checkout;
+//!    a collect order's is the day it will be ready, the ship deadline's date),
 //!    provider fee split across orders (each order's seller part on its items
 //!    and any self-delivery fee, the platform's part on a courier fee), ledger
 //!    `buyer_funds -T`, `escrow +T` per order, provider hold ->
@@ -47,7 +48,7 @@ use crate::{
     AppState, audit,
     delivery::{
         options::QUOTE_REUSED,
-        promise::{load_holidays, promised_date},
+        promise::{collect_ready_date, load_holidays, promised_date},
     },
     error::AppError,
     escrow::refund::{begin_refund, send_refund},
@@ -253,6 +254,7 @@ async fn apply(
         .await
         .map_err(db_err("read transaction time"))?;
     let promised = promised_date(paid_at, settings.delivery_cutoff_minutes, &holidays);
+    let ready = collect_ready_date(paid_at, settings.ship_deadline_hours);
 
     // product_variants (id order) -> branch_stock -> checkouts -> orders.
     let items = lock_reserved(&mut tx, checkout_id).await?;
@@ -423,6 +425,8 @@ async fn apply(
                     fee_small_kobo = $5, fee_large_kobo = $6, fee_threshold_kobo = $7, \
                     stamp_duty_kobo = $8, stamp_duty_threshold_kobo = $9, \
                     promised_date = CASE WHEN delivery_method IS NULL THEN NULL \
+                                         WHEN delivery_method = 'collect' \
+                                              THEN GREATEST(promised_date, $12) \
                                          ELSE GREATEST(promised_date, $10) END \
              WHERE id = $1",
         )
@@ -437,6 +441,7 @@ async fn apply(
         .bind(fees.stamp_duty_threshold)
         .bind(promised)
         .bind(parts[1])
+        .bind(ready)
         .execute(&mut *tx)
         .await
         .map_err(db_err("mark order paid"))?;

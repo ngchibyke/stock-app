@@ -13,6 +13,11 @@
 //!   after delivery; the courier's tracking link when it is https, also not
 //!   after delivery, since the courier's page may show the rider's details; the
 //!   handover code only while `out_for_delivery`.
+//! - **Collect** (7e-1, task 10): the buyer sees the branch's name, pickup address
+//!   and business phone (`pickup`) once paid and until the order is collected or
+//!   cancelled, and the handover code once the branch has marked it ready. The
+//!   branch sees no buyer contact at all (nor the buyer's area): the order view
+//!   carries the buyer's display name, never a phone.
 //! - **Seller** sees `delivery_area` only, except on a self-delivery order that
 //!   is `out_for_delivery`: then the buyer's recipient name, phone, address line
 //!   and landmark, decrypted from the order's address snapshot. A courier order
@@ -119,6 +124,23 @@ pub struct TrackingView {
     /// Seller only, self-delivery, while out for delivery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buyer_contact: Option<BuyerContact>,
+    /// Buyer only, collect, once paid and until collected or cancelled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup: Option<PickupPoint>,
+}
+
+/// Where a buyer collects a paid collect order: the branch's own business details.
+#[derive(Serialize)]
+pub struct PickupPoint {
+    pub branch_name: String,
+    pub address: String,
+    pub phone: Option<String>,
+}
+
+impl std::fmt::Debug for PickupPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PickupPoint(<redacted>)")
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,6 +177,10 @@ impl Facts {
 
     fn is_courier(&self) -> bool {
         self.delivery_method.as_deref() == Some("courier")
+    }
+
+    fn is_collect(&self) -> bool {
+        self.delivery_method.as_deref() == Some("collect")
     }
 }
 
@@ -223,6 +249,7 @@ pub async fn get(state: &AppState, viewer: Uuid, order_id: Uuid) -> Result<Track
         held: None,
         delivery_area: None,
         buyer_contact: None,
+        pickup: None,
     };
 
     let kind = match who {
@@ -236,16 +263,24 @@ pub async fn get(state: &AppState, viewer: Uuid, order_id: Uuid) -> Result<Track
                 reveal_delivery_contact(&state.db, &state.cipher, &facts, shipment.as_ref())
                     .await?;
             view.tracking_url = tracking_url(&facts, shipment.as_ref());
+            view.pickup = reveal_pickup_point(&state.db, &state.cipher, &facts).await?;
             if handover_code_visible(&facts)
                 && let Some(enc) = &facts.handover_code_enc
             {
                 view.handover_code = Some(state.cipher.decrypt(enc)?);
                 view.handover_note = Some(HANDOVER_NOTE);
             }
-            view.contact.is_some().then_some("delivery_contact")
+            if view.pickup.is_some() {
+                Some("pickup_point")
+            } else {
+                view.contact.is_some().then_some("delivery_contact")
+            }
         }
         Viewer::Seller => {
-            view.delivery_area = facts.delivery_area;
+            // A branch handing an order over at its counter needs no buyer area.
+            view.delivery_area = (!facts.is_collect())
+                .then_some(facts.delivery_area)
+                .flatten();
             view.held = facts.held.then_some(true);
             view.buyer_contact = reveal_buyer_contact(&state.cipher, &facts)?;
             view.buyer_contact.is_some().then_some("buyer_contact")
@@ -282,8 +317,8 @@ fn steps(f: &Facts) -> Vec<Step> {
             label,
             at: match key {
                 "paid" => f.paid_at,
-                // Only a courier order has a ready step; a self order is never "ready".
-                "preparing" if f.is_courier() => f.ready_at,
+                // Courier and collect orders have a ready step; a self order is never "ready".
+                "preparing" if f.is_courier() || f.is_collect() => f.ready_at,
                 "preparing" => None,
                 "picked_up" => f.picked_up_at,
                 "out_for_delivery" => f.out_for_delivery_at,
@@ -305,7 +340,8 @@ fn delay_note(f: &Facts, now: OffsetDateTime) -> Option<String> {
 }
 
 fn handover_code_visible(f: &Facts) -> bool {
-    f.is_self() && f.status == "out_for_delivery"
+    (f.is_self() && f.status == "out_for_delivery")
+        || (f.is_collect() && f.status == "paid" && f.ready_at.is_some())
 }
 
 /// https only, and only until delivery, like the courier's contact.
@@ -395,6 +431,37 @@ async fn branch_phone(
     .await
     .context("load store phone")?;
     enc.flatten().map(|b| cipher.decrypt(&b)).transpose()
+}
+
+/// The one place a collect order's pickup point reaches its buyer: the branch's
+/// name, pickup address and business phone, only while the order is paid and
+/// waiting (never before payment, after collection or once cancelled). A deleted
+/// store or a closed branch has nothing to show.
+async fn reveal_pickup_point(
+    db: &PgPool,
+    cipher: &FieldCipher,
+    f: &Facts,
+) -> Result<Option<PickupPoint>, AppError> {
+    if !(f.is_collect() && f.status == "paid" && f.paid_at.is_some()) {
+        return Ok(None);
+    }
+    let row: Option<(String, Vec<u8>, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT b.name, b.pickup_address_enc, b.business_phone_enc \
+         FROM store_branches b JOIN stores s ON s.id = b.store_id \
+         WHERE b.id = $1 AND s.deleted_at IS NULL AND b.closed_at IS NULL",
+    )
+    .bind(f.branch_id)
+    .fetch_optional(db)
+    .await
+    .context("load pickup point")?;
+    let Some((name, address_enc, phone_enc)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(PickupPoint {
+        branch_name: name,
+        address: cipher.decrypt(&address_enc)?,
+        phone: phone_enc.map(|b| cipher.decrypt(&b)).transpose()?,
+    }))
 }
 
 /// The one place the buyer's contact reaches a seller. Only a self-delivery

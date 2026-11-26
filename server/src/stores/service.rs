@@ -252,6 +252,8 @@ pub struct StoreDelivery {
     pub pickup_area: Option<AreaCouncil>,
     pub pickup_address: String,
     pub pickup_courier_address_code: Option<i64>,
+    /// The branch hands orders over at its counter (`collect_enabled`).
+    pub collect: bool,
 }
 
 impl std::fmt::Debug for StoreDelivery {
@@ -272,6 +274,7 @@ impl std::fmt::Debug for StoreDelivery {
                 "pickup_courier_address_code",
                 &self.pickup_courier_address_code,
             )
+            .field("collect", &self.collect)
             .finish()
     }
 }
@@ -880,11 +883,12 @@ pub async fn branch_delivery_on(
         Option<AreaCouncil>,
         Vec<u8>,
         Option<i64>,
+        bool,
     );
     let row: Row = sqlx::query_as(
         "SELECT b.name, s.delivery_courier, s.delivery_self, b.self_delivery_fee_kobo, \
                 b.business_phone_enc, b.pickup_area_council, b.pickup_address_enc, \
-                b.pickup_courier_address_code \
+                b.pickup_courier_address_code, b.collect_enabled \
          FROM store_branches b JOIN stores s ON s.id = b.store_id \
          WHERE b.id = $1 AND b.closed_at IS NULL AND s.deleted_at IS NULL",
     )
@@ -893,7 +897,7 @@ pub async fn branch_delivery_on(
     .await
     .context("load branch delivery")?
     .ok_or(AppError::NotFound)?;
-    let (name, courier, own, fee, phone_enc, area, address_enc, code) = row;
+    let (name, courier, own, fee, phone_enc, area, address_enc, code, collect) = row;
     Ok(StoreDelivery {
         branch_id,
         branch_name: name,
@@ -907,6 +911,7 @@ pub async fn branch_delivery_on(
         pickup_area: area,
         pickup_address: cipher.decrypt(&address_enc)?,
         pickup_courier_address_code: code,
+        collect,
     })
 }
 

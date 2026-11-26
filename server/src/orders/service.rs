@@ -46,6 +46,8 @@ struct Locked {
     status: String,
     self_delivery: bool,
     courier: bool,
+    /// Collect orders move only through `delivery::collect`.
+    collect: bool,
     ready: bool,
 }
 
@@ -59,6 +61,7 @@ async fn lock_order(conn: &mut PgConnection, order_id: Uuid) -> Result<Locked, A
         "SELECT status::text AS status, \
                 COALESCE(delivery_method = 'self', false) AS self_delivery, \
                 COALESCE(delivery_method = 'courier', false) AS courier, \
+                COALESCE(delivery_method = 'collect', false) AS collect, \
                 ready_at IS NOT NULL AS ready \
          FROM orders WHERE id = $1 FOR UPDATE",
     )
@@ -71,7 +74,7 @@ async fn lock_order(conn: &mut PgConnection, order_id: Uuid) -> Result<Locked, A
 
 /// The one "delivered" write: clears any handover code (single use) and
 /// snapshots the auto-release deadline from the setting at this moment.
-async fn set_delivered(
+pub(crate) async fn set_delivered(
     conn: &mut PgConnection,
     order_id: Uuid,
     at: OffsetDateTime,
@@ -179,6 +182,9 @@ pub(crate) async fn out_for_delivery_in(
     at: OffsetDateTime,
 ) -> Result<bool, AppError> {
     let order = lock_order(conn, order_id).await?;
+    if order.collect {
+        return Err(AppError::Conflict("invalid_order_state"));
+    }
     if order.status == "out_for_delivery" {
         return Ok(false);
     }
@@ -320,8 +326,9 @@ async fn transition(
     to: &'static str,
 ) -> Result<bool, AppError> {
     let order = lock_order(conn, order_id).await?;
-    // Guarded here, under the lock: a self-delivery order needs its code.
-    if to == "delivered" && order.self_delivery {
+    // Guarded here, under the lock: a self-delivery order needs its code, and a
+    // collect order is never picked up or delivered by these steps.
+    if (to == "delivered" && order.self_delivery) || order.collect {
         return Err(AppError::Conflict("invalid_order_state"));
     }
     if order.status == to {

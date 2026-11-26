@@ -1,6 +1,7 @@
 //! Order routes: views, buyer cancel and buyer "received", and the seller's
 //! delivery steps (self-delivery: picked up, out for delivery, delivered with
-//! the buyer's handover code; courier: ready for collection).
+//! the buyer's handover code; courier: ready for collection; collect from a
+//! branch: ready at the counter, then collected with the buyer's handover code).
 
 use anyhow::Context;
 use axum::{
@@ -23,6 +24,7 @@ use super::{
 use crate::{
     AppState, audit,
     auth::{AuthUser, extractor::Role},
+    delivery::collect,
     error::AppError,
     escrow::{ReleaseReason, refund::refund_order, release_order},
     extract::{AppJson, AppQuery},
@@ -321,7 +323,8 @@ struct HandoverBody {
     handover_code: String,
 }
 
-/// Self-delivery: delivered, with the buyer's handover code. Entering it is
+/// Self-delivery or collect: delivered, with the buyer's handover code (the same
+/// lockout either way). Collect: the release clock starts. Self-delivery: entering it is
 /// the buyer's confirmation, so the money is released straight after. If the
 /// release fails (e.g. the order is held), the order stays `delivered` and the
 /// auto-release job covers it.
@@ -332,7 +335,24 @@ async fn delivered(
     AppJson(body): AppJson<HandoverBody>,
 ) -> Result<Json<OrderView>, AppError> {
     let id = parse_id(&id)?;
-    seller_order_by(&state, &user, id, "self").await?;
+    let (_, method) = seller_order(&state, &user, id).await?;
+    match method.as_deref() {
+        Some("self") => {}
+        // Collected at the branch: the release clock starts; nothing is released now.
+        Some("collect") => {
+            collect::collect_with_code(
+                &state.db,
+                &state.cipher,
+                user.id,
+                id,
+                &body.handover_code,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+            return seller_view(&state, &user, id).await;
+        }
+        _ => return Err(AppError::Conflict("invalid_order_state")),
+    }
     let outcome = service::deliver_with_code(
         &state.db,
         &state.cipher,
@@ -361,14 +381,21 @@ async fn delivered(
     seller_view(&state, &user, id).await
 }
 
-/// Courier: the parcel is ready for collection (`ready_at` on a `paid` order).
+/// Courier: the parcel is ready for the courier to collect. Collect: the order is
+/// ready at the branch's counter, and the buyer gets their handover code. Both set
+/// `ready_at` on a `paid` order.
 async fn ready(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<OrderView>, AppError> {
     let id = parse_id(&id)?;
-    seller_order_by(&state, &user, id, "courier").await?;
-    service::mark_ready(&state.db, user.id, id, OffsetDateTime::now_utc()).await?;
+    let (_, method) = seller_order(&state, &user, id).await?;
+    let now = OffsetDateTime::now_utc();
+    match method.as_deref() {
+        Some("courier") => service::mark_ready(&state.db, user.id, id, now).await?,
+        Some("collect") => collect::mark_ready(&state.db, &state.cipher, user.id, id, now).await?,
+        _ => return Err(AppError::Conflict("invalid_order_state")),
+    }
     seller_view(&state, &user, id).await
 }

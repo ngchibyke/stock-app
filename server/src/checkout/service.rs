@@ -11,7 +11,8 @@
 //! stock for its lines; otherwise 409 `allocation_changed` and nothing is reserved:
 //! a checkout never re-routes a line after the buyer saw its price. A line no open
 //! branch can fill whole is 409 `out_of_stock`, first. Each order snapshots its
-//! option (method, fee, courier quote, promised date) and the address, encrypted;
+//! option (method, fee, courier quote, promised date) and the address, encrypted
+//! (not on a collect order: nothing is delivered to it, so no copy is kept);
 //! the checkout total is the items plus every delivery fee. The platform cut is
 //! taken on items only.
 //!
@@ -468,8 +469,10 @@ pub async fn create(
         // The courier quote is what the courier will charge (ruling T6f).
         let courier_quote = match d.method {
             DeliveryMethod::Courier => d.charged_kobo,
-            DeliveryMethod::SelfDelivery => None,
+            DeliveryMethod::SelfDelivery | DeliveryMethod::Collect => None,
         };
+        // Data minimisation: a collect order needs no delivery address.
+        let order_address = (d.method != DeliveryMethod::Collect).then_some(&address_enc);
         let order_id: Uuid = sqlx::query_scalar(
             "INSERT INTO orders (checkout_id, store_id, buyer_id, items_total_kobo, \
                                  platform_cut_bps, platform_cut_kobo, delivery_fee_kobo, \
@@ -490,7 +493,7 @@ pub async fn create(
         .bind(d.fee_kobo)
         .bind(d.method)
         .bind(d.id)
-        .bind(&address_enc)
+        .bind(order_address)
         .bind(delivery_area)
         .bind(d.promised_date)
         .bind(courier_quote.and(d.request_token.as_deref()))

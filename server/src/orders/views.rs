@@ -4,7 +4,8 @@
 //! - [`BuyerOrderView`]: items, totals, status, timestamps, held flag. No
 //!   payout data, and no platform cut (as at checkout).
 //! - [`SellerOrderView`]: the same plus the platform cut, the buyer's display
-//!   name only (no id, phone or address), the expected payout and the
+//!   name only (no id, phone or address; on a collect order too, where the
+//!   branch hands it over in person), the expected payout and the
 //!   payout's status, and who in the store's team did each step (`done_by`,
 //!   from the audit log). Refund mechanics are hidden behind a coarse `cancelled`
 //!   status. The expected payout uses the fee schedule snapshotted on the
@@ -70,11 +71,12 @@ pub struct DoneBy {
 }
 
 /// Seller steps and the audit action that names who did each.
-const STEP_ACTIONS: [(&str, &str); 4] = [
+const STEP_ACTIONS: [(&str, &str); 5] = [
     ("order.ready", "ready"),
     ("order.seller_picked_up", "picked_up"),
     ("order.seller_out_for_delivery", "out_for_delivery"),
     ("order.delivered", "delivered"),
+    ("order.collected", "collected"),
 ];
 
 #[derive(Debug, Serialize)]
@@ -132,7 +134,7 @@ pub struct SellerOrderView {
     pub expected_payout_kobo: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payout: Option<PayoutView>,
-    /// Step (`ready`, `picked_up`, `out_for_delivery`, `delivered`) to the member
+    /// Step (`ready`, `picked_up`, `out_for_delivery`, `delivered`, `collected`) to the member
     /// who did it, where the audit names one. Left out when none does.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub done_by: BTreeMap<&'static str, DoneBy>,

@@ -4,6 +4,7 @@
 pub mod addresses;
 pub mod allocate;
 pub mod area;
+pub mod collect;
 pub mod events;
 pub mod handover;
 pub mod options;

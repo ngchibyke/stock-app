@@ -1,4 +1,4 @@
-//! The sixteen kinds of notice and their fixed copy. Notices store no text:
+//! The nineteen kinds of notice and their fixed copy. Notices store no text:
 //! the title and body come from the kind when they are read or pushed.
 
 use serde::Serialize;
@@ -22,10 +22,13 @@ pub enum Kind {
     ModerationMuted,
     StoreInvite,
     OrderNew,
+    OrderReadyForCollection,
+    CollectReminder,
+    CollectionExpired,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 16] = [
+    pub const ALL: [Kind; 19] = [
         Kind::OrderPaid,
         Kind::OrderPickedUp,
         Kind::OrderOutForDelivery,
@@ -42,6 +45,9 @@ impl Kind {
         Kind::ModerationMuted,
         Kind::StoreInvite,
         Kind::OrderNew,
+        Kind::OrderReadyForCollection,
+        Kind::CollectReminder,
+        Kind::CollectionExpired,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -62,6 +68,9 @@ impl Kind {
             Kind::ModerationMuted => "moderation_muted",
             Kind::StoreInvite => "store_invite",
             Kind::OrderNew => "order_new",
+            Kind::OrderReadyForCollection => "order_ready_for_collection",
+            Kind::CollectReminder => "collect_reminder",
+            Kind::CollectionExpired => "collection_expired",
         }
     }
 
@@ -87,6 +96,9 @@ impl Kind {
             Kind::ModerationMuted => "Posting paused",
             Kind::StoreInvite => "Store team invite",
             Kind::OrderNew => "New order \u{2014} please ship",
+            Kind::OrderReadyForCollection => "Ready to collect",
+            Kind::CollectReminder => "Your order is waiting",
+            Kind::CollectionExpired => "Order not collected",
         }
     }
 
@@ -124,6 +136,15 @@ impl Kind {
                 "A store invited you to join its team. Open the app to accept or decline."
             }
             Kind::OrderNew => "A buyer has paid. Prepare the order for delivery within 48 hours.",
+            Kind::OrderReadyForCollection => {
+                "Your order is ready at the branch. Show your handover code at the counter."
+            }
+            Kind::CollectReminder => {
+                "Your order is ready to collect. If it is not collected in time, it is cancelled and refunded."
+            }
+            Kind::CollectionExpired => {
+                "An order was not collected in time. It has been cancelled and refunded in full."
+            }
         }
     }
 }
@@ -134,7 +155,7 @@ mod tests {
 
     #[test]
     fn kinds_have_the_exact_copy() {
-        let table: [(&str, &str, &str); 16] = [
+        let table: [(&str, &str, &str); 19] = [
             (
                 "order_paid",
                 "Paid \u{2014} please ship",
@@ -215,6 +236,21 @@ mod tests {
                 "New order \u{2014} please ship",
                 "A buyer has paid. Prepare the order for delivery within 48 hours.",
             ),
+            (
+                "order_ready_for_collection",
+                "Ready to collect",
+                "Your order is ready at the branch. Show your handover code at the counter.",
+            ),
+            (
+                "collect_reminder",
+                "Your order is waiting",
+                "Your order is ready to collect. If it is not collected in time, it is cancelled and refunded.",
+            ),
+            (
+                "collection_expired",
+                "Order not collected",
+                "An order was not collected in time. It has been cancelled and refunded in full.",
+            ),
         ];
         for (kind, title, body) in table {
             let k = Kind::parse(kind).unwrap_or_else(|| panic!("unknown kind {kind}"));
@@ -222,6 +258,6 @@ mod tests {
             assert_eq!(k.title(), title);
             assert_eq!(k.body(), body);
         }
-        assert_eq!(Kind::ALL.len(), 16);
+        assert_eq!(Kind::ALL.len(), 19);
     }
 }
