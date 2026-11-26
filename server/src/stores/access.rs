@@ -43,6 +43,9 @@ pub struct Membership {
     pub role: Role,
     /// Only ever set for staff tied to one branch.
     pub branch_id: Option<Uuid>,
+    /// False once that branch has closed: the staff member keeps the store's staff
+    /// rights but no branch's orders or stock until the owner moves them.
+    pub branch_open: bool,
 }
 
 impl Membership {
@@ -65,10 +68,10 @@ impl Membership {
         }
     }
 
-    /// True unless this is staff tied to a different branch.
+    /// True unless this is staff tied to a different branch, or to a closed one.
     pub fn covers_branch(&self, branch: Uuid) -> bool {
         match (self.role, self.branch_id) {
-            (Role::Staff, Some(own)) => own == branch,
+            (Role::Staff, Some(own)) => self.branch_open && own == branch,
             _ => true,
         }
     }
@@ -91,11 +94,12 @@ async fn load_membership(
     user: Uuid,
     deleted_too: bool,
 ) -> Result<Option<Membership>, AppError> {
-    let row: Option<(Uuid, Option<String>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT s.owner_id, m.role::text, m.branch_id \
+    let row: Option<(Uuid, Option<String>, Option<Uuid>, bool)> = sqlx::query_as(
+        "SELECT s.owner_id, m.role::text, m.branch_id, b.closed_at IS NULL \
          FROM stores s \
          LEFT JOIN store_members m \
            ON m.store_id = s.id AND m.user_id = $2 AND m.removed_at IS NULL \
+         LEFT JOIN store_branches b ON b.id = m.branch_id \
          WHERE s.id = $1 AND ($3 OR s.deleted_at IS NULL)",
     )
     .bind(store_id)
@@ -104,7 +108,7 @@ async fn load_membership(
     .fetch_optional(&mut *conn)
     .await
     .context("load store membership")?;
-    let Some((owner, role, branch_id)) = row else {
+    let Some((owner, role, branch_id, branch_open)) = row else {
         return Ok(None);
     };
     let (role, branch_id) = if owner == user {
@@ -121,6 +125,7 @@ async fn load_membership(
         user_id: user,
         role,
         branch_id,
+        branch_open: branch_id.is_none() || branch_open,
     }))
 }
 
@@ -191,12 +196,14 @@ pub fn is_member_sql(user_param: &str) -> String {
 }
 
 /// As [`is_member_sql`], and the user covers the branch in `branch_col`: the owner, a
-/// manager, store-wide staff, or staff tied to that branch.
+/// manager, store-wide staff, or staff tied to that branch while it is open.
 pub fn covers_branch_sql(user_param: &str, branch_col: &str) -> String {
     format!(
         "(s.owner_id = {user_param} OR EXISTS (SELECT 1 FROM store_members sm \
          WHERE sm.store_id = s.id AND sm.user_id = {user_param} AND sm.removed_at IS NULL \
-         AND (sm.role = 'manager' OR sm.branch_id IS NULL OR sm.branch_id = {branch_col})))"
+         AND (sm.role = 'manager' OR sm.branch_id IS NULL \
+              OR (sm.branch_id = {branch_col} AND EXISTS (SELECT 1 FROM store_branches sb \
+                  WHERE sb.id = sm.branch_id AND sb.closed_at IS NULL)))))"
     )
 }
 
@@ -210,6 +217,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             role,
             branch_id,
+            branch_open: true,
         }
     }
 
@@ -273,5 +281,12 @@ mod tests {
         assert!(!tied.can(Action::EditStock(b)));
         assert!(!tied.covers_branch(b));
         assert!(manager.covers_branch(b));
+        // Tied to a branch that has closed: no branch's orders or stock.
+        let closed = Membership {
+            branch_open: false,
+            ..tied
+        };
+        assert!(!closed.can(Action::EditStock(a)) && !closed.can(Action::ActOnOrder(a)));
+        assert!(closed.can(Action::ViewStore) && closed.can(Action::EditProducts));
     }
 }

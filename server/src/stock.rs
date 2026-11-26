@@ -77,17 +77,28 @@ pub async fn lock_counts(
     branch: Uuid,
     variant: Uuid,
 ) -> Result<Counts, AppError> {
-    let open: Option<bool> = sqlx::query_scalar(
-        "SELECT b.closed_at IS NULL FROM product_variants v \
-         JOIN products p ON p.id = v.product_id \
-         JOIN store_branches b ON b.id = $2 AND b.store_id = p.store_id \
+    let store: Option<Uuid> = sqlx::query_scalar(
+        "SELECT p.store_id FROM product_variants v JOIN products p ON p.id = v.product_id \
          WHERE v.id = $1 FOR NO KEY UPDATE OF v",
     )
     .bind(variant)
-    .bind(branch)
     .fetch_optional(&mut *conn)
     .await
     .map_err(db_err("lock variant"))?;
+    // A statement of its own: a statement's snapshot is taken before it waits for a
+    // lock, so reading the branch in the locking one could miss a close
+    // ([`close_branch`]) that committed while this waited.
+    let open: Option<bool> = match store {
+        Some(store) => sqlx::query_scalar(
+            "SELECT closed_at IS NULL FROM store_branches WHERE id = $1 AND store_id = $2",
+        )
+        .bind(branch)
+        .bind(store)
+        .fetch_optional(&mut *conn)
+        .await
+        .context("load branch")?,
+        None => None,
+    };
     let branch_open = open.ok_or_else(|| {
         anyhow::anyhow!("branch {branch} is not a branch of variant {variant}'s store")
     })?;
@@ -203,6 +214,60 @@ pub async fn set_stock(
         return Err(below_reserved());
     }
     apply(conn, branch, variant, stock - row.stock, 0).await
+}
+
+/// Takes a closing branch's counts out of its variants' totals, so they stay the sum
+/// over open branches. The caller has already marked the branch closed in this
+/// transaction (and locked the store, then the branch row).
+///
+/// Locks every variant of the store in id order, then the branch's rows (the lock
+/// order). A checkout reserving at the branch holds a variant lock, so it finishes
+/// first and the caller sees its order afterwards; one that comes after waits for this
+/// transaction and then finds the branch closed. The branch's own rows keep their
+/// counts: a commit or refund of one of its orders still moves only that row.
+pub async fn close_branch(conn: &mut PgConnection, branch: Uuid) -> Result<(), AppError> {
+    let closed: bool =
+        sqlx::query_scalar("SELECT closed_at IS NOT NULL FROM store_branches WHERE id = $1")
+            .bind(branch)
+            .fetch_one(&mut *conn)
+            .await
+            .context("load branch")?;
+    if !closed {
+        return Err(anyhow::anyhow!("close_branch called on open branch {branch}").into());
+    }
+    sqlx::query(
+        "SELECT v.id FROM product_variants v JOIN products p ON p.id = v.product_id \
+         JOIN store_branches b ON b.store_id = p.store_id \
+         WHERE b.id = $1 ORDER BY v.id FOR NO KEY UPDATE OF v",
+    )
+    .bind(branch)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err("lock variants"))?;
+    let rows: Vec<(Uuid, i32, i32)> = sqlx::query_as(
+        "SELECT variant_id, stock, reserved_quantity FROM branch_stock \
+         WHERE branch_id = $1 ORDER BY variant_id FOR UPDATE",
+    )
+    .bind(branch)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err("lock branch stock"))?;
+    for (variant, stock, reserved) in rows {
+        if stock == 0 && reserved == 0 {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE product_variants \
+             SET stock = stock - $2, reserved_quantity = reserved_quantity - $3 WHERE id = $1",
+        )
+        .bind(variant)
+        .bind(stock)
+        .bind(reserved)
+        .execute(&mut *conn)
+        .await
+        .context("update variant totals")?;
+    }
+    Ok(())
 }
 
 /// The count a seller asked for: one number (a store with one open branch), or a

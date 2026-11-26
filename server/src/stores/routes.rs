@@ -17,6 +17,7 @@ use super::{
 use crate::{
     AppState,
     auth::{AuthUser, extractor::bearer_token},
+    delivery::area::AreaCouncil,
     error::AppError,
     extract::AppJson,
 };
@@ -28,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/stores/mine", get(mine))
         .route("/stores/{key}", get(show).patch(update).delete(remove))
         .merge(super::team::router())
+        .merge(super::branches::router())
 }
 
 /// Optional authentication: no credentials means anonymous; bad credentials are still rejected.
@@ -70,9 +72,24 @@ pub(crate) async fn require_seller_or_team(
 #[derive(Debug, Serialize)]
 struct MineView {
     #[serde(flatten)]
-    store: OwnerStore,
+    store: MineStore,
     my_role: String,
     my_branch_id: Option<Uuid>,
+}
+
+/// The owner and managers see the pickup address and delivery details; staff see
+/// what they see of a branch: no address, postcode or phone.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MineStore {
+    Full(OwnerStore),
+    Staff {
+        #[serde(flatten)]
+        store: PublicStore,
+        district: String,
+        plot: Option<String>,
+        pickup_area_council: Option<AreaCouncil>,
+    },
 }
 
 fn parse_id(key: &str) -> Result<Uuid, AppError> {
@@ -108,12 +125,19 @@ async fn mine(
     let views = stores
         .into_iter()
         .map(|m| {
+            let plot = plots.remove(&m.store.id);
+            let store = if m.my_role == "staff" {
+                MineStore::Staff {
+                    store: m.store.public(&*state.objects),
+                    district: m.store.district.clone(),
+                    plot,
+                    pickup_area_council: m.store.pickup_area_council,
+                }
+            } else {
+                MineStore::Full(m.store.owner_view(&state.cipher, &*state.objects, plot)?)
+            };
             Ok(MineView {
-                store: m.store.owner_view(
-                    &state.cipher,
-                    &*state.objects,
-                    plots.remove(&m.store.id),
-                )?,
+                store,
                 my_role: m.my_role,
                 my_branch_id: m.my_branch_id,
             })

@@ -337,7 +337,7 @@ fn slugify(name: &str) -> String {
     }
 }
 
-fn validate_name(name: &str) -> Result<String, AppError> {
+pub(crate) fn validate_name(name: &str) -> Result<String, AppError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(AppError::Validation(
@@ -356,7 +356,7 @@ fn validate_description(description: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_address(address: &str) -> Result<String, AppError> {
+pub(crate) fn validate_address(address: &str) -> Result<String, AppError> {
     let address = address.trim();
     if address.is_empty() || address.chars().count() > 300 {
         return Err(AppError::Validation(
@@ -386,7 +386,7 @@ fn validate_delivery(courier: bool, own: bool) -> Result<(), AppError> {
 }
 
 /// Checks the full delivery state: each method switched on needs its details.
-fn validate_delivery_details(
+pub(crate) fn validate_delivery_details(
     courier: bool,
     own: bool,
     fee: Option<i64>,
@@ -419,7 +419,7 @@ fn validate_delivery_details(
 }
 
 /// Blank means absent.
-fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
+pub(crate) fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
     match raw.trim() {
         "" => Ok(None),
         p => Ok(Some(normalize_postcode(p)?)),
@@ -786,11 +786,13 @@ pub async fn update_store(
     .fetch_one(&mut *tx)
     .await
     .context("update store")?;
-    // The first branch keeps its own copy of the pickup fields; keep it in step.
+    // The first branch keeps its own copy of the pickup fields; keep it in step. It was
+    // named after the store, so it follows a rename while it still carries the old name.
     sqlx::query(
         "UPDATE store_branches SET pickup_address_enc = $2, pickup_area_council = $3, \
                                    pickup_postcode = $4, business_phone_enc = $5, \
-                                   self_delivery_fee_kobo = $6, pickup_courier_address_code = $7 \
+                                   self_delivery_fee_kobo = $6, pickup_courier_address_code = $7, \
+                                   name = CASE WHEN name = $8 THEN $9 ELSE name END \
          WHERE store_id = $1 AND position = 0",
     )
     .bind(id)
@@ -800,6 +802,8 @@ pub async fn update_store(
     .bind(&phone_enc)
     .bind(fee)
     .bind(courier_code)
+    .bind(&current.name)
+    .bind(&name)
     .execute(&mut *tx)
     .await
     .context("update first branch")?;

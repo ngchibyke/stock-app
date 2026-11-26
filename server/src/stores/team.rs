@@ -54,7 +54,7 @@ pub const INVITE_RETENTION_DAYS: i32 = 30;
 pub const PURGE_INVITES: &str = "purge_invites";
 
 /// An invite still open: not answered, not revoked, not expired (alias `i`).
-const LIVE: &str = "i.accepted_at IS NULL AND i.declined_at IS NULL \
+pub(crate) const LIVE: &str = "i.accepted_at IS NULL AND i.declined_at IS NULL \
                     AND i.revoked_at IS NULL AND i.expires_at > now()";
 
 pub fn router() -> axum::Router<AppState> {
