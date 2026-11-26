@@ -31,3 +31,9 @@ Branch: `feat/art-pipeline`. Every task ends with its tests green and a commit i
 ## Checks
 
 From `server/`: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the whole suite with `DATABASE_URL` set. From `app/`: `build_runner`, `dart format`, `flutter analyze`, `flutter test`. Nothing here needs a phone.
+
+## Status
+
+Built on `feat/art-pipeline`: `server/src/art/` (check, build, publish, verify), `put_cached` on the object store, `server art` in `main`, `server/tests/art.rs` (13 tests, including the real binary and the golden file), the Dart contract test `app/test/features/market/art_contract_test.dart`, and the workflow in `server/market/README.md`.
+
+As built, also different from the plan as written: the publish step takes an `Arc<dyn ObjectStore>`, and `verify` reads through a small `Fetch` trait (https in production, the in-memory store in tests).
