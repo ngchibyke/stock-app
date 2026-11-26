@@ -1025,8 +1025,10 @@ pub(crate) fn option_invalid() -> AppError {
 /// Validates each of the checkout's choices against the cart (`store -> its lines`):
 /// a live option, the buyer's own, quoted for this address and for a group whose
 /// lines are still exactly in the cart (its fingerprint is the `group_id`), and not
-/// used yet (see [`USED`]). No variant may be in two chosen groups. Unknown, foreign,
-/// expired, used, mismatched or overlapping choices are 422 `delivery_option_invalid`.
+/// used yet (see [`USED`]). No variant may be in two chosen groups, and no branch may
+/// send two groups of one store (one order per branch). Unknown, foreign, expired,
+/// used, mismatched, overlapping or repeated-branch choices are 422
+/// `delivery_option_invalid`.
 /// Whether the groups cover the cart, and whether their branches still hold the
 /// stock, is for the caller to check under the stock locks. Callers hold the buyer's
 /// users-row lock, which serialises this check against the buyer's other checkouts.
@@ -1056,6 +1058,7 @@ pub async fn chosen_groups(
     .map(|r| (r.id, r))
     .collect();
     let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut branches: HashSet<(Uuid, Uuid)> = HashSet::new();
     let mut chosen = Vec::with_capacity(choices.len());
     for c in choices {
         let row = rows.remove(&c.option_id).ok_or_else(option_invalid)?;
@@ -1075,7 +1078,8 @@ pub async fn chosen_groups(
             && !variant_ids.is_empty()
             && group_lines.len() == variant_ids.len()
             && group_fingerprint(row.branch_id, &group_lines) == c.group_id
-            && variant_ids.iter().all(|v| seen.insert(*v));
+            && variant_ids.iter().all(|v| seen.insert(*v))
+            && branches.insert((row.store_id, row.branch_id));
         if !valid {
             return Err(option_invalid());
         }

@@ -720,3 +720,47 @@ async fn branch_close_and_checkout_serialise(pool: PgPool) {
         i32::from(res.status == 201)
     );
 }
+
+/// Two options for the same branch, quoted in separate calls for different lines,
+/// would each pass alone but make two orders at one branch: refused before anything
+/// is reserved.
+#[sqlx::test]
+async fn two_groups_from_one_branch_refused(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = shop(&app, 5).await;
+    let branch = first_branch(&app, l.store_id).await;
+    let other = second_variant(&app, &l).await;
+    set_stock(&app, &l, branch, other, 5).await;
+    let (_, buyer) = app.sign_up_verified(BUYER).await;
+
+    // Quote the first line alone, then the second line alone.
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let (address, first) = options(&app, &buyer).await;
+    let a = choice(&groups(&first)[0], "self");
+    app.set_cart(&buyer, l.variant_id, 0).await;
+    app.set_cart(&buyer, other, 1).await;
+    let (_, second) = options(&app, &buyer).await;
+    let b = choice(&groups(&second)[0], "self");
+    assert_eq!(branch_of(&groups(&first)[0]), branch);
+    assert_eq!(branch_of(&groups(&second)[0]), branch);
+    assert_ne!(a.0, b.0);
+
+    // Both lines back in the cart: each option still matches its own line.
+    app.set_cart(&buyer, l.variant_id, 1).await;
+    let before = (
+        reserved_at(&app, l.variant_id).await,
+        reserved_at(&app, other).await,
+    );
+    let res = app.checkout_with(&buyer, METHOD, address, &[a, b]).await;
+    assert_eq!(res.status, 422, "{}", res.json);
+    assert_eq!(code_of(&res), "delivery_option_invalid");
+    assert_eq!(
+        (
+            reserved_at(&app, l.variant_id).await,
+            reserved_at(&app, other).await
+        ),
+        before
+    );
+    assert_eq!(before.0, vec![(branch, 0)]);
+    assert_eq!(order_count(&app).await, 0);
+}
