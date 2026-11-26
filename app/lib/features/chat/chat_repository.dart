@@ -135,37 +135,76 @@ class WebChatSocket implements ChatSocket {
   final Future<String?> Function() readToken;
 
   @override
-  Stream<ChatFrame> frames({void Function()? onOpen}) async* {
-    final token = await readToken();
-    if (token == null) return;
-    final base = Uri.parse(baseUrl);
-    final uri = base.replace(
-      scheme: base.scheme == 'https' ? 'wss' : 'ws',
-      path: '/chats/ws',
-    );
-    // The bearer header, never the URL: a token in a URL ends up in logs.
-    final channel = IOWebSocketChannel.connect(
-      uri,
-      headers: {'Authorization': 'Bearer $token'},
-      pingInterval: const Duration(seconds: 25),
-    );
-    try {
-      await channel.ready;
-      onOpen?.call();
-      await for (final raw in channel.stream) {
-        if (raw is! String) continue;
-        Object? json;
-        try {
-          json = jsonDecode(raw);
-        } on FormatException {
-          continue;
-        }
-        final frame = ChatFrame.fromJson(json);
-        if (frame != null) yield frame;
-      }
-    } finally {
-      unawaited(channel.sink.close());
+  Stream<ChatFrame> frames({void Function()? onOpen}) {
+    IOWebSocketChannel? channel;
+    StreamSubscription<Object?>? inner;
+    late final StreamController<ChatFrame> out;
+
+    Future<void> close() async {
+      final i = inner;
+      inner = null;
+      await i?.cancel();
+      final c = channel;
+      channel = null;
+      if (c != null) unawaited(c.sink.close());
     }
+
+    Future<void> run() async {
+      final token = await readToken();
+      if (token == null || out.isClosed) {
+        if (!out.isClosed) await out.close();
+        return;
+      }
+      final base = Uri.parse(baseUrl);
+      final uri = base.replace(
+        scheme: base.scheme == 'https' ? 'wss' : 'ws',
+        path: '/chats/ws',
+      );
+      // The bearer header, never the URL: a token in a URL ends up in logs.
+      final c = IOWebSocketChannel.connect(
+        uri,
+        headers: {'Authorization': 'Bearer $token'},
+        pingInterval: const Duration(seconds: 25),
+      );
+      channel = c;
+      try {
+        await c.ready;
+      } on Object catch (e, st) {
+        if (!out.isClosed) out.addError(e, st);
+        await close();
+        if (!out.isClosed) await out.close();
+        return;
+      }
+      if (out.isClosed) return close();
+      onOpen?.call();
+      inner = c.stream.listen(
+        (raw) {
+          if (raw is! String) return;
+          Object? json;
+          try {
+            json = jsonDecode(raw);
+          } on FormatException {
+            return;
+          }
+          final frame = ChatFrame.fromJson(json);
+          if (frame != null && !out.isClosed) out.add(frame);
+        },
+        onError: (Object e, StackTrace st) {
+          if (!out.isClosed) out.addError(e, st);
+        },
+        onDone: () async {
+          await close();
+          if (!out.isClosed) await out.close();
+        },
+      );
+    }
+
+    out = StreamController<ChatFrame>(
+      onListen: () => unawaited(run()),
+      // Cancelling closes the connection now, not at the next frame.
+      onCancel: close,
+    );
+    return out.stream;
   }
 }
 
