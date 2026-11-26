@@ -71,7 +71,7 @@ async fn invite_notices(app: &TestApp) -> Vec<Uuid> {
 /// The owner invites `phone` as `role`; the invitee (who must have an account)
 /// accepts. Returns the invitee's id and token.
 async fn join(app: &TestApp, owner: &str, store: Uuid, phone: &str, role: &str) -> (Uuid, String) {
-    let (id, token) = app.sign_up_verified(phone).await;
+    let (id, token) = app.sign_up_cleared(phone).await;
     let inv = id_of(&invite(app, owner, store, json!({ "phone": phone, "role": role })).await);
     let res = answer(app, &token, &inv, "accept").await;
     assert_eq!(res.status, 200, "{}", res.json);

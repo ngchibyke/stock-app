@@ -46,6 +46,9 @@ pub struct Membership {
     /// False once that branch has closed: the staff member keeps the store's staff
     /// rights but no branch's orders or stock until the owner moves them.
     pub branch_open: bool,
+    /// The member has passed the identity check. Owners are held back at the store
+    /// instead; managers and staff need it to act on orders or edit stock.
+    pub identity_passed: bool,
 }
 
 impl Membership {
@@ -94,8 +97,11 @@ async fn load_membership(
     user: Uuid,
     deleted_too: bool,
 ) -> Result<Option<Membership>, AppError> {
-    let row: Option<(Uuid, Option<String>, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT s.owner_id, m.role::text, m.branch_id, b.closed_at IS NULL \
+    #[allow(clippy::type_complexity)]
+    let row: Option<(Uuid, Option<String>, Option<Uuid>, bool, bool)> = sqlx::query_as(
+        "SELECT s.owner_id, m.role::text, m.branch_id, b.closed_at IS NULL, \
+                EXISTS (SELECT 1 FROM identity_checks ic \
+                        WHERE ic.user_id = $2 AND ic.status = 'passed') \
          FROM stores s \
          LEFT JOIN store_members m \
            ON m.store_id = s.id AND m.user_id = $2 AND m.removed_at IS NULL \
@@ -108,7 +114,7 @@ async fn load_membership(
     .fetch_optional(&mut *conn)
     .await
     .context("load store membership")?;
-    let Some((owner, role, branch_id, branch_open)) = row else {
+    let Some((owner, role, branch_id, branch_open, identity_passed)) = row else {
         return Ok(None);
     };
     let (role, branch_id) = if owner == user {
@@ -126,6 +132,7 @@ async fn load_membership(
         role,
         branch_id,
         branch_open: branch_id.is_none() || branch_open,
+        identity_passed,
     }))
 }
 
@@ -155,6 +162,11 @@ pub async fn require_even_if_deleted(
 fn check(member: Option<Membership>, action: Action) -> Result<Membership, AppError> {
     let member = member.ok_or(AppError::NotFound)?;
     if member.can(action) {
+        // Order actions and stock edits wait for a member's identity check.
+        let acts = matches!(action, Action::EditStock(_) | Action::ActOnOrder(_));
+        if acts && member.role != Role::Owner && !member.identity_passed {
+            return Err(AppError::Forbidden("identity_required"));
+        }
         Ok(member)
     } else {
         Err(AppError::Forbidden("not_allowed"))
@@ -218,6 +230,7 @@ mod tests {
             role,
             branch_id,
             branch_open: true,
+            identity_passed: true,
         }
     }
 

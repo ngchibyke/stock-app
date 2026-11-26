@@ -219,14 +219,18 @@ async fn lock_store(
     status.ok_or(AppError::NotFound)
 }
 
-/// Active <-> pending follows the account; a suspended store is never touched.
-async fn sync_store_status(
+/// Active <-> pending follows the payout account and the owner's identity check; a
+/// suspended store is never touched.
+pub(crate) async fn sync_store_status(
     tx: &mut Transaction<'_, Postgres>,
     layout: &Layout,
     id: Uuid,
     current: &str,
     verified: bool,
 ) -> Result<(), AppError> {
+    // A store takes orders only once its owner has passed the identity check (or is
+    // inside the grace period existing stores were given).
+    let verified = verified && crate::identity::service::store_clear(tx, id).await?;
     let next = match (current, verified) {
         ("pending", true) => "active",
         ("active", false) => "pending",
@@ -445,6 +449,11 @@ pub async fn set_account(
     .fetch_one(&mut *tx)
     .await
     .context("upsert payout account")?;
+    // A verified name that is not the owner's verified name sends the identity check
+    // back to review before the store status is worked out.
+    if let (true, Some(name)) = (decision.verified, decision.name.as_deref()) {
+        crate::identity::service::recheck_payout_name(&mut tx, state, owner, name).await?;
+    }
     sync_store_status(
         &mut tx,
         &state.market,
@@ -569,6 +578,12 @@ pub async fn owner_verify(
     .fetch_one(&mut *tx)
     .await
     .context("verify payout account")?;
+    let store_owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM stores WHERE id = $1")
+        .bind(store_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("read store owner")?;
+    crate::identity::service::recheck_payout_name(&mut tx, state, store_owner, name).await?;
     sync_store_status(&mut tx, &state.market, store_id, &store_status, true).await?;
     audit::record(
         &mut tx,

@@ -344,7 +344,7 @@ async fn plain_stock_refused_with_two_branches(pool: PgPool) {
 async fn staff_sets_stock_only_at_own_branch(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let (l, a, b) = two_branch_listing(&app, 3, 2).await;
-    let (staff, staff_token) = app.sign_up_verified("08033333331").await;
+    let (staff, staff_token) = app.sign_up_cleared("08033333331").await;
     sqlx::query(
         "INSERT INTO store_members (store_id, user_id, role, branch_id, added_by) \
          VALUES ($1, $2, 'staff', $3, $4)",

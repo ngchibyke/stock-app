@@ -31,6 +31,7 @@ pub mod alerts;
 pub mod audit_view;
 pub mod disputes;
 pub mod holidays;
+pub mod identity;
 pub mod moderation;
 pub mod money;
 pub mod order_search;

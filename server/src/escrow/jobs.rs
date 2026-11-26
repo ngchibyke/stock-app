@@ -89,6 +89,12 @@
 //! 19. `collect_reminders`: the buyer's day-1 and day-4 "your order is waiting"
 //!     notices, once each
 //!     -> [`collect::send_reminders`](crate::delivery::collect::send_reminders).
+//! 20. `identity_attempts`: polls the identity provider for attempts with no webhook
+//!     after a few minutes, and closes attempts abandoned for 30 minutes
+//!     -> [`identity::jobs::run_attempts`](crate::identity::jobs::run_attempts).
+//! 21. `identity_grace`: stores past their identity grace period with an unverified
+//!     owner go `pending` (plot kept); owners inside it get a weekly reminder
+//!     -> [`identity::jobs::run_grace`](crate::identity::jobs::run_grace).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -142,6 +148,7 @@ use crate::{
     },
     disputes::jobs as dispute_jobs,
     error::AppError,
+    identity::jobs as identity_jobs,
     notify::reminders,
     settings,
     statement::job as statement_job,
@@ -222,6 +229,8 @@ pub struct JobReport {
     pub invites_purged: u32,
     pub collections_expired: u32,
     pub collect_reminders_sent: u32,
+    pub identity_attempts: u32,
+    pub identity_grace: u32,
     pub failed: u32,
 }
 
@@ -249,7 +258,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 19] = [
+    let jobs: [(&str, Job); 21] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -269,6 +278,8 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (team::PURGE_INVITES, Job::PurgeInvites),
         (collect::EXPIRE_COLLECTIONS, Job::ExpireCollections),
         (collect::COLLECT_REMINDERS, Job::CollectReminders),
+        (identity_jobs::IDENTITY_ATTEMPTS, Job::IdentityAttempts),
+        (identity_jobs::IDENTITY_GRACE, Job::IdentityGrace),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -303,6 +314,8 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::PurgeInvites => &mut report.invites_purged,
             Job::ExpireCollections => &mut report.collections_expired,
             Job::CollectReminders => &mut report.collect_reminders_sent,
+            Job::IdentityAttempts => &mut report.identity_attempts,
+            Job::IdentityGrace => &mut report.identity_grace,
         };
         *slot += stats.done;
     }
@@ -341,6 +354,8 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 invites_purged = r.invites_purged,
                 collections_expired = r.collections_expired,
                 collect_reminders = r.collect_reminders_sent,
+                identity_attempts = r.identity_attempts,
+                identity_grace = r.identity_grace,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -395,6 +410,8 @@ enum Job {
     PurgeInvites,
     ExpireCollections,
     CollectReminders,
+    IdentityAttempts,
+    IdentityGrace,
 }
 
 impl Job {
@@ -419,6 +436,8 @@ impl Job {
             Job::PurgeInvites => team::purge_invites(state, cancel).await,
             Job::ExpireCollections => expire_collections(state, cancel).await,
             Job::CollectReminders => collect::send_reminders(state, cancel).await,
+            Job::IdentityAttempts => identity_jobs::run_attempts(state, cancel).await,
+            Job::IdentityGrace => identity_jobs::run_grace(state, cancel).await,
         }
     }
 }

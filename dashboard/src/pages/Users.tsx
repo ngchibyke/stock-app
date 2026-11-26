@@ -10,6 +10,7 @@ import { Badge, Card, EmptyState, ErrorNote, Segmented, StatusBadge, Tabs } from
 import { PageHeader } from "../ui/PageHeader";
 import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 import { Avatar } from "../ui/Controls";
+import { IdentityPanel } from "./Identity";
 
 interface UserRow {
   id: string;
@@ -157,6 +158,7 @@ function UserDrawer({ id, onClose }: { id: string | null; onClose: () => void })
                 )
               )}
             </div>
+            {u.is_seller && <IdentityPanel userId={u.id} owner />}
             <p className="hint">Opening this record is written to the audit log.</p>
           </>
         )}
@@ -164,7 +166,7 @@ function UserDrawer({ id, onClose }: { id: string | null; onClose: () => void })
       <ConfirmDialog
         open={ban}
         title="Ban this user?"
-        summary={<>They are signed out of chat and cannot post. You can lift the ban later.</>}
+        summary={<>They cannot post, their stores are suspended and the NINs they tried are blocked from any other account. You can lift the ban later.</>}
         confirmLabel="Ban"
         danger
         noteLabel="Reason (the user sees this)"
