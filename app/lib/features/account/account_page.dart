@@ -13,6 +13,9 @@ import '../../core/strings.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/states.dart';
 import '../auth/auth_errors.dart';
+import '../buy/buy_strings.dart';
+import '../buy/inbox.dart';
+import '../buy/orders_pages.dart';
 import '../sell/sell_providers.dart';
 import '../sell/sell_shell.dart';
 import '../sell/sell_strings.dart';
@@ -160,6 +163,21 @@ class _AccountPageState extends ConsumerState<AccountPage> {
             icon: Icons.chevron_right,
             onTap: () => pushPage<void>(context, const InvitesPage()),
           ),
+        _LinkRow(
+          label: BuyStrings.myOrders,
+          icon: Icons.chevron_right,
+          onTap: () => pushPage<void>(context, const OrdersPage()),
+        ),
+        _LinkRow(
+          label: (ref.watch(inboxProvider).value?.unread ?? 0) > 0
+              ? '${BuyStrings.inboxTitle} (${ref.watch(inboxProvider).value!.unread})'
+              : BuyStrings.inboxTitle,
+          icon: Icons.chevron_right,
+          onTap: () async {
+            await pushPage<void>(context, const InboxPage());
+            ref.invalidate(inboxProvider);
+          },
+        ),
         _LinkRow(
           label: Strings.addresses,
           icon: Icons.chevron_right,

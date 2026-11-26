@@ -4,6 +4,7 @@ import 'package:market/core/api/api_error.dart';
 import 'package:market/core/format/money.dart';
 import 'package:market/core/paths.dart';
 import 'package:market/core/strings.dart';
+import 'package:market/features/buy/buy_strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/features/cart/cart.dart';
 import 'package:market/features/cart/cart_button.dart';
@@ -143,7 +144,8 @@ void main() {
       ..totalFor = (_) => 2999900;
     await _open(tester, repo);
     expect(find.text(formatNaira(2999900)), findsOneWidget);
-    expect(find.text(Strings.checkoutSoon), findsOneWidget);
+    // Checkout is a real button now.
+    expect(find.text(BuyStrings.checkout), findsOneWidget);
   });
 
   testWidgets('empty_state_leads_to_the_market', (tester) async {

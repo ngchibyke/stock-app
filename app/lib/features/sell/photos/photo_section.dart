@@ -41,6 +41,7 @@ class PhotoSection extends StatelessWidget {
     required this.onGuide,
     required this.onRemove,
     required this.onRetry,
+    this.max = maxProductPhotos,
   });
 
   final List<PhotoEntry> entries;
@@ -50,11 +51,14 @@ class PhotoSection extends StatelessWidget {
   final void Function(int index) onRemove;
   final void Function(int index) onRetry;
 
+  /// The most photos this screen takes (a product 10, a report or review 5).
+  final int max;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = context.tokens;
-    final full = entries.length >= maxProductPhotos;
+    final full = entries.length >= max;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

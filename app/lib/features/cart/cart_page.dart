@@ -10,6 +10,8 @@ import '../../core/strings.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/pressable.dart';
 import '../../core/ui/states.dart';
+import '../buy/buy_strings.dart';
+import '../buy/checkout_page.dart';
 import 'cart.dart';
 import 'cart_repository.dart';
 
@@ -202,11 +204,15 @@ class _Filled extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: Tokens.s2),
-                  Text(
-                    Strings.checkoutSoon,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: tokens.mute,
-                    ),
+                  LoadingButton(
+                    label: BuyStrings.checkout,
+                    onPressed: cart.count == 0
+                        ? null
+                        : () => Navigator.of(context).push<void>(
+                            MaterialPageRoute(
+                              builder: (_) => const CheckoutPage(),
+                            ),
+                          ),
                   ),
                 ],
               ),
