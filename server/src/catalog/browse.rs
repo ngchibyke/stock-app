@@ -23,7 +23,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::{AppState, error::AppError, extract::AppQuery, limits::MAX_PRICE_KOBO};
+use crate::{
+    AppState, error::AppError, extract::AppQuery, limits::MAX_PRICE_KOBO, stock::MAX_AVAILABLE_SQL,
+};
 
 pub const DEFAULT_LIMIT: i64 = 24;
 pub const MAX_LIMIT: i64 = 50;
@@ -278,17 +280,17 @@ pub async fn run(db: &PgPool, q: BrowseQuery) -> Result<Page<ProductCard>, AppEr
     };
     let after = q.cursor.as_deref().map(|c| decode(sort, c)).transpose()?;
 
-    let mut qb = QueryBuilder::<Postgres>::new(
+    let mut qb = QueryBuilder::<Postgres>::new(format!(
         "SELECT * FROM (SELECT p.id, p.name, p.category, p.condition::text AS condition, \
                 p.photo_keys[1] AS photo_key, p.created_at, \
                 COALESCE((SELECT min(COALESCE(v.price_kobo, p.base_price_kobo)) \
                           FROM product_variants v WHERE v.product_id = p.id), \
                          p.base_price_kobo) AS price_from, \
                 EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id \
-                          AND v.stock - v.reserved_quantity > 0) AS in_stock, \
+                          AND {MAX_AVAILABLE_SQL} > 0) AS in_stock, \
                 s.id AS store_id, s.slug AS store_slug, s.name AS store_name, \
-                s.rating_count, s.rating_sum, ",
-    );
+                s.rating_count, s.rating_sum, "
+    ));
     if searching {
         qb.push("(0::float8");
         for (plain, like) in words.plain.iter().zip(&words.like) {

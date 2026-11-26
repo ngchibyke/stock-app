@@ -42,7 +42,7 @@ use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::service::{db_err, lock_reserved};
+use super::service::{Held, db_err, lock_reserved};
 use crate::{
     AppState, audit,
     delivery::{
@@ -55,7 +55,7 @@ use crate::{
     money::split_proportional,
     notify::{kinds::Kind, service as notify},
     payments::PaymentStatus,
-    settings,
+    settings, stock,
 };
 
 /// Longest wait for the provider's verify answer; past it the outcome is "retry later".
@@ -251,7 +251,7 @@ async fn apply(
         .map_err(db_err("read transaction time"))?;
     let promised = promised_date(paid_at, settings.delivery_cutoff_minutes, &holidays);
 
-    // product_variants (id order) -> checkouts -> orders.
+    // product_variants (id order) -> branch_stock -> checkouts -> orders.
     let items = lock_reserved(&mut tx, checkout_id).await?;
     let (status, total_kobo, buyer_id): (String, i64, Uuid) = sqlx::query_as(
         "SELECT status::text, total_kobo, buyer_id FROM checkouts WHERE id = $1 FOR UPDATE",
@@ -351,28 +351,17 @@ async fn apply(
     // Stock: commit the reservation, or (after expiry) take it from what is available.
     let mut refund = false;
     if after_expiry {
-        let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
-        let rows: Vec<(Uuid, i32, i32)> = sqlx::query_as(
-            "SELECT id, stock, reserved_quantity FROM product_variants WHERE id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db_err("load variants"))?;
-        let covered = items.iter().all(|(id, q)| {
-            rows.iter()
-                .any(|(vid, stock, reserved)| vid == id && stock - reserved >= *q)
-        });
-        if covered {
-            for (variant_id, quantity) in &items {
-                sqlx::query("UPDATE product_variants SET stock = stock - $2 WHERE id = $1")
-                    .bind(variant_id)
-                    .bind(quantity)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_err("take stock"))?;
+        // Each line must be free at its own order's branch (already locked).
+        let mut covered = true;
+        for h in &items {
+            if stock::lock_available(&mut tx, h.branch_id, h.variant_id).await? < h.quantity {
+                covered = false;
             }
-            crate::branch_stock::mirror_to_first_branch(&mut tx, &ids).await?;
+        }
+        if covered {
+            for h in &items {
+                stock::apply(&mut tx, h.branch_id, h.variant_id, -h.quantity, 0).await?;
+            }
         } else {
             refund = true;
         }
@@ -554,21 +543,12 @@ async fn flag_reused_quotes(conn: &mut PgConnection, checkout_id: Uuid) -> Resul
     Ok(())
 }
 
-/// Releases a pending checkout's reservation (`reserved_quantity -= q`); the
-/// variants are already locked by the caller.
-async fn release_reserved(conn: &mut PgConnection, items: &[(Uuid, i32)]) -> Result<(), AppError> {
-    for (variant_id, quantity) in items {
-        sqlx::query(
-            "UPDATE product_variants SET reserved_quantity = reserved_quantity - $2 WHERE id = $1",
-        )
-        .bind(variant_id)
-        .bind(quantity)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err("release reservation"))?;
+/// Releases a pending checkout's reservation (`reserved_quantity -= q` at each
+/// order's branch); the rows are already locked by the caller.
+async fn release_reserved(conn: &mut PgConnection, items: &[Held]) -> Result<(), AppError> {
+    for h in items {
+        stock::apply(conn, h.branch_id, h.variant_id, 0, -h.quantity).await?;
     }
-    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
-    crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
     Ok(())
 }
 
@@ -576,9 +556,9 @@ async fn release_reserved(conn: &mut PgConnection, items: &[(Uuid, i32)]) -> Res
 async fn clear_cart_lines(
     conn: &mut PgConnection,
     buyer: Uuid,
-    items: &[(Uuid, i32)],
+    items: &[Held],
 ) -> Result<(), AppError> {
-    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<Uuid> = items.iter().map(|h| h.variant_id).collect();
     sqlx::query("DELETE FROM cart_items WHERE user_id = $1 AND variant_id = ANY($2)")
         .bind(buyer)
         .bind(&ids)

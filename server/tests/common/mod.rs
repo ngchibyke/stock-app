@@ -645,6 +645,36 @@ impl TestApp {
         self.stock(variant_id).await - self.reserved(variant_id).await
     }
 
+    /// Sets a variant's on-hand and reserved counts at its store's first branch
+    /// through the stock module (the only writer, which keeps the variant totals in
+    /// step), as a seller's recount and pending checkouts would leave them. A fixture
+    /// that inserts variants directly inserts them with stock 0, then calls this.
+    pub async fn set_counts(&self, variant_id: Uuid, stock: i32, reserved: i32) {
+        let branch: Uuid = sqlx::query_scalar(
+            "SELECT b.id FROM product_variants v JOIN products p ON p.id = v.product_id \
+             JOIN store_branches b ON b.store_id = p.store_id AND b.position = 0 \
+             WHERE v.id = $1",
+        )
+        .bind(variant_id)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap();
+        let mut tx = self.pool.begin().await.unwrap();
+        let now = server::stock::lock_counts(&mut tx, branch, variant_id)
+            .await
+            .unwrap();
+        server::stock::apply(&mut tx, branch, variant_id, 0, -now.reserved)
+            .await
+            .unwrap();
+        server::stock::set_stock(&mut tx, branch, variant_id, stock)
+            .await
+            .unwrap();
+        server::stock::apply(&mut tx, branch, variant_id, 0, reserved)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
     /// On-hand stock.
     pub async fn stock(&self, variant_id: Uuid) -> i32 {
         sqlx::query_scalar("SELECT stock FROM product_variants WHERE id = $1")

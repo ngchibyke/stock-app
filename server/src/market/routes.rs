@@ -20,6 +20,7 @@ use crate::{
         stores::{Row, card_with_logo},
     },
     error::AppError,
+    stock::MAX_AVAILABLE_SQL,
     stores::{access::is_member_sql, routes::MaybeAuth},
 };
 
@@ -160,9 +161,23 @@ async fn room(
         .context("layout has no fallback room type")?;
     let slots = room_type.slots.len();
 
-    let mut rows: Vec<ProductRow> = sqlx::query_as(
-        "SELECT p.id, p.name, p.category, p.condition::text AS condition,                 p.photo_keys[1] AS photo_key, p.created_at,                 COALESCE((SELECT min(COALESCE(v.price_kobo, p.base_price_kobo))                           FROM product_variants v WHERE v.product_id = p.id),                          p.base_price_kobo) AS price_from,                 true AS in_stock,                 s.id AS store_id, s.slug AS store_slug, s.name AS store_name,                 s.rating_count, s.rating_sum          FROM products p JOIN stores s ON s.id = p.store_id          WHERE s.slug = $1 AND p.is_published AND p.deleted_at IS NULL            AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id                          AND v.stock - v.reserved_quantity > 0)          ORDER BY p.created_at DESC, p.id          LIMIT $2",
-    )
+    // In stock: what one open branch can send (a buyer's line is never split).
+    let mut rows: Vec<ProductRow> = sqlx::query_as(&format!(
+        "SELECT p.id, p.name, p.category, p.condition::text AS condition, \
+                p.photo_keys[1] AS photo_key, p.created_at, \
+                COALESCE((SELECT min(COALESCE(v.price_kobo, p.base_price_kobo)) \
+                          FROM product_variants v WHERE v.product_id = p.id), \
+                         p.base_price_kobo) AS price_from, \
+                true AS in_stock, \
+                s.id AS store_id, s.slug AS store_slug, s.name AS store_name, \
+                s.rating_count, s.rating_sum \
+         FROM products p JOIN stores s ON s.id = p.store_id \
+         WHERE s.slug = $1 AND p.is_published AND p.deleted_at IS NULL \
+           AND EXISTS (SELECT 1 FROM product_variants v WHERE v.product_id = p.id \
+                         AND {MAX_AVAILABLE_SQL} > 0) \
+         ORDER BY p.created_at DESC, p.id \
+         LIMIT $2"
+    ))
     .bind(&slug)
     .bind(slots as i64 + 1)
     .fetch_all(&state.db)

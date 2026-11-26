@@ -180,11 +180,20 @@ async fn db_rejects_values_above_caps(pool: PgPool) {
         .execute(&app.pool)
         .await;
     assert!(price.is_err());
-    let stock = sqlx::query("UPDATE product_variants SET stock = 100001 WHERE product_id = $1")
+    // The stock cap holds per branch; a variant's total is over up to 20 branches.
+    let stock = sqlx::query(
+        "UPDATE branch_stock SET stock = 100001 \
+         WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id = $1)",
+    )
+    .bind(id)
+    .execute(&app.pool)
+    .await;
+    assert!(stock.is_err());
+    let total = sqlx::query("UPDATE product_variants SET stock = 2000001 WHERE product_id = $1")
         .bind(id)
         .execute(&app.pool)
         .await;
-    assert!(stock.is_err());
+    assert!(total.is_err());
     let vprice =
         sqlx::query("UPDATE product_variants SET price_kobo = 1000000001 WHERE product_id = $1")
             .bind(id)

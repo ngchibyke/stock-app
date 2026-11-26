@@ -484,8 +484,15 @@ impl Team {
         )
     }
 
+    /// Its stock is at the maker's own branch (B for staff at B, else A): with two
+    /// open branches stock is per branch, and staff count only their own.
     async fn new_product_body(&self, who: usize) -> Value {
         let photo = self.app.ready_photo_for(&self.tokens[who], "product").await;
+        let branch = if who == STAFF_B {
+            self.branch_b
+        } else {
+            self.branch_a
+        };
         json!({
             "name": "Adire Scarf",
             "description": "Hand dyed",
@@ -494,7 +501,7 @@ impl Team {
             "photo_keys": [photo],
             "weight_grams": 200,
             "base_price_kobo": 8_000,
-            "variants": [{ "attributes": {}, "stock": 3 }]
+            "variants": [{ "attributes": {}, "stock": { branch.to_string(): 3 } }]
         })
     }
 
@@ -703,19 +710,29 @@ async fn seller_route_permission_matrix(pool: PgPool) {
     .await;
     let stock = t.app.stock(t.variant).await;
     let variants = format!("{live}/variants");
-    // Same variants at the same prices, new stock: staff may.
+    // Two open branches: stock is given per branch. All of it is at A.
+    let at_a = |n: i32| json!({ t.branch_a.to_string(): n });
+    // Same variants at the same prices, new stock at A: staff who cover A may.
     t.check(
         Method::PUT,
         &variants,
-        Some(json!([{ "attributes": {}, "stock": stock + 1 }])),
-        &[(WIDE, 200), (STAFF_A, 200), (REMOVED, 404), (STRANGER, 404)],
+        Some(json!([{ "attributes": {}, "stock": at_a(stock + 1) }])),
+        // Staff at B first: once A holds the new count, restating it is no change.
+        &[
+            (STAFF_B, 403),
+            (WIDE, 200),
+            (STAFF_A, 200),
+            (REMOVED, 404),
+            (STRANGER, 404),
+        ],
     )
     .await;
+    let stock = stock + 1;
     for body in [
-        json!([{ "attributes": {}, "stock": stock, "price_kobo": 15_000 }]),
+        json!([{ "attributes": {}, "stock": at_a(stock), "price_kobo": 15_000 }]),
         json!([
-            { "attributes": { "size": "M" }, "stock": stock },
-            { "attributes": { "size": "L" }, "stock": 1 }
+            { "attributes": { "size": "M" }, "stock": at_a(stock) },
+            { "attributes": { "size": "L" }, "stock": at_a(1) }
         ]),
     ] {
         t.check(
@@ -729,7 +746,7 @@ async fn seller_route_permission_matrix(pool: PgPool) {
     t.check(
         Method::PUT,
         &variants,
-        Some(json!([{ "attributes": {}, "stock": stock, "price_kobo": 15_000 }])),
+        Some(json!([{ "attributes": {}, "stock": at_a(stock), "price_kobo": 15_000 }])),
         &[(MANAGER, 200)],
     )
     .await;
@@ -744,14 +761,16 @@ async fn seller_route_permission_matrix(pool: PgPool) {
         &[(STAFF_A, 200), (WIDE, 200), (STRANGER, 404)],
     )
     .await;
+    // The draft's stock is at A, so replacing its variants changes A's stock:
+    // staff at A may, staff at B may not (task 5 closed this gap; it was 200).
     t.check(
         Method::PUT,
         &format!("{draft_path}/variants"),
         Some(json!([
-            { "attributes": { "size": "M" }, "stock": 1, "price_kobo": 9_500 },
-            { "attributes": { "size": "L" }, "stock": 1 }
+            { "attributes": { "size": "M" }, "stock": at_a(1), "price_kobo": 9_500 },
+            { "attributes": { "size": "L" }, "stock": at_a(1) }
         ])),
-        &[(STAFF_B, 200)],
+        &[(STAFF_B, 403), (STAFF_A, 200)],
     )
     .await;
     t.check(

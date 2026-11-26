@@ -44,6 +44,7 @@ use crate::{
     limits::MAX_STOCK,
     notify::{kinds::Kind, service as notify},
     payments::{self, ProviderError, RefundRequest},
+    stock,
 };
 
 const REFERENCE_PREFIX: &str = "RF";
@@ -188,8 +189,17 @@ async fn begin(
     reason: &str,
     owner: bool,
 ) -> Result<Begun, AppError> {
-    // (variant, quantity, on-hand stock under the lock)
+    // (variant, quantity, on-hand stock at the order's branch under the locks)
+    let mut branch = None;
     let items: Vec<(Uuid, i32, i32)> = if restore_stock {
+        // An order's branch never changes, so it is read before the order lock.
+        let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .context("load order branch")?
+            .ok_or(AppError::NotFound)?;
+        branch = Some(branch_id);
         let items: Vec<(Uuid, i32)> = sqlx::query_as(
             "SELECT variant_id, quantity FROM order_items WHERE order_id = $1 ORDER BY variant_id",
         )
@@ -198,21 +208,20 @@ async fn begin(
         .await
         .context("load order items")?;
         let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
-        let stocks: Vec<(Uuid, i32)> = sqlx::query_as(
-            "SELECT id, stock FROM product_variants WHERE id = ANY($1) \
-             ORDER BY id FOR NO KEY UPDATE",
+        sqlx::query(
+            "SELECT id FROM product_variants WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE",
         )
         .bind(&ids)
         .fetch_all(&mut *conn)
         .await
         .map_err(db_err("lock variants"))?;
-        items
-            .into_iter()
-            .map(|(id, q)| {
-                let stock = stocks.iter().find(|(v, _)| *v == id).map_or(0, |(_, s)| *s);
-                (id, q, stock)
-            })
-            .collect()
+        // Then the branch rows (lock order), with what each holds on hand.
+        let mut out = Vec::with_capacity(items.len());
+        for (id, q) in items {
+            let on_hand = stock::lock_counts(conn, branch_id, id).await?.stock;
+            out.push((id, q, on_hand));
+        }
+        out
     } else {
         Vec::new()
     };
@@ -278,23 +287,18 @@ async fn begin(
     .await
     .context("mark refund pending")?;
     shipments::on_refund(conn, order_id).await?;
-    // Units back on hand, clamped at the stock cap (the seller may have
-    // restocked meanwhile); the clamped units are recorded in the audit row.
+    // Units back on hand at the order's branch, clamped at the stock cap (the
+    // seller may have restocked meanwhile); the clamped units are recorded in the
+    // audit row.
     let mut clamped_units: i64 = 0;
-    for (variant_id, quantity, stock) in items.iter().filter(|_| restore) {
-        let wanted = i64::from(*stock) + i64::from(*quantity);
-        clamped_units += (wanted - i64::from(MAX_STOCK)).max(0);
-        sqlx::query("UPDATE product_variants SET stock = LEAST(stock + $2, $3) WHERE id = $1")
-            .bind(variant_id)
-            .bind(quantity)
-            .bind(MAX_STOCK)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err("restore stock"))?;
-    }
-    if restore {
-        let ids: Vec<Uuid> = items.iter().map(|(id, _, _)| *id).collect();
-        crate::branch_stock::mirror_to_first_branch(conn, &ids).await?;
+    if let (true, Some(branch)) = (restore, branch) {
+        for (variant_id, quantity, on_hand) in &items {
+            let wanted = i64::from(*on_hand) + i64::from(*quantity);
+            let clamped = (wanted - i64::from(MAX_STOCK)).max(0);
+            clamped_units += clamped;
+            let back = i32::try_from(i64::from(*quantity) - clamped).context("restore range")?;
+            stock::apply(conn, branch, *variant_id, back, 0).await?;
+        }
     }
     let reference = payments::new_reference(REFERENCE_PREFIX);
     let refund_id: Uuid = sqlx::query_scalar(

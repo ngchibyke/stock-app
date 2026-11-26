@@ -7,7 +7,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    error::AppError, limits::MAX_LINE_QUANTITY, money::checked_sum, products,
+    error::AppError,
+    limits::MAX_LINE_QUANTITY,
+    money::checked_sum,
+    products,
+    stock::{self, MAX_AVAILABLE_SQL},
     stores::access::is_member_sql,
 };
 
@@ -28,6 +32,9 @@ pub struct CartLine {
     pub store_name: String,
     pub unit_price_kobo: i64,
     pub quantity: i32,
+    /// The most this line may hold now: what one branch can send (a line is never
+    /// split across branches). Checkout rechecks it under the stock locks.
+    pub max_quantity: i64,
     pub line_total_kobo: i64,
     /// False when the product was unpublished or its store is not active; such
     /// lines stay in the cart but are left out of `total_kobo` and block checkout.
@@ -52,6 +59,7 @@ struct LineRow {
     base_price_kobo: i64,
     price_kobo: Option<i64>,
     quantity: i32,
+    max_quantity: i64,
     available: bool,
 }
 
@@ -63,7 +71,7 @@ pub async fn get(db: &PgPool, user: Uuid) -> Result<Cart, AppError> {
     let rows: Vec<LineRow> = sqlx::query_as(&format!(
         "SELECT c.variant_id, p.id AS product_id, p.name AS product_name, v.attributes, \
                 s.id AS store_id, s.name AS store_name, p.base_price_kobo, v.price_kobo, \
-                c.quantity, ({BUYABLE}) AS available \
+                c.quantity, {MAX_AVAILABLE_SQL} AS max_quantity, ({BUYABLE}) AS available \
          FROM cart_items c \
          JOIN product_variants v ON v.id = c.variant_id \
          JOIN products p ON p.id = v.product_id \
@@ -90,6 +98,7 @@ pub async fn get(db: &PgPool, user: Uuid) -> Result<Cart, AppError> {
             store_name: r.store_name,
             unit_price_kobo: unit,
             quantity: r.quantity,
+            max_quantity: r.max_quantity,
             line_total_kobo: line_total,
             available: r.available,
         });
@@ -127,8 +136,8 @@ pub async fn set_item(
     }
 
     // The store's owner and team cannot buy from it.
-    let member: bool = sqlx::query_scalar(&format!(
-        "SELECT {} FROM product_variants v \
+    let (member, max_quantity): (bool, i64) = sqlx::query_as(&format!(
+        "SELECT {}, {MAX_AVAILABLE_SQL} FROM product_variants v \
          JOIN products p ON p.id = v.product_id JOIN stores s ON s.id = p.store_id \
          WHERE v.id = $1 AND {BUYABLE}",
         is_member_sql("$2")
@@ -141,6 +150,10 @@ pub async fn set_item(
     .ok_or(AppError::NotFound)?;
     if member {
         return Err(own_store_item());
+    }
+    // A line never holds more than one branch can send.
+    if quantity > max_quantity {
+        return Err(stock::out_of_stock(variant_id));
     }
 
     // The line cap is checked in the same statement; replacing an existing line always passes.

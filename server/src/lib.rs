@@ -3,7 +3,6 @@ pub mod admin;
 pub mod app_config;
 pub mod audit;
 pub mod auth;
-pub mod branch_stock;
 pub mod cart;
 pub mod catalog;
 pub mod chat;
@@ -30,6 +29,7 @@ pub mod products;
 pub mod reviews;
 pub mod settings;
 pub mod statement;
+pub mod stock;
 pub mod stores;
 pub mod uploads;
 
@@ -123,6 +123,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(access_codes::routes::router())
         .merge(stores::routes::router())
         .merge(products::routes::router())
+        .merge(stock::router())
         .merge(catalog::categories::router())
         .merge(catalog::browse::router())
         .merge(catalog::stores::router())
