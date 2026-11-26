@@ -74,5 +74,11 @@
 	<string>The camera is used to take photos of the products you sell.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose photos of your products from your library.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
