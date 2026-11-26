@@ -194,5 +194,8 @@ class ApiClient {
   Future<Object?> put(String path, {Object? body}) =>
       _send('PUT', path, body: body);
 
+  Future<Object?> patch(String path, {Object? body}) =>
+      _send('PATCH', path, body: body);
+
   Future<Object?> delete(String path) => _send('DELETE', path);
 }

@@ -26,7 +26,26 @@ What a first run on a device should check:
 - the code boxes with the system one-time-code suggestion;
 - text at 200 percent;
 - the shell and the account page;
-- the market device checklist below.
+- the market device checklist below;
+- the selling checklist below.
+
+## Selling
+
+The selling area (`lib/features/sell/`, design `docs/superpowers/specs/2026-11-26-07e2-selling-app-design.md`)
+starts from Account: **Sell on Abuja Market** for someone with no seller side, **My stores** for a
+seller or team member. Nothing in it has been run on a device. What a device run should check:
+
+- the guided camera on a real phone: permission prompt wording, the square frame against the real
+  picture, tap to focus, flash, and a denied permission falling back to the gallery;
+- a photo of about 4000 px from a mid-range phone is cut, shrunk and uploaded in a few seconds
+  without the screen freezing (it runs in an isolate);
+- the NIN field: numeric keyboard, no suggestions or autofill, cleared when the app goes to the
+  background;
+- the identity selfie: **no provider SDK is plugged in**, so `UnavailableSelfieCapture` answers
+  "could not be taken" until one is. Run with `--dart-define=IDENTITY_FAKE=true` against a server
+  using its fake provider to see the whole flow;
+- entering a buyer's handover code, and the lock message after repeated wrong codes;
+- the collect notice before turning collect on.
 
 ## The market
 
@@ -214,6 +233,18 @@ through the app's market code. The seed puts its store in the fashion district
 on plot `fashion-1` (a `store_plots` row), so it stands on the map. The seed's store
 has dummy encrypted fields: it is good for browsing and the cart, not for
 checkout.
+
+**The selling wire check** (`test/wire/sell_wire_test.dart`) walks the seller's path:
+an access code, the identity check, a store, branches, a team member and their
+invitation, products and orders. Start the server as above with the server's fake
+identity provider (`IDENTITY_PROVIDER=fake` and a `NIN_INDEX_KEY`, see
+`server/.env.example`), and also set `WIRE_DATABASE_URL` to the scratch database's
+URL: the check promotes one fresh account to Owner there so it can issue an access
+code, and does nothing else with the database. It uses a new NIN each run (a NIN
+that has passed is taken for good). It cannot go through a payout verification
+(no bank lookup locally), a photo upload (no photo store locally) or a paid order
+(no payment locally), so those are covered by the widget tests and by the server's
+own tests only.
 
 The check refuses any `WIRE_BASE_URL` whose host is not `localhost`,
 `127.0.0.1` or `[::1]`: it signs people up and asks for SMS codes, so it must

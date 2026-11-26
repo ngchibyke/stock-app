@@ -139,6 +139,9 @@ fn seller_keys(with_payout: bool) -> BTreeSet<String> {
     k.insert("platform_cut_kobo".into());
     k.insert("buyer_display_name".into());
     k.insert("expected_payout_kobo".into());
+    // How the order is delivered and from which branch, so the app shows the right step.
+    k.insert("delivery_method".into());
+    k.insert("branch_name".into());
     if with_payout {
         k.insert("payout".into());
     }
@@ -666,4 +669,18 @@ async fn expected_payout_uses_the_order_fee_snapshot(pool: PgPool) {
     expected.insert("refunded_kobo".into());
     assert_eq!(keys(&res.json), expected);
     assert_eq!(res.json["refunded_kobo"], 10_000);
+}
+
+#[sqlx::test]
+async fn seller_view_names_the_delivery_method_and_branch(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let f = paid_order(&app).await;
+    let res = get(&app, &format!("/orders/{}", f.order_id), &f.seller).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    assert!(res.json["delivery_method"].is_string(), "{}", res.json);
+    assert!(res.json["branch_name"].is_string(), "{}", res.json);
+    // The buyer's view carries neither.
+    let res = get(&app, &format!("/orders/{}", f.order_id), &f.buyer).await;
+    assert!(res.json.get("delivery_method").is_none());
+    assert!(res.json.get("branch_name").is_none());
 }

@@ -78,6 +78,17 @@ class SessionController extends AsyncNotifier<SessionState> {
     }
   }
 
+  /// Loads `/me` again (for example after becoming a seller). A failure keeps what
+  /// is held; a 401 signs out.
+  Future<void> refreshMe() async {
+    if (state.value is! SessionSignedIn) return;
+    try {
+      state = AsyncData(SessionSignedIn(await _loadMe()));
+    } on ApiError catch (e) {
+      if (e.status == 401) handleUnauthorized();
+    }
+  }
+
   /// Best-effort server sign-out, then clear locally whatever the result.
   Future<void> signOut() async {
     try {

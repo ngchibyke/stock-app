@@ -17,10 +17,12 @@ import 'package:market/features/market/data/asset_resolver.dart';
 import 'package:market/features/market/data/json_cache.dart';
 import 'package:market/features/market/data/market_source.dart';
 import 'package:market/features/market/data/placeholder_market_source.dart';
+import 'package:market/features/sell/sell_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'fake_asset_resolver.dart';
+import 'fake_sell.dart';
 import 'fake_auth_repository.dart';
 import 'fake_cart_repository.dart';
 import 'fake_catalog_repository.dart';
@@ -90,6 +92,10 @@ class AppHarness {
   final FakeCartRepository cart;
   final FakeCatalogRepository catalog;
   final MemoryJsonCache cache = MemoryJsonCache();
+
+  /// The selling area's data, in memory.
+  final FakeSellRepository sell = FakeSellRepository();
+  final FakeWorkRepository work = FakeWorkRepository();
   String version = '1.0.0';
 
   /// For [MarketRoot], which adds the session hooks itself.
@@ -109,6 +115,8 @@ class AppHarness {
     appPlatformProvider.overrideWithValue('android'),
     cartRepositoryProvider.overrideWithValue(cart),
     catalogRepositoryProvider.overrideWithValue(catalog),
+    sellRepositoryProvider.overrideWithValue(sell),
+    workRepositoryProvider.overrideWithValue(work),
     jsonCacheProvider.overrideWith((ref) async => cache),
     // The app reads the server's market routes; widget tests build the same
     // market from the in-memory catalog instead.
