@@ -8,6 +8,8 @@ import '../../core/links/external_link.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/secure_screen.dart';
 import '../../core/ui/states.dart';
+import '../chat/chat_pages.dart';
+import '../chat/chat_strings.dart';
 import 'buy_models.dart';
 import 'buy_repository.dart';
 import 'buy_strings.dart';
@@ -414,6 +416,13 @@ class _BuyOrderPageState extends ConsumerState<BuyOrderPage> {
                                 () => repo.cancel(o.id),
                               ),
                         child: const Text(BuyStrings.cancel),
+                      ),
+                    ],
+                    if (o.canMessage) ...[
+                      const SizedBox(height: Tokens.s2),
+                      OutlinedButton(
+                        onPressed: () => openOrderChat(context, ref, o.id),
+                        child: const Text(ChatStrings.messageSeller),
                       ),
                     ],
                     if (o.canReport) ...[

@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/session/session_controller.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/states.dart';
+import '../chat/chat_pages.dart';
 import 'buy_models.dart';
 import 'buy_repository.dart';
 import 'buy_strings.dart';
@@ -25,9 +26,12 @@ final inboxProvider = FutureProvider.autoDispose<Inbox>((ref) async {
 });
 
 /// Where a notice leads, from its ids alone (the text is the server's fixed copy).
-/// A dispute notice opens the report, an order notice opens the order, anything else
-/// has no page.
+/// A chat notice opens the conversation, a dispute notice the report, an order notice
+/// the order; anything else has no page.
 Widget? pageForNotice(Notice n) {
+  if (n.conversationId != null) {
+    return ConversationByIdPage(id: n.conversationId!);
+  }
   if (n.disputeId != null) return DisputeStatusPage(disputeId: n.disputeId!);
   if (n.orderId != null) return BuyOrderPage(orderId: n.orderId!);
   return null;
