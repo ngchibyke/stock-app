@@ -21,6 +21,7 @@ import 'package:market/features/market/data/market_source.dart';
 import 'package:market/features/market/data/placeholder_market_source.dart';
 import 'package:market/features/buy/buy_repository.dart';
 import 'package:market/features/chat/chat_repository.dart';
+import 'package:market/features/privacy/privacy_repository.dart';
 import 'package:market/features/sell/sell_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
@@ -29,6 +30,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'fake_asset_resolver.dart';
 import 'fake_buy.dart';
 import 'fake_chat.dart';
+import 'fake_privacy.dart';
 import 'fake_sell.dart';
 import 'fake_auth_repository.dart';
 import 'fake_cart_repository.dart';
@@ -107,6 +109,8 @@ class AppHarness {
   final FakeBuyOrdersRepository buyOrders = FakeBuyOrdersRepository();
   final FakeInboxRepository inbox = FakeInboxRepository();
   final FakeChatRepository chat = FakeChatRepository();
+  final FakePrivacyRepository privacy = FakePrivacyRepository();
+  final FakeFileSharer sharer = FakeFileSharer();
   final FakeChatSocket chatSocket = FakeChatSocket();
   String version = '1.0.0';
 
@@ -134,6 +138,8 @@ class AppHarness {
     inboxRepositoryProvider.overrideWithValue(inbox),
     chatRepositoryProvider.overrideWithValue(chat),
     chatSocketProvider.overrideWithValue(chatSocket),
+    privacyRepositoryProvider.overrideWithValue(privacy),
+    fileSharerProvider.overrideWithValue(sharer),
     jsonCacheProvider.overrideWith((ref) async => cache),
     // The app reads the server's market routes; widget tests build the same
     // market from the in-memory catalog instead.

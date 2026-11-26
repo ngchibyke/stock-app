@@ -11,6 +11,7 @@ class ApiError implements Exception {
     this.retryAfterSecs,
     this.verificationId,
     this.mutedUntil,
+    this.reasons = const [],
   });
 
   factory ApiError.fromResponse(int status, Object? body) {
@@ -19,6 +20,7 @@ class ApiError implements Exception {
     int? retryAfterSecs;
     String? verificationId;
     DateTime? mutedUntil;
+    var reasons = const <String>[];
 
     if (body is Map) {
       final error = body['error'];
@@ -29,6 +31,14 @@ class ApiError implements Exception {
         if (c is String && c.isNotEmpty) code = c;
         if (m is String && m.isNotEmpty) message = m;
         if (r is num) retryAfterSecs = r.toInt();
+        // `deletion_blocked`: what is still open, as codes.
+        final list = error['reasons'];
+        if (list is List) {
+          reasons = [
+            for (final x in list)
+              if (x is String) x,
+          ];
+        }
       }
       final v = body['verification_id'];
       if (v is String && v.isNotEmpty) verificationId = v;
@@ -43,6 +53,7 @@ class ApiError implements Exception {
       retryAfterSecs: retryAfterSecs,
       verificationId: verificationId,
       mutedUntil: mutedUntil,
+      reasons: reasons,
     );
   }
 
@@ -68,6 +79,9 @@ class ApiError implements Exception {
 
   /// Set on a 403 `muted`: when the person may post again.
   final DateTime? mutedUntil;
+
+  /// Set on a 409 `deletion_blocked`: codes for what must be finished first.
+  final List<String> reasons;
 
   bool get isOffline => code == 'offline';
   bool get isTimeout => code == 'timeout';
