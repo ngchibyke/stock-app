@@ -40,6 +40,7 @@ interface BranchRow {
   collect_enabled: boolean;
 }
 interface MemberRow {
+  id: string;
   user_id: string;
   display_name: string;
   role: "manager" | "staff";
@@ -150,7 +151,7 @@ function StoreDrawer({ id, onClose }: { id: string | null; onClose: () => void }
               <DataTable
                 label="Team"
                 rows={s.team}
-                rowKey={(m) => m.user_id}
+                rowKey={(m) => m.id}
                 columns={[
                   { key: "name", header: "Name", cell: (m) => <strong>{m.display_name}</strong> },
                   { key: "role", header: "Role", cell: (m) => <Badge tone="info">{m.role}</Badge> },

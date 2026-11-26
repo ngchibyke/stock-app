@@ -321,6 +321,9 @@ async fn admin_detail_lists_branches_and_team_without_addresses_or_phones(pool: 
     assert!(team[0]["display_name"].is_string());
     assert_eq!(team[1]["user_id"], gone.to_string());
     assert!(team[1]["removed_at"].is_string());
+    // Each row carries its membership id, so a re-added member keys apart.
+    assert!(team[0]["id"].is_string() && team[1]["id"].is_string());
+    assert_ne!(team[0]["id"], team[1]["id"]);
 
     let text = res.json.to_string();
     for banned in [

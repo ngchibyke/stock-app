@@ -222,8 +222,8 @@ describe("Stores", () => {
             { id: "b2", name: "Garki", area_council: null, closed_at: "2026-11-01T00:00:00Z", collect_enabled: false },
           ],
           team: [
-            { user_id: "u1", display_name: "Chidi Staff", role: "staff", branch_id: "b1", removed_at: null },
-            { user_id: "u2", display_name: "Mary Manager", role: "manager", branch_id: null, removed_at: "2026-11-02T00:00:00Z" },
+            { id: "m1", user_id: "u1", display_name: "Chidi Staff", role: "staff", branch_id: "b1", removed_at: null },
+            { id: "m2", user_id: "u2", display_name: "Mary Manager", role: "manager", branch_id: null, removed_at: "2026-11-02T00:00:00Z" },
           ],
         },
       ],
@@ -238,6 +238,31 @@ describe("Stores", () => {
     expect(within(team).getByText("Mary Manager")).toBeInTheDocument();
     expect(within(team).getByText("Wuse")).toBeInTheDocument();
     expect(within(team).getByText("Removed")).toBeInTheDocument();
+  });
+
+  it("lists a removed then re-added member twice without a key clash", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockApi({
+      "GET /admin/stores": () => [200, { items: [store], next_cursor: null }],
+      "GET /admin/stores/s1": () => [
+        200,
+        {
+          ...detail,
+          team: [
+            { id: "m2", user_id: "u1", display_name: "Chidi Staff", role: "manager", branch_id: null, removed_at: null },
+            { id: "m1", user_id: "u1", display_name: "Chidi Staff", role: "staff", branch_id: null, removed_at: "2026-11-02T00:00:00Z" },
+          ],
+        },
+      ],
+    });
+    renderPage(<Stores />);
+    await userEvent.setup().click(await screen.findByText("Alpha Threads"));
+    const team = await screen.findByRole("table", { name: "Team" });
+    expect(within(team).getAllByText("Chidi Staff")).toHaveLength(2);
+    expect(within(team).getByText("Removed")).toBeInTheDocument();
+    expect(within(team).getByText("Active")).toBeInTheDocument();
+    const clash = errors.mock.calls.some((args) => args.some((a) => String(a).includes("same key")));
+    expect(clash).toBe(false);
   });
 
   it("says so when a store has no branches or team", async () => {

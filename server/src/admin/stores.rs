@@ -162,6 +162,8 @@ struct BranchRow {
 
 #[derive(Serialize, sqlx::FromRow)]
 struct MemberRow {
+    /// The membership row: a member removed then re-added has two rows.
+    id: Uuid,
     user_id: Uuid,
     display_name: String,
     role: String,
@@ -198,7 +200,7 @@ async fn detail(db: &PgPool, id: Uuid) -> Result<StoreDetail, AppError> {
     .await
     .context("load store branches")?;
     store.team = sqlx::query_as(
-        "SELECT m.user_id, u.display_name, m.role::text AS role, m.branch_id, m.removed_at          FROM store_members m JOIN users u ON u.id = m.user_id          WHERE m.store_id = $1          ORDER BY (m.removed_at IS NOT NULL), (m.role = 'staff'), m.created_at, m.id",
+        "SELECT m.id, m.user_id, u.display_name, m.role::text AS role, m.branch_id, m.removed_at          FROM store_members m JOIN users u ON u.id = m.user_id          WHERE m.store_id = $1          ORDER BY (m.removed_at IS NOT NULL), (m.role = 'staff'), m.created_at, m.id",
     )
     .bind(id)
     .fetch_all(db)
