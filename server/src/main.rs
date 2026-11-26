@@ -166,6 +166,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // A partner is optional: with none configured the gateway answers "not configured"
+    // without a network call, and nothing else in the server changes.
+    let partner = match config.partner.clone() {
+        Some(cfg) => {
+            let secret = cfg.webhook_secret.clone();
+            tracing::info!("partner service configured");
+            server::partners::PartnerGateway::new(
+                Arc::new(server::partners::client::HttpPartner::new(cfg)?),
+                db.clone(),
+                Some(secret),
+            )
+        }
+        None => server::partners::PartnerGateway::new(
+            Arc::new(server::partners::client::NoPartner),
+            db.clone(),
+            None,
+        ),
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -192,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         market,
         identity,
         nin_key: config.nin_index_key.map(Arc::new),
+        partner: Arc::new(partner),
     };
 
     if matches!(command, Command::Serve) {

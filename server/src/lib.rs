@@ -23,6 +23,7 @@ pub mod moderation;
 pub mod money;
 pub mod notify;
 pub mod orders;
+pub mod partners;
 pub mod payments;
 pub mod payout_accounts;
 pub mod phone;
@@ -80,6 +81,8 @@ pub struct AppState {
     pub identity: Option<Arc<dyn identity::IdentityProvider>>,
     /// Key of the NIN fingerprint (`NIN_INDEX_KEY`), its own key. `None` disables the check.
     pub nin_key: Option<Arc<[u8; 32]>>,
+    /// The partner-services seam: one gateway that is safe with no partner at all.
+    pub partner: Arc<partners::PartnerGateway>,
 }
 
 async fn health() -> Json<Value> {
@@ -143,6 +146,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(reviews::routes::router())
         .merge(disputes::routes::router())
         .merge(identity::routes::router())
+        .merge(partners::routes::router())
         .merge(notify::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())

@@ -95,6 +95,8 @@
 //! 21. `identity_grace`: stores past their identity grace period with an unverified
 //!     owner go `pending` (plot kept); owners inside it get a weekly reminder
 //!     -> [`identity::jobs::run_grace`](crate::identity::jobs::run_grace).
+//! 22. `partner_events`: received partner events are marked processed and old ones pruned
+//!     -> [`partners::jobs::run`](crate::partners::jobs::run).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -150,6 +152,7 @@ use crate::{
     error::AppError,
     identity::jobs as identity_jobs,
     notify::reminders,
+    partners::jobs as partner_jobs,
     settings,
     statement::job as statement_job,
     stores::team,
@@ -231,6 +234,7 @@ pub struct JobReport {
     pub collect_reminders_sent: u32,
     pub identity_attempts: u32,
     pub identity_grace: u32,
+    pub partner_events: u32,
     pub failed: u32,
 }
 
@@ -258,7 +262,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 21] = [
+    let jobs: [(&str, Job); 22] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -280,6 +284,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (collect::COLLECT_REMINDERS, Job::CollectReminders),
         (identity_jobs::IDENTITY_ATTEMPTS, Job::IdentityAttempts),
         (identity_jobs::IDENTITY_GRACE, Job::IdentityGrace),
+        (partner_jobs::PARTNER_EVENTS, Job::PartnerEvents),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -316,6 +321,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::CollectReminders => &mut report.collect_reminders_sent,
             Job::IdentityAttempts => &mut report.identity_attempts,
             Job::IdentityGrace => &mut report.identity_grace,
+            Job::PartnerEvents => &mut report.partner_events,
         };
         *slot += stats.done;
     }
@@ -356,6 +362,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 collect_reminders = r.collect_reminders_sent,
                 identity_attempts = r.identity_attempts,
                 identity_grace = r.identity_grace,
+                partner_events = r.partner_events,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -412,6 +419,7 @@ enum Job {
     CollectReminders,
     IdentityAttempts,
     IdentityGrace,
+    PartnerEvents,
 }
 
 impl Job {
@@ -438,6 +446,7 @@ impl Job {
             Job::CollectReminders => collect::send_reminders(state, cancel).await,
             Job::IdentityAttempts => identity_jobs::run_attempts(state, cancel).await,
             Job::IdentityGrace => identity_jobs::run_grace(state, cancel).await,
+            Job::PartnerEvents => partner_jobs::run(state, cancel).await,
         }
     }
 }

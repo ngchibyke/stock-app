@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 pub const TEST_FIELD_KEY: [u8; 32] = [7u8; 32];
 pub const TEST_INDEX_KEY: [u8; 32] = [9u8; 32];
+/// The secret the test partner signs its webhooks with.
+pub const PARTNER_WEBHOOK_SECRET: &str = "partner-secret-for-tests-1";
 pub const TEST_NIN_KEY: [u8; 32] = [11u8; 32];
 pub const TEST_PASSWORD: &str = "correct-horse-1";
 pub const TEST_REDIRECT_URL: &str = "http://localhost:8080/checkout/return";
@@ -100,6 +102,8 @@ pub struct TestApp {
     pub push: Arc<server::notify::fake::FakePush>,
     /// The identity provider double the state uses.
     pub identity: Arc<server::identity::fake::FakeIdentity>,
+    /// The partner double behind the gateway in `state.partner`.
+    pub partner: Arc<server::partners::fake::FakePartner>,
     /// The photo store the state uses.
     pub objects: Arc<server::uploads::fake::FakeStore>,
     /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
@@ -124,6 +128,12 @@ impl TestApp {
         let objects = Arc::new(server::uploads::fake::FakeStore::new());
         let statement = Arc::new(server::statement::fake::FakeStatement::new());
         let identity = Arc::new(server::identity::fake::FakeIdentity::new());
+        let partner_api = Arc::new(server::partners::fake::FakePartner::new());
+        let partner = Arc::new(server::partners::PartnerGateway::new(
+            partner_api.clone(),
+            pool.clone(),
+            Some(server::payments::mono::Secret::new(PARTNER_WEBHOOK_SECRET)),
+        ));
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -153,6 +163,7 @@ impl TestApp {
             ),
             identity: Some(identity.clone()),
             nin_key: Some(Arc::new(TEST_NIN_KEY)),
+            partner,
         };
         Self {
             router: build_app(state.clone()),
@@ -166,6 +177,7 @@ impl TestApp {
             objects,
             statement,
             identity,
+            partner: partner_api,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
