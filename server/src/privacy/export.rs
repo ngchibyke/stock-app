@@ -171,6 +171,32 @@ pub async fn run(state: &AppState, cancel: &CancellationToken) -> Result<Stats, 
     Ok(stats)
 }
 
+type Blob = Option<Vec<u8>>;
+/// recipient name, phone, address line, landmark, area, postcode, created.
+type AddressRow = (
+    Blob,
+    Blob,
+    Blob,
+    Blob,
+    String,
+    Option<String>,
+    OffsetDateTime,
+);
+/// id, status, items, delivery fee, created, paid, delivery address.
+type OrderRow = (
+    Uuid,
+    String,
+    i64,
+    i64,
+    OffsetDateTime,
+    Option<OffsetDateTime>,
+    Blob,
+);
+/// conversation, seq, written by the person, body, sent.
+type MessageRow = (Uuid, Option<i64>, bool, Blob, OffsetDateTime);
+/// id, order, reason, status, opened, the person's own statement.
+type DisputeRow = (Uuid, Uuid, String, String, OffsetDateTime, Blob);
+
 fn ts(t: OffsetDateTime) -> String {
     t.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
@@ -199,15 +225,7 @@ pub async fn build(db: &PgPool, cipher: &FieldCipher, user: Uuid) -> Result<Valu
         .await
         .context("export profile")?;
 
-    let addresses: Vec<(
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        String,
-        Option<String>,
-        OffsetDateTime,
-    )> = sqlx::query_as(
+    let addresses: Vec<AddressRow> = sqlx::query_as(
         "SELECT recipient_name_enc, phone_enc, address_line_enc, landmark_enc, \
                     area_council::text, postcode, created_at \
              FROM buyer_addresses WHERE user_id = $1 ORDER BY created_at",
@@ -227,15 +245,7 @@ pub async fn build(db: &PgPool, cipher: &FieldCipher, user: Uuid) -> Result<Valu
         })
         .collect();
 
-    let orders: Vec<(
-        Uuid,
-        String,
-        i64,
-        i64,
-        OffsetDateTime,
-        Option<OffsetDateTime>,
-        Option<Vec<u8>>,
-    )> = sqlx::query_as(
+    let orders: Vec<OrderRow> = sqlx::query_as(
         "SELECT id, status::text, items_total_kobo, delivery_fee_kobo, created_at, paid_at, \
                     delivery_address_enc FROM orders WHERE buyer_id = $1 ORDER BY created_at",
     )
@@ -260,7 +270,7 @@ pub async fn build(db: &PgPool, cipher: &FieldCipher, user: Uuid) -> Result<Valu
         }));
     }
 
-    let messages: Vec<(Uuid, Option<i64>, bool, Option<Vec<u8>>, OffsetDateTime)> = sqlx::query_as(
+    let messages: Vec<MessageRow> = sqlx::query_as(
         "SELECT c.id, m.seq, m.sender_id = $1, m.body_enc, m.created_at \
          FROM chat_messages m JOIN conversations c ON c.id = m.conversation_id \
          WHERE m.status = 'delivered' AND (c.buyer_id = $1 OR m.sender_id = $1) \
@@ -290,17 +300,16 @@ pub async fn build(db: &PgPool, cipher: &FieldCipher, user: Uuid) -> Result<Valu
         .map(|(o, s, b, at)| json!({"order": o, "stars": s, "text": b, "created_at": ts(at)}))
         .collect();
 
-    let disputes: Vec<(Uuid, Uuid, String, String, OffsetDateTime, Option<Vec<u8>>)> =
-        sqlx::query_as(
-            "SELECT d.id, d.order_id, d.reason, d.status, d.opened_at, s.body_enc \
+    let disputes: Vec<DisputeRow> = sqlx::query_as(
+        "SELECT d.id, d.order_id, d.reason, d.status, d.opened_at, s.body_enc \
          FROM disputes d LEFT JOIN dispute_statements s \
               ON s.dispute_id = d.id AND s.party = 'buyer' \
          WHERE d.buyer_id = $1 ORDER BY d.opened_at",
-        )
-        .bind(user)
-        .fetch_all(db)
-        .await
-        .context("export disputes")?;
+    )
+    .bind(user)
+    .fetch_all(db)
+    .await
+    .context("export disputes")?;
     let disputes: Vec<Value> = disputes
         .into_iter()
         .map(|(id, order, reason, status, at, body)| {

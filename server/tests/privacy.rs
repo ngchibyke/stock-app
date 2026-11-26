@@ -10,6 +10,9 @@ use server::{escrow::jobs::run_due_jobs, privacy::erase::INVENTORY};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// recipient name, phone, address line, landmark, postcode.
+type AddressColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>);
+
 const PHONE: &str = "08031110001";
 
 async fn ask(app: &TestApp, token: &str, method: Method, path: &str, body: Value) -> TestResponse {
@@ -355,7 +358,7 @@ async fn erasure_clears_or_unlinks_everything_and_frees_the_number(pool: PgPool)
         assert_eq!(count(sql).await, 0, "{sql}");
     }
     // Addresses stay as empty rows, because an order's delivery option points at one.
-    let kept: Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+    let kept: Vec<AddressColumns> = sqlx::query_as(
         "SELECT recipient_name_enc, phone_enc, address_line_enc, landmark_enc, postcode \
          FROM buyer_addresses WHERE user_id = $1",
     )
