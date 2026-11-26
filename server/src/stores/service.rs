@@ -794,6 +794,15 @@ pub async fn update_store(
     .execute(&mut *tx)
     .await
     .context("update store")?;
+    // A district move locks plots before the branch write below (lock order:
+    // stores, store_members, store_plots, then store_branches).
+    if district != current.district {
+        // Both districts are locked up front, in one global order, so two sellers
+        // moving in opposite directions cannot deadlock on release then place.
+        placement::lock_districts(&mut tx, &[&current.district, &district]).await?;
+        placement::release(&mut tx, layout, id).await?;
+        placement::place(&mut tx, layout, id).await?;
+    }
     // The pickup fields edit the first open branch (lock order: stores, then
     // store_branches). It was named after the store, so it follows a rename while it
     // still carries the old name.
@@ -819,13 +828,6 @@ pub async fn update_store(
     .execute(&mut *tx)
     .await
     .context("update first branch")?;
-    if district != current.district {
-        // Both districts are locked up front, in one global order, so two sellers
-        // moving in opposite directions cannot deadlock on release then place.
-        placement::lock_districts(&mut tx, &[&current.district, &district]).await?;
-        placement::release(&mut tx, layout, id).await?;
-        placement::place(&mut tx, layout, id).await?;
-    }
     for (key, held, purpose) in [
         (&logo_key, &current.logo_key, Purpose::StoreLogo),
         (&banner_key, &current.banner_key, Purpose::StoreBanner),
