@@ -10,6 +10,7 @@ class ApiError implements Exception {
     required this.message,
     this.retryAfterSecs,
     this.verificationId,
+    this.mutedUntil,
   });
 
   factory ApiError.fromResponse(int status, Object? body) {
@@ -17,6 +18,7 @@ class ApiError implements Exception {
     var message = 'Something went wrong. Please try again.';
     int? retryAfterSecs;
     String? verificationId;
+    DateTime? mutedUntil;
 
     if (body is Map) {
       final error = body['error'];
@@ -30,6 +32,8 @@ class ApiError implements Exception {
       }
       final v = body['verification_id'];
       if (v is String && v.isNotEmpty) verificationId = v;
+      final m = body['muted_until'];
+      if (m is String) mutedUntil = DateTime.tryParse(m);
     }
 
     return ApiError(
@@ -38,6 +42,7 @@ class ApiError implements Exception {
       message: message,
       retryAfterSecs: retryAfterSecs,
       verificationId: verificationId,
+      mutedUntil: mutedUntil,
     );
   }
 
@@ -60,6 +65,9 @@ class ApiError implements Exception {
   final String message;
   final int? retryAfterSecs;
   final String? verificationId;
+
+  /// Set on a 403 `muted`: when the person may post again.
+  final DateTime? mutedUntil;
 
   bool get isOffline => code == 'offline';
   bool get isTimeout => code == 'timeout';

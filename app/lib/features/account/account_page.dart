@@ -14,6 +14,9 @@ import '../../core/theme/tokens.dart';
 import '../../core/ui/states.dart';
 import '../auth/auth_errors.dart';
 import '../buy/buy_strings.dart';
+import '../chat/chat_pages.dart';
+import '../chat/chat_strings.dart';
+import '../chat/chat_unread.dart';
 import '../buy/inbox.dart';
 import '../buy/orders_pages.dart';
 import '../sell/sell_providers.dart';
@@ -163,6 +166,18 @@ class _AccountPageState extends ConsumerState<AccountPage> {
             icon: Icons.chevron_right,
             onTap: () => pushPage<void>(context, const InvitesPage()),
           ),
+        _LinkRow(
+          label:
+              ref.watch(chatUnreadProvider).value != null &&
+                  ref.watch(chatUnreadProvider).value! > 0
+              ? '${ChatStrings.messages} (${ref.watch(chatUnreadProvider).value})'
+              : ChatStrings.messages,
+          icon: Icons.chevron_right,
+          onTap: () async {
+            await pushPage<void>(context, const MessagesPage());
+            ref.invalidate(chatUnreadProvider);
+          },
+        ),
         _LinkRow(
           label: BuyStrings.myOrders,
           icon: Icons.chevron_right,

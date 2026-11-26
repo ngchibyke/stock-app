@@ -197,6 +197,14 @@ async fn writable_access(
     conversation: Uuid,
 ) -> Result<Access, AppError> {
     let access = service::access(&state.db, user, conversation).await?;
+    // Managers and staff send for the store only after their identity check; the
+    // owner's store is held back instead.
+    if access.party == Party::Seller && user != access.seller_id {
+        let mut conn = state.db.acquire().await.context("acquire")?;
+        if !crate::identity::service::member_cleared(&mut conn, user).await? {
+            return Err(AppError::Forbidden("identity_required"));
+        }
+    }
     if !access.writable {
         return Err(AppError::Conflict("chat_closed"));
     }
@@ -304,20 +312,28 @@ pub async fn deliver_in(
     conversation_id: Uuid,
     text: &str,
 ) -> Result<MessageView, AppError> {
-    let (seq, buyer_id, store_id, buyer_read, seller_read): (i64, Uuid, Uuid, i64, i64) =
-        sqlx::query_as(
-            "UPDATE conversations SET last_seq = last_seq + 1, last_message_at = now() \
+    #[allow(clippy::type_complexity)]
+    let (seq, buyer_id, store_id, order_id, buyer_read, seller_read): (
+        i64,
+        Uuid,
+        Uuid,
+        Option<Uuid>,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "UPDATE conversations SET last_seq = last_seq + 1, last_message_at = now() \
              WHERE id = $1 \
-             RETURNING last_seq, buyer_id, store_id, buyer_read_seq, seller_read_seq",
-        )
-        .bind(conversation_id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(busy_err("chat_busy", "take sequence number"))?;
-    let (sender, sent_at): (Uuid, OffsetDateTime) = sqlx::query_as(
-        "UPDATE chat_messages SET status = 'delivered', seq = $2, body_enc = $3, \
+             RETURNING last_seq, buyer_id, store_id, order_id, buyer_read_seq, seller_read_seq",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(busy_err("chat_busy", "take sequence number"))?;
+    let (sender, sent_at, sender_name): (Uuid, OffsetDateTime, String) = sqlx::query_as(
+        "WITH m AS (UPDATE chat_messages SET status = 'delivered', seq = $2, body_enc = $3, \
                 delivered_at = now(), next_attempt_at = NULL \
-         WHERE id = $1 RETURNING sender_id, delivered_at",
+         WHERE id = $1 RETURNING sender_id, delivered_at) \
+         SELECT m.sender_id, m.delivered_at, u.display_name FROM m JOIN users u ON u.id = m.sender_id",
     )
     .bind(message_id)
     .bind(seq)
@@ -327,28 +343,29 @@ pub async fn deliver_in(
     .context("deliver message")?;
     // One notice per unread stretch: every message sent before the other side
     // reads the conversation shares the key, so it shares the notice.
-    let (recipient, read_seq) = if sender == buyer_id {
-        let owner: Uuid = sqlx::query_scalar("SELECT owner_id FROM stores WHERE id = $1")
-            .bind(store_id)
-            .fetch_one(&mut *conn)
-            .await
-            .context("load store owner")?;
-        (owner, seller_read)
+    // A buyer's message goes to the store's side that may see it; the store's, to the buyer.
+    let (recipients, read_seq) = if sender == buyer_id {
+        (
+            service::seller_side_users(&mut *conn, store_id, order_id).await?,
+            seller_read,
+        )
     } else {
-        (buyer_id, buyer_read)
+        (vec![buyer_id], buyer_read)
     };
-    notify::enqueue(
-        &mut *conn,
-        Notice {
-            user: recipient,
-            kind: Kind::ChatMessage,
-            order_id: None,
-            dispute_id: None,
-            conversation_id: Some(conversation_id),
-            dedupe_key: format!("chat:{conversation_id}:{read_seq}"),
-        },
-    )
-    .await?;
+    for recipient in recipients {
+        notify::enqueue(
+            &mut *conn,
+            Notice {
+                user: recipient,
+                kind: Kind::ChatMessage,
+                order_id: None,
+                dispute_id: None,
+                conversation_id: Some(conversation_id),
+                dedupe_key: format!("chat:{conversation_id}:{read_seq}"),
+            },
+        )
+        .await?;
+    }
     Ok(MessageView {
         id: message_id,
         conversation_id,
@@ -359,6 +376,8 @@ pub async fn deliver_in(
             Party::Seller
         },
         body: text.to_string(),
+        // Told to the store's team only (see `publish_message`).
+        by: (sender != buyer_id).then_some(sender_name),
         sent_at,
     })
 }
@@ -513,12 +532,17 @@ fn delivered_outcome(view: MessageView) -> SendOutcomeView {
 
 /// To both parties, after commit.
 pub fn publish_message(state: &AppState, access: &Access, view: &MessageView) {
+    // The buyer is never told which member of the store wrote.
+    let mut for_buyer = view.clone();
+    for_buyer.by = None;
     state
         .chat_hub
-        .publish(access.buyer_id, Frame::Message(view.clone()));
-    state
-        .chat_hub
-        .publish(access.seller_id, Frame::Message(view.clone()));
+        .publish(access.buyer_id, Frame::Message(for_buyer));
+    for member in &access.team {
+        state
+            .chat_hub
+            .publish(*member, Frame::Message(view.clone()));
+    }
 }
 
 /// A delivered message goes to both sides. Anything else goes to the sender
@@ -619,6 +643,16 @@ async fn stored_outcome(
                 seq,
                 from: access.party_of(sender),
                 body: state.cipher.decrypt(&encrypted)?,
+                by: match access.party_of(sender) {
+                    Party::Seller => {
+                        sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+                            .bind(sender)
+                            .fetch_optional(&state.db)
+                            .await
+                            .context("read sender name")?
+                    }
+                    Party::Buyer => None,
+                },
                 sent_at,
             }))
         }

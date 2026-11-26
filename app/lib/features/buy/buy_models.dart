@@ -235,6 +235,15 @@ class BuyOrder {
 
   bool get canReview => status == 'completed';
 
+  /// A conversation about the order opens once it is paid.
+  bool get canMessage => const {
+    'paid',
+    'picked_up',
+    'out_for_delivery',
+    'delivered',
+    'completed',
+  }.contains(status);
+
   /// Still on its way to the buyer.
   bool get isOpenForDelivery =>
       const {'paid', 'picked_up', 'out_for_delivery'}.contains(status);
@@ -406,6 +415,7 @@ class Notice {
     required this.read,
     this.orderId,
     this.disputeId,
+    this.conversationId,
   });
 
   static Notice? fromJson(Map<String, dynamic> j) {
@@ -421,6 +431,7 @@ class Notice {
       read: j['read'] == true,
       orderId: readString(j['order_id']),
       disputeId: readString(j['dispute_id']),
+      conversationId: readString(j['conversation_id']),
     );
   }
 
@@ -432,6 +443,7 @@ class Notice {
   final bool read;
   final String? orderId;
   final String? disputeId;
+  final String? conversationId;
 }
 
 class Inbox {

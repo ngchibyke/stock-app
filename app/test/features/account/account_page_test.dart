@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:market/features/chat/chat_strings.dart';
 import 'package:market/core/api/api_error.dart';
 import 'package:market/core/config/app_config.dart';
 import 'package:market/core/config/app_gate.dart';
@@ -19,6 +20,9 @@ import 'package:market/features/buy/buy_models.dart';
 import 'package:market/features/buy/buy_strings.dart';
 
 import '../../support/fake_buy.dart';
+import '../../support/fake_chat.dart';
+
+import 'package:market/features/chat/chat_repository.dart';
 
 import '../../support/fake_sell.dart';
 
@@ -102,6 +106,7 @@ Future<void> _pumpPage(
         packageVersionProvider.overrideWith((ref) async => '1.0.0'),
         sellRepositoryProvider.overrideWithValue(FakeSellRepository()),
         inboxRepositoryProvider.overrideWithValue(FakeInboxRepository()),
+        chatRepositoryProvider.overrideWithValue(FakeChatRepository()),
       ],
       child: MaterialApp(
         theme: lightTheme(),
@@ -137,6 +142,16 @@ void main() {
     await settle(tester);
     expect(find.text(BuyStrings.myOrders), findsOneWidget);
     expect(find.text('${BuyStrings.inboxTitle} (3)'), findsOneWidget);
+  });
+
+  testWidgets('the_messages_row_shows_and_counts_unread', (tester) async {
+    final h = AppHarness(store: MemorySessionStore('tok'));
+    h.adapter.reply(200, testMe);
+    h.chat.conversationRows = [fakeConversation(unread: 2)];
+    await h.pump(tester);
+    await tester.tap(find.text(Strings.tabAccount));
+    await settle(tester);
+    expect(find.text('${ChatStrings.messages} (2)'), findsOneWidget);
   });
 
   group('links', () {

@@ -7,6 +7,7 @@ import 'package:market/core/links/external_link.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';
 import 'package:market/features/buy/buy_models.dart';
+import 'package:market/features/chat/chat_strings.dart';
 import 'package:market/features/buy/buy_strings.dart';
 import 'package:market/features/buy/checkout_page.dart';
 import 'package:market/features/buy/dispute_pages.dart';
@@ -355,6 +356,26 @@ void main() {
         find.textContaining(BuyStrings.statusLabel('paid')),
         findsOneWidget,
       );
+    });
+
+    testWidgets('message_the_seller_shows_once_paid_and_opens_the_chat', (
+      tester,
+    ) async {
+      final pending = BuyEnv();
+      pending.orders.orderRows = [_order('o1', 'pending')];
+      await pumpBuy(tester, const BuyOrderPage(orderId: 'o1'), pending);
+      await settleFrames(tester, 2);
+      expect(find.text(ChatStrings.messageSeller), findsNothing);
+
+      final env = BuyEnv();
+      env.orders.orderRows = [_order('o1', 'paid')];
+      await pumpBuy(tester, const BuyOrderPage(orderId: 'o1'), env);
+      await settleFrames(tester, 2);
+      await _tap(tester, find.text(ChatStrings.messageSeller));
+      await settleFrames(tester, 4);
+      expect(env.chat.opened, 1);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 1));
     });
 
     testWidgets('a_paid_order_can_be_cancelled_after_confirming', (

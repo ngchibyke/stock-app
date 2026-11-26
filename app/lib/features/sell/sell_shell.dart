@@ -5,6 +5,8 @@ import '../../core/session/me.dart';
 import '../../core/session/session_controller.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/states.dart';
+import '../chat/chat_pages.dart';
+import '../chat/chat_strings.dart';
 import 'become_page.dart';
 import 'identity/identity_page.dart';
 import 'orders.dart';
@@ -76,6 +78,16 @@ class SellEntryPage extends ConsumerWidget {
   }
 }
 
+/// Shows the identity check, then reads again what depends on it.
+Future<void> confirmIdentity(BuildContext context, WidgetRef ref) async {
+  await pushPage<void>(
+    context,
+    IdentityPage(onPassed: () => Navigator.of(context).pop()),
+  );
+  ref.invalidate(identityStatusProvider);
+  ref.invalidate(myStoresProvider);
+}
+
 /// A line asking the person to confirm their identity, when they have not.
 class IdentityBanner extends ConsumerWidget {
   const IdentityBanner({super.key, required this.owner});
@@ -108,14 +120,7 @@ class IdentityBanner extends ConsumerWidget {
               child: Text(text, style: Theme.of(context).textTheme.bodyMedium),
             ),
             TextButton(
-              onPressed: () async {
-                await pushPage<void>(
-                  context,
-                  IdentityPage(onPassed: () => Navigator.of(context).pop()),
-                );
-                ref.invalidate(identityStatusProvider);
-                ref.invalidate(myStoresProvider);
-              },
+              onPressed: () => confirmIdentity(context, ref),
               child: const Text(SellStrings.identityBannerAction),
             ),
           ],
@@ -149,6 +154,11 @@ class _SellShellState extends ConsumerState<SellShell> {
         store: store,
         banner: IdentityBanner(owner: store.role.isOwner),
       ),
+      SellChatsTab(
+        key: ValueKey('chats-${store.id}'),
+        storeId: store.id,
+        banner: IdentityBanner(owner: store.role.isOwner),
+      ),
       ProductsTab(key: ValueKey('products-${store.id}'), store: store),
       StoreTab(key: ValueKey('store-${store.id}'), store: store),
       if (team) TeamTab(key: ValueKey('team-${store.id}'), store: store),
@@ -171,6 +181,11 @@ class _SellShellState extends ConsumerState<SellShell> {
               icon: Icon(Icons.receipt_long_outlined),
               selectedIcon: Icon(Icons.receipt_long),
               label: SellStrings.tabOrders,
+            ),
+            const NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: ChatStrings.chats,
             ),
             const NavigationDestination(
               icon: Icon(Icons.inventory_2_outlined),

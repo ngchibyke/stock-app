@@ -5,12 +5,14 @@ import 'package:market/core/session/me.dart';
 import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/features/catalog/catalog_repository.dart';
+import 'package:market/features/chat/chat_repository.dart';
 import 'package:market/features/sell/identity/selfie_capture.dart';
 import 'package:market/features/sell/photos/photo_source.dart';
 import 'package:market/features/sell/sell_repository.dart';
 import 'package:material_ui/material_ui.dart';
 
 import 'fake_catalog_repository.dart';
+import 'fake_chat.dart';
 import 'fake_sell.dart';
 
 /// A signed-in session that holds [me] and counts how often it was refreshed.
@@ -49,6 +51,8 @@ class SellEnv {
   final FakeSellRepository sell = FakeSellRepository();
   final FakeWorkRepository work = FakeWorkRepository();
   final FakeCatalogRepository catalog = FakeCatalogRepository();
+  final FakeChatRepository chat = FakeChatRepository();
+  final FakeChatSocket chatSocket = FakeChatSocket();
   SelfieCapture selfie = const FakeSelfieCapture();
   PhotoSource? photos;
 
@@ -59,6 +63,8 @@ class SellEnv {
     workRepositoryProvider.overrideWithValue(work),
     catalogRepositoryProvider.overrideWithValue(catalog),
     selfieCaptureProvider.overrideWithValue(selfie),
+    chatRepositoryProvider.overrideWithValue(chat),
+    chatSocketProvider.overrideWithValue(chatSocket),
     identityPollProvider.overrideWithValue((
       every: const Duration(milliseconds: 100),
       times: 50,

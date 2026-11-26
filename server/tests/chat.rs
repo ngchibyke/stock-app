@@ -427,6 +427,19 @@ async fn sender_alone_sees_their_withheld_row(pool: PgPool) {
         .unwrap();
     let own = get(&app, &buyer, &path).await;
     assert!(own.json["pending"][0]["suggested"].is_null());
+    // The reason no longer offers a version that is not there.
+    assert_eq!(
+        own.json["pending"][0]["reason"],
+        "This could come across as rude, so it wasn't sent."
+    );
+
+    // Once the suggestion has been sent, the stopped original is done with.
+    sqlx::query("UPDATE moderation_flags SET suggestion_used_at = now()")
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let own = get(&app, &buyer, &path).await;
+    assert_eq!(own.json["pending"], json!([]));
 
     let theirs = get(&app, &shop.seller_token, &path).await;
     assert_eq!(theirs.json["messages"], json!([]));

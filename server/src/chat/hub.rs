@@ -226,6 +226,7 @@ mod tests {
             conversation_id: Uuid::new_v4(),
             seq,
             from: Party::Buyer,
+            by: None,
             body: "hello".into(),
             sent_at: OffsetDateTime::UNIX_EPOCH,
         })

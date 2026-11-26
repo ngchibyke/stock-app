@@ -1,5 +1,9 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../chat/chat_pages.dart';
+import '../chat/chat_strings.dart';
+
 import 'package:material_ui/material_ui.dart';
 
 import '../../core/api/api_error.dart';
@@ -375,15 +379,24 @@ class _LoadedState extends ConsumerState<_Loaded> {
             top: false,
             child: Padding(
               padding: const EdgeInsets.all(Tokens.s4),
-              child: FilledButton(
-                key: _addKey,
-                onPressed: variant == null || soldOut || _adding
-                    ? null
-                    : () => _add(variant),
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size.fromHeight(Tokens.minTap + 4),
-                ),
-                child: const Text(Strings.addToCart),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: () => openProductChat(context, ref, _p.id),
+                    child: const Text(ChatStrings.askSeller),
+                  ),
+                  FilledButton(
+                    key: _addKey,
+                    onPressed: variant == null || soldOut || _adding
+                        ? null
+                        : () => _add(variant),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(Tokens.minTap + 4),
+                    ),
+                    child: const Text(Strings.addToCart),
+                  ),
+                ],
               ),
             ),
           ),

@@ -59,3 +59,45 @@ impl ToneChecker for FakeTone {
             .unwrap_or_else(|| Ok(ToneVerdict::clean()))
     }
 }
+
+/// A tone check for development and the app's wire check, chosen with
+/// `TONE_PROVIDER=fake`. It judges by marker, not by meaning: `[[mild]]` is a rude
+/// message with a suggestion, `[[serious]]` an abusive one, `[[down]]` an outage and
+/// anything else is clean. `main` uses it only when no `ANTHROPIC_API_KEY` is set, and
+/// production refuses to start without one, so it cannot run there.
+pub struct ScriptedTone;
+
+pub const SCRIPTED_SUGGESTION: &str = "Could we say that more kindly?";
+
+#[async_trait]
+impl ToneChecker for ScriptedTone {
+    async fn check(&self, text: &str) -> Answer {
+        use super::filter::Category;
+        if text.contains("[[down]]") {
+            Err(ToneError::Unavailable)
+        } else if text.contains("[[serious]]") {
+            Ok(ToneVerdict::serious(Category::Abuse))
+        } else if text.contains("[[mild]]") {
+            Ok(ToneVerdict::mild(SCRIPTED_SUGGESTION))
+        } else {
+            Ok(ToneVerdict::clean())
+        }
+    }
+}
+
+#[cfg(test)]
+mod scripted_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn markers_choose_the_verdict() {
+        let t = ScriptedTone;
+        assert_eq!(t.check("hello").await.unwrap(), ToneVerdict::clean());
+        assert_eq!(
+            t.check("[[mild]] you").await.unwrap(),
+            ToneVerdict::mild(SCRIPTED_SUGGESTION)
+        );
+        assert!(t.check("x [[serious]]").await.unwrap().severity.is_some());
+        assert_eq!(t.check("[[down]]").await, Err(ToneError::Unavailable));
+    }
+}
