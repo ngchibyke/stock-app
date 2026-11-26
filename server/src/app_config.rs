@@ -81,7 +81,7 @@ fn https_url(name: &str, raw: String) -> Result<String> {
 
 /// 1 to 40 characters of letters, digits, `.`, `-`, `_`; it becomes a folder name in a URL, so
 /// `..` is refused too.
-fn assets_version(name: &str, raw: String) -> Result<String> {
+pub fn assets_version(name: &str, raw: String) -> Result<String> {
     let ok = (1..=40).contains(&raw.len())
         && raw
             .bytes()

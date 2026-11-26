@@ -10,6 +10,7 @@ import 'core/session/session_controller.dart';
 import 'core/strings.dart';
 import 'core/theme/tokens.dart';
 import 'core/ui/states.dart';
+import 'features/privacy/privacy_pages.dart';
 import 'features/account/account_page.dart';
 import 'features/addresses/address_form_page.dart';
 import 'features/addresses/address_list_page.dart';
@@ -83,6 +84,8 @@ String? redirectFor({
   switch (state) {
     case SessionSignedOut():
       return _signedOutPaths.contains(path) ? null : signInPath;
+    case SessionDeleting():
+      return path == deletionPendingPath ? null : deletionPendingPath;
     case SessionSignedIn():
       final known = _signedInPrefixes.any((p) => _isUnder(path, p));
       if (!known) return homePath;
@@ -151,6 +154,10 @@ GoRouter buildRouter(
       ),
       // The gate notice itself is drawn over the app by MarketApp; this route
       // only gives the redirect somewhere to put the person.
+      GoRoute(
+        path: deletionPendingPath,
+        builder: (context, state) => const DeletionPendingPage(),
+      ),
       GoRoute(
         path: blockedPath,
         builder: (context, state) => const SizedBox.shrink(),

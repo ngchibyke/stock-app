@@ -33,3 +33,6 @@ const String cartPath = '/cart';
 /// The selling area: the access code, the identity check, the first store, then
 /// Orders, Products, Store and Team.
 const String sellPath = '/sell';
+
+/// Where a person whose account is waiting to be deleted lands, and only there.
+const String deletionPendingPath = '/deleting';

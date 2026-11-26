@@ -34,3 +34,51 @@ who already has one.
 When a district is full the store stays active and listed everywhere except the map, and
 `market.district_full` is written to the audit log. It takes the next plot that frees up
 (oldest waiting store first), or one at the next start-up.
+
+## Real art (part 7f)
+
+The owner makes the art in Unreal and hands over an *art pack*. `server art ...` (no database
+needed) checks it, cuts it, publishes it and verifies it. Design:
+`docs/superpowers/specs/2026-11-26-07f-art-pipeline-design.md`.
+
+```
+pack/
+  layout.json            the server's layout file (districts carry store_type), with the right max_level
+  market.png             one square top-down render of the whole market (at most 16384 px)
+  rooms/<type>/
+    room.json            slots and light; room_image must be "room.jpg", depth_image "depth.png"
+    room.png             the interior (at most 4096 px)
+    depth.png            a grey depth map, the same shape as the room picture
+```
+
+The world in `layout.json` must be square, `tile_size` a power of two from 64 to 512 and
+`base_image` `base.jpg`. `max_level` must be what the market picture supports without being
+enlarged: `floor(log2(pixels / tile_size))`, at most 6. `art check` computes it and says which
+value to set.
+
+```
+server art check <pack>                          # every picture problem at once, then the layout's first
+server art build <pack> <out> --version <name>   # writes <out>/<name>/ with a manifest of checksums
+server art publish <out>/<name>                  # needs the S3_* variables; prints the two settings
+server art verify <name>                         # fetches from the public address and compares
+```
+
+`publish` uploads every file with a long immutable cache lifetime and the manifest last, and
+refuses a version that already has one. It prints:
+
+```
+MARKET_ASSETS_VERSION=<name>
+MARKET_ASSETS_BASE_URL=<public base>/market
+```
+
+Setting those and restarting the server makes the version live; setting the old name back
+restarts into the old art. The app puts the version in every picture address, so versions never
+mix in its cache.
+
+**The layout and the art travel together.** Copy the pack's `layout.json` and `rooms/*/room.json`
+into this folder (and the app's bundled copy while it still ships placeholders), then restart.
+`art verify <name>` compares the published art's layout hash with the layout this server loads
+(`--layout-dir`, default `MARKET_LAYOUT_DIR`) and says plainly when they differ.
+
+Pictures are JPEG (depth maps PNG) for now: the image library only writes lossless WebP, which
+is larger than JPEG for photographs.

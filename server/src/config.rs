@@ -347,6 +347,16 @@ fn is_local_http(url: &str) -> bool {
     matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
+/// The object store's settings from the environment alone, for the `art` commands, which
+/// need no database and none of the rest of the server's configuration.
+pub fn s3_from_env() -> Result<Option<S3Config>> {
+    let app_env = std::env::var("APP_ENV").unwrap_or_default();
+    s3_config(
+        &|name| std::env::var(name).ok(),
+        DEV_ECHO_ENVS.contains(&app_env.as_str()),
+    )
+}
+
 /// Object storage for photos. All seven variables are set together or none is.
 /// `dev` (APP_ENV development or test) additionally allows a MinIO on this machine over
 /// plain http; every other address, and every other environment, needs https.

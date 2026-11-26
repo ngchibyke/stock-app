@@ -95,7 +95,13 @@
 //! 21. `identity_grace`: stores past their identity grace period with an unverified
 //!     owner go `pending` (plot kept); owners inside it get a weekly reminder
 //!     -> [`identity::jobs::run_grace`](crate::identity::jobs::run_grace).
-//! 22. `partner_events`: received partner events are marked processed and old ones pruned
+//! 22. `erase_accounts`: people whose deletion cooling-off has ended are erased
+//!     -> [`privacy::jobs::run_erase`](crate::privacy::jobs::run_erase).
+//! 23. `build_exports`: requested data exports are built and stored encrypted
+//!     -> [`privacy::export::run`](crate::privacy::export::run).
+//! 24. `retention`: the Owner's retention windows are applied
+//!     -> [`privacy::retention::run`](crate::privacy::retention::run).
+//! 25. `partner_events`: received partner events are marked processed and old ones pruned
 //!     -> [`partners::jobs::run`](crate::partners::jobs::run).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
@@ -153,6 +159,7 @@ use crate::{
     identity::jobs as identity_jobs,
     notify::reminders,
     partners::jobs as partner_jobs,
+    privacy::{export as privacy_export, jobs as privacy_jobs, retention as privacy_retention},
     settings,
     statement::job as statement_job,
     stores::team,
@@ -234,6 +241,7 @@ pub struct JobReport {
     pub collect_reminders_sent: u32,
     pub identity_attempts: u32,
     pub identity_grace: u32,
+    pub privacy: u32,
     pub partner_events: u32,
     pub failed: u32,
 }
@@ -262,7 +270,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 22] = [
+    let jobs: [(&str, Job); 25] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -284,6 +292,9 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (collect::COLLECT_REMINDERS, Job::CollectReminders),
         (identity_jobs::IDENTITY_ATTEMPTS, Job::IdentityAttempts),
         (identity_jobs::IDENTITY_GRACE, Job::IdentityGrace),
+        (privacy_jobs::ERASE_ACCOUNTS, Job::EraseAccounts),
+        (privacy_export::BUILD_EXPORTS, Job::BuildExports),
+        (privacy_retention::RETENTION, Job::Retention),
         (partner_jobs::PARTNER_EVENTS, Job::PartnerEvents),
     ];
     for (name, job) in jobs {
@@ -321,6 +332,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::CollectReminders => &mut report.collect_reminders_sent,
             Job::IdentityAttempts => &mut report.identity_attempts,
             Job::IdentityGrace => &mut report.identity_grace,
+            Job::EraseAccounts | Job::BuildExports | Job::Retention => &mut report.privacy,
             Job::PartnerEvents => &mut report.partner_events,
         };
         *slot += stats.done;
@@ -362,6 +374,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 collect_reminders = r.collect_reminders_sent,
                 identity_attempts = r.identity_attempts,
                 identity_grace = r.identity_grace,
+                privacy = r.privacy,
                 partner_events = r.partner_events,
                 failed = r.failed,
                 "jobs tick"
@@ -419,6 +432,9 @@ enum Job {
     CollectReminders,
     IdentityAttempts,
     IdentityGrace,
+    EraseAccounts,
+    BuildExports,
+    Retention,
     PartnerEvents,
 }
 
@@ -446,6 +462,9 @@ impl Job {
             Job::CollectReminders => collect::send_reminders(state, cancel).await,
             Job::IdentityAttempts => identity_jobs::run_attempts(state, cancel).await,
             Job::IdentityGrace => identity_jobs::run_grace(state, cancel).await,
+            Job::EraseAccounts => privacy_jobs::run_erase(state, cancel).await,
+            Job::BuildExports => privacy_export::run(state, cancel).await,
+            Job::Retention => privacy_retention::run(state, cancel).await,
             Job::PartnerEvents => partner_jobs::run(state, cancel).await,
         }
     }
