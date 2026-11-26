@@ -126,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
     let chat_hub = Arc::new(ChatHub::new());
     let tone: Arc<dyn ToneChecker> = match config.claude.clone() {
         Some(cfg) => Arc::new(ClaudeTone::new(cfg)?),
+        None if std::env::var("TONE_PROVIDER").as_deref() == Ok("fake") => {
+            tracing::warn!("TONE_PROVIDER=fake: tone checks are scripted, not real");
+            Arc::new(server::moderation::fake::ScriptedTone)
+        }
         None => {
             tracing::warn!("ANTHROPIC_API_KEY not set: tone checks pass everything");
             Arc::new(NoTone)

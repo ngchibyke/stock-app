@@ -361,6 +361,68 @@ async fn a_buyers_message_notifies_the_team_by_role_and_branch(pool: PgPool) {
     );
 }
 
+async fn register_device(t: &Team, token: &str, push_token: &str) {
+    let res = t
+        .app
+        .request(
+            Method::PUT,
+            "/me/push-device",
+            Some(json!({ "token": push_token, "platform": "android" })),
+            Some(token),
+        )
+        .await;
+    assert!(res.status < 300, "{}", res.json);
+}
+
+/// Push tokens that received a chat notice since the last call.
+fn chat_pushes(t: &Team) -> Vec<(String, String, String)> {
+    t.app
+        .push
+        .seen()
+        .into_iter()
+        .filter(|s| s.kind == "chat_message")
+        .map(|s| (s.token, s.title.to_string(), s.body.to_string()))
+        .collect()
+}
+
+#[sqlx::test]
+async fn a_chat_message_reaches_the_right_devices_with_fixed_words_only(pool: PgPool) {
+    let t = team(pool).await;
+    let order = t.order_chat().await;
+    register_device(&t, &t.owner_token, "dev-owner").await;
+    register_device(&t, &t.staff_a.1, "dev-staff-a").await;
+    register_device(&t, &t.staff_b.1, "dev-staff-b").await;
+    register_device(&t, &t.buyer, "dev-buyer").await;
+
+    let text = "Please confirm the size of my dress";
+    assert_eq!(t.send(&t.buyer, order, text).await.status, 200);
+    server::notify::worker::run_once(&t.app.state)
+        .await
+        .unwrap();
+    let mut tokens: Vec<String> = chat_pushes(&t).into_iter().map(|p| p.0).collect();
+    tokens.sort();
+    assert_eq!(
+        tokens,
+        ["dev-owner", "dev-staff-a"],
+        "the order's team, not the other branch, not the sender"
+    );
+    for (_, title, body) in chat_pushes(&t) {
+        assert_eq!(title, "New message");
+        assert_eq!(body, "You have a new message. Open the app to read it.");
+        assert!(!body.contains("dress") && !title.contains("dress"));
+    }
+
+    // The store's answer reaches the buyer's device only.
+    let before = chat_pushes(&t).len();
+    assert_eq!(t.send(&t.manager.1, order, "Size M").await.status, 200);
+    server::notify::worker::run_once(&t.app.state)
+        .await
+        .unwrap();
+    let new: Vec<_> = chat_pushes(&t).split_off(before);
+    assert_eq!(new.len(), 1);
+    assert_eq!(new[0].0, "dev-buyer");
+}
+
 #[sqlx::test]
 async fn the_team_shares_one_read_marker_and_answers_are_not_unread_for_each_other(pool: PgPool) {
     let t = team(pool).await;
