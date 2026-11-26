@@ -40,6 +40,7 @@ async fn config_route_reads_settings(pool: PgPool) {
             "support_email": "help@shop.example",
             "maintenance": { "active": true, "message": "Back at 6pm." },
             "assets": null,
+            "payment_return_url": common::TEST_REDIRECT_URL,
         })
     );
 }
@@ -95,6 +96,7 @@ async fn defaults_are_null_not_empty(pool: PgPool) {
             "support_email": null,
             "maintenance": { "active": false, "message": null },
             "assets": null,
+            "payment_return_url": common::TEST_REDIRECT_URL,
         })
     );
 }

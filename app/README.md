@@ -26,7 +26,47 @@ What a first run on a device should check:
 - the code boxes with the system one-time-code suggestion;
 - text at 200 percent;
 - the shell and the account page;
-- the market device checklist below.
+- the market device checklist below;
+- the selling checklist below;
+- the buying checklist below.
+
+## Selling
+
+The selling area (`lib/features/sell/`, design `docs/superpowers/specs/2026-11-26-07e2-selling-app-design.md`)
+starts from Account: **Sell on Abuja Market** for someone with no seller side, **My stores** for a
+seller or team member. Nothing in it has been run on a device. What a device run should check:
+
+- the guided camera on a real phone: permission prompt wording, the square frame against the real
+  picture, tap to focus, flash, and a denied permission falling back to the gallery;
+- a photo of about 4000 px from a mid-range phone is cut, shrunk and uploaded in a few seconds
+  without the screen freezing (it runs in an isolate);
+- the NIN field: numeric keyboard, no suggestions or autofill, cleared when the app goes to the
+  background;
+- the identity selfie: **no provider SDK is plugged in**, so `UnavailableSelfieCapture` answers
+  "could not be taken" until one is. Run with `--dart-define=IDENTITY_FAKE=true` against a server
+  using its fake provider to see the whole flow;
+- entering a buyer's handover code, and the lock message after repeated wrong codes;
+- the collect notice before turning collect on.
+
+## Buying
+
+The buying screens (`lib/features/buy/`, design `docs/superpowers/specs/2026-11-26-07e3-buying-app-design.md`)
+start from the cart's Checkout button and from Account (My orders, Notices). Nothing in them has been run on
+a device, and no real payment or push has ever been sent. A device run should check:
+
+- a sandbox payment end to end through the real webview: the provider's page, a 3-D Secure step, and the
+  return to the app closing the view (the return page comes from `GET /app/config` as `payment_return_url`);
+  the webview opens any https page (banks move between hosts) and refuses every other scheme;
+- the result screens: paid, pending after the two-minute wait, failed, and that "paid" only ever shows after
+  the server says so;
+- the handover code on the order screen: Android keeps the window out of screenshots and the recent-apps
+  picture while it shows (`FLAG_SECURE`, `MainActivity.kt`); iOS has no equivalent set up yet;
+- push: the explanation dialog after the first paid order, the system permission, and a notice arriving. The
+  app has no Firebase project files, so `Firebase.initializeApp()` fails quietly and push stays off until the
+  owner adds `google-services.json` and `GoogleService-Info.plist` and the Android Gradle plugin (a go-live
+  step), and the server's `FCM_SERVICE_ACCOUNT_FILE`;
+- stock changing between the options and Pay (409 `allocation_changed`): the options refresh and nothing is
+  charged.
 
 ## The market
 
@@ -214,6 +254,24 @@ through the app's market code. The seed puts its store in the fashion district
 on plot `fashion-1` (a `store_plots` row), so it stands on the map. The seed's store
 has dummy encrypted fields: it is good for browsing and the cart, not for
 checkout.
+
+**The selling wire check** (`test/wire/sell_wire_test.dart`) walks the seller's path:
+an access code, the identity check, a store, branches, a team member and their
+invitation, products and orders. Start the server as above with the server's fake
+identity provider (`IDENTITY_PROVIDER=fake` and a `NIN_INDEX_KEY`, see
+`server/.env.example`), and also set `WIRE_DATABASE_URL` to the scratch database's
+URL: the check promotes one fresh account to Owner there so it can issue an access
+code, and does nothing else with the database. It uses a new NIN each run (a NIN
+that has passed is taken for good). It cannot go through a payout verification
+(no bank lookup locally), a photo upload (no photo store locally) or a paid order
+(no payment locally), so those are covered by the widget tests and by the server's
+own tests only.
+
+**The buying wire check** (`test/wire/buy_wire_test.dart`) goes as far as a local server allows: the
+payment return page in the app config, an address, delivery options for an empty cart (the server refuses it
+with `cart_empty`), orders, the inbox and push registration. Start the server with `PUBLIC_REDIRECT_URL` set.
+A real checkout needs a payment provider and an active store, so it, the webview and push are not covered
+end to end.
 
 The check refuses any `WIRE_BASE_URL` whose host is not `localhost`,
 `127.0.0.1` or `[::1]`: it signs people up and asks for SMS codes, so it must

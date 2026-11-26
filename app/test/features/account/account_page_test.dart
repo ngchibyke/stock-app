@@ -12,6 +12,16 @@ import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';
 import 'package:market/features/account/account_page.dart';
+import 'package:market/features/buy/buy_repository.dart';
+import 'package:market/features/sell/sell_repository.dart';
+
+import 'package:market/features/buy/buy_models.dart';
+import 'package:market/features/buy/buy_strings.dart';
+
+import '../../support/fake_buy.dart';
+
+import '../../support/fake_sell.dart';
+
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/auth/pending_credential.dart';
 import 'package:market/features/auth/pending_reset.dart';
@@ -90,6 +100,8 @@ Future<void> _pumpPage(
         sessionProvider.overrideWith(() => _ScriptedSession(script)),
         appConfigProvider.overrideWith(() => FakeConfigNotifier()),
         packageVersionProvider.overrideWith((ref) async => '1.0.0'),
+        sellRepositoryProvider.overrideWithValue(FakeSellRepository()),
+        inboxRepositoryProvider.overrideWithValue(FakeInboxRepository()),
       ],
       child: MaterialApp(
         theme: lightTheme(),
@@ -112,6 +124,19 @@ void main() {
     expect(find.text(Strings.appVersion('1.0.0')), findsOneWidget);
     expect(find.text(Strings.addresses), findsOneWidget);
     expect(find.text(Strings.signOut), findsOneWidget);
+  });
+
+  testWidgets('orders_and_notices_rows_show_and_the_notice_row_counts_unread', (
+    tester,
+  ) async {
+    final h = AppHarness(store: MemorySessionStore('tok'));
+    h.adapter.reply(200, testMe);
+    h.inbox.box = const Inbox(items: [], unread: 3);
+    await h.pump(tester);
+    await tester.tap(find.text(Strings.tabAccount));
+    await settle(tester);
+    expect(find.text(BuyStrings.myOrders), findsOneWidget);
+    expect(find.text('${BuyStrings.inboxTitle} (3)'), findsOneWidget);
   });
 
   group('links', () {

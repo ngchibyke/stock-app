@@ -130,6 +130,12 @@ pub struct SellerOrderView {
     #[serde(flatten)]
     pub order: OrderCore,
     pub platform_cut_kobo: i64,
+    /// `courier`, `self` or `collect`; left out on orders from before delivery existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_method: Option<String>,
+    /// The branch the order is fulfilled from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
     /// Left out for Support (see the module docs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buyer_display_name: Option<String>,
@@ -217,6 +223,8 @@ struct Row {
     items_total_kobo: i64,
     delivery_fee_kobo: i64,
     self_delivery: bool,
+    delivery_method: Option<String>,
+    branch_name: Option<String>,
     platform_cut_kobo: i64,
     collection_fee_share_kobo: i64,
     held: bool,
@@ -298,6 +306,8 @@ fn select(viewer_member: &str) -> String {
         "SELECT o.id, o.store_id, o.buyer_id, ({viewer_member}) AS viewer_member, \
         o.status::text AS status, \
         o.items_total_kobo, o.delivery_fee_kobo, COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
+        o.delivery_method::text AS delivery_method, \
+        (SELECT sb.name FROM store_branches sb WHERE sb.id = o.branch_id) AS branch_name, \
         o.platform_cut_kobo, \
         o.collection_fee_share_kobo, (o.held_at IS NOT NULL) AS held, \
         d.id AS dispute_id, d.status AS dispute_status, \
@@ -436,6 +446,8 @@ async fn build(
                 order,
                 platform_cut_kobo: r.platform_cut_kobo,
                 expected_payout_kobo: r.expected_payout(live.as_ref()),
+                delivery_method: r.delivery_method,
+                branch_name: r.branch_name,
                 buyer_display_name: buyer_name.then_some(r.buyer_display_name),
                 payout: r.payout_status.map(|status| PayoutView { status }),
                 done_by: done_by.remove(&r.id).unwrap_or_default(),

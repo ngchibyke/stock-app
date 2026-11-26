@@ -29,3 +29,7 @@ final List<RegExp> _marketPaths = [
   RegExp(r'^/home/list/store/[^/]+$'),
 ];
 const String cartPath = '/cart';
+
+/// The selling area: the access code, the identity check, the first store, then
+/// Orders, Products, Store and Team.
+const String sellPath = '/sell';

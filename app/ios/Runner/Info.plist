@@ -70,5 +70,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>The camera is used to take photos of the products you sell.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Choose photos of your products from your library.</string>
 </dict>
 </plist>

@@ -25,6 +25,23 @@ String? _httpsUrl(Object? value) {
   return text;
 }
 
+// The payment return page is fixed server configuration: https, or plain http to a
+// loopback host in development.
+String? _returnUrl(Object? value) {
+  final text = _text(value);
+  if (text == null) return null;
+  final uri = Uri.tryParse(text);
+  if (uri == null || uri.host.isEmpty) return null;
+  final loopback = const {
+    'localhost',
+    '127.0.0.1',
+    '10.0.2.2',
+  }.contains(uri.host);
+  return uri.scheme == 'https' || (uri.scheme == 'http' && loopback)
+      ? text
+      : null;
+}
+
 // A version goes into asset URLs as one path segment, so only plain
 // characters are accepted.
 String? _versionSegment(Object? value) {
@@ -50,6 +67,7 @@ class AppConfig {
     this.maintenanceMessage,
     this.assetsVersion,
     this.assetsBaseUrl,
+    this.paymentReturnUrl,
   });
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -68,6 +86,7 @@ class AppConfig {
           : null,
       assetsVersion: assets is Map ? _versionSegment(assets['version']) : null,
       assetsBaseUrl: assets is Map ? _httpsUrl(assets['base_url']) : null,
+      paymentReturnUrl: _returnUrl(json['payment_return_url']),
     );
   }
 
@@ -87,6 +106,10 @@ class AppConfig {
   final String? assetsVersion;
   final String? assetsBaseUrl;
 
+  /// Where the payment provider sends the buyer back to: the payment view closes
+  /// when it reaches this page.
+  final String? paymentReturnUrl;
+
   /// This config as a fallback: maintenance is a live, transient server state,
   /// so it is never carried through a failed fetch. A stored minimum version
   /// stands (versions only go up).
@@ -98,6 +121,7 @@ class AppConfig {
     supportEmail: supportEmail,
     assetsVersion: assetsVersion,
     assetsBaseUrl: assetsBaseUrl,
+    paymentReturnUrl: paymentReturnUrl,
   );
 
   /// The same shape the server sends, so a stored copy reads back through
@@ -109,6 +133,7 @@ class AppConfig {
     'support_email': supportEmail,
     'maintenance': {'active': maintenanceActive, 'message': maintenanceMessage},
     'assets': {'version': assetsVersion, 'base_url': assetsBaseUrl},
+    'payment_return_url': paymentReturnUrl,
   };
 }
 

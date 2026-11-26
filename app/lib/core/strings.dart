@@ -232,7 +232,6 @@ abstract final class Strings {
   static const String decreaseQuantity = 'Take one away';
   static String eachPrice(String price) => '$price each';
   static const String total = 'Total';
-  static const String checkoutSoon = 'Checkout opens soon.';
   static const String cartLoadFailed = "We couldn't load your cart.";
   static const String cartUpdateFailed =
       "We couldn't update your cart. Try again.";

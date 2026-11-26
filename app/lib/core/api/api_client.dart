@@ -134,6 +134,7 @@ class ApiClient {
     Map<String, Object?>? query,
     Object? body,
     bool auth = true,
+    Map<String, String>? headers,
   }) async {
     // Dio ignores baseUrl for an absolute URL, which would send the bearer
     // token to another host (or over plain http). Only server-relative paths.
@@ -156,6 +157,7 @@ class ApiClient {
         queryParameters: query,
         options: Options(
           method: method,
+          headers: headers,
           extra: {_authKey: auth},
           // Decoded here so a malformed body is a typed error, not a dio
           // "unknown" exception that would read as being offline.
@@ -188,11 +190,18 @@ class ApiClient {
     bool auth = true,
   }) => _send('GET', path, query: query, auth: auth);
 
-  Future<Object?> post(String path, {Object? body, bool auth = true}) =>
-      _send('POST', path, body: body, auth: auth);
+  Future<Object?> post(
+    String path, {
+    Object? body,
+    bool auth = true,
+    Map<String, String>? headers,
+  }) => _send('POST', path, body: body, auth: auth, headers: headers);
 
   Future<Object?> put(String path, {Object? body}) =>
       _send('PUT', path, body: body);
+
+  Future<Object?> patch(String path, {Object? body}) =>
+      _send('PATCH', path, body: body);
 
   Future<Object?> delete(String path) => _send('DELETE', path);
 }

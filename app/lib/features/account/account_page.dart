@@ -13,6 +13,14 @@ import '../../core/strings.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/states.dart';
 import '../auth/auth_errors.dart';
+import '../buy/buy_strings.dart';
+import '../buy/inbox.dart';
+import '../buy/orders_pages.dart';
+import '../sell/sell_providers.dart';
+import '../sell/sell_shell.dart';
+import '../sell/sell_strings.dart';
+import '../sell/sell_widgets.dart';
+import '../sell/team_branches.dart';
 
 /// Who is signed in, the app version, the links to the terms, privacy page
 /// and support, the address book and the way out.
@@ -142,6 +150,34 @@ class _AccountPageState extends ConsumerState<AccountPage> {
           ),
         ],
         const SizedBox(height: Tokens.s5),
+        _LinkRow(
+          label: hasSellerSide(me, ref.watch(myStoresProvider).value)
+              ? SellStrings.myStores
+              : SellStrings.sellEntry,
+          icon: Icons.chevron_right,
+          onTap: () => context.push(sellPath),
+        ),
+        if (ref.watch(myInvitesProvider).value?.isNotEmpty ?? false)
+          _LinkRow(
+            label: SellStrings.invitesTitle,
+            icon: Icons.chevron_right,
+            onTap: () => pushPage<void>(context, const InvitesPage()),
+          ),
+        _LinkRow(
+          label: BuyStrings.myOrders,
+          icon: Icons.chevron_right,
+          onTap: () => pushPage<void>(context, const OrdersPage()),
+        ),
+        _LinkRow(
+          label: (ref.watch(inboxProvider).value?.unread ?? 0) > 0
+              ? '${BuyStrings.inboxTitle} (${ref.watch(inboxProvider).value!.unread})'
+              : BuyStrings.inboxTitle,
+          icon: Icons.chevron_right,
+          onTap: () async {
+            await pushPage<void>(context, const InboxPage());
+            ref.invalidate(inboxProvider);
+          },
+        ),
         _LinkRow(
           label: Strings.addresses,
           icon: Icons.chevron_right,
