@@ -40,6 +40,10 @@ use crate::{
 pub const MAX_AVAILABLE_SQL: &str = "COALESCE((SELECT va.max_available FROM variant_availability va \
      WHERE va.variant_id = v.id), 0)";
 
+/// Units one branch can still sell of a variant: a SQL expression over a
+/// `branch_stock` row aliased `bs`. The same difference `variant_availability` sums.
+pub const BRANCH_AVAILABLE_SQL: &str = "(bs.stock - bs.reserved_quantity)";
+
 /// Most items one `PUT /branches/{id}/stock` may set.
 const MAX_ITEMS: usize = 200;
 
