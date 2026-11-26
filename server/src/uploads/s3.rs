@@ -178,6 +178,7 @@ impl S3Store {
         bucket: Bucket,
         key: &str,
         body: Option<(Vec<u8>, &str)>,
+        cache_control: Option<&str>,
     ) -> Result<reqwest::Response, StoreError> {
         let (host, path, base) = self.locate(bucket, key)?;
         let now = OffsetDateTime::now_utc();
@@ -189,6 +190,9 @@ impl S3Store {
         ];
         if let Some((_, content_type)) = &body {
             signed.push(("content-type", content_type));
+        }
+        if let Some(cache_control) = cache_control {
+            signed.push(("cache-control", cache_control));
         }
         let authorization =
             self.signer
@@ -203,6 +207,9 @@ impl S3Store {
             .header("x-amz-content-sha256", payload);
         if let Some((bytes, content_type)) = body {
             request = request.header("content-type", content_type).body(bytes);
+        }
+        if let Some(cache_control) = cache_control {
+            request = request.header("cache-control", cache_control);
         }
         request.send().await.map_err(|_| failed("transport", None))
     }
@@ -245,7 +252,7 @@ impl ObjectStore for S3Store {
         key: &str,
         max_bytes: usize,
     ) -> Result<Vec<u8>, StoreError> {
-        let mut res = self.send(Method::GET, bucket, key, None).await?;
+        let mut res = self.send(Method::GET, bucket, key, None, None).await?;
         let status = res.status();
         if status.as_u16() == 404 {
             return Err(StoreError::NotFound);
@@ -278,7 +285,32 @@ impl ObjectStore for S3Store {
         content_type: &str,
     ) -> Result<(), StoreError> {
         let res = self
-            .send(Method::PUT, bucket, key, Some((bytes, content_type)))
+            .send(Method::PUT, bucket, key, Some((bytes, content_type)), None)
+            .await?;
+        let status = res.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(failed("status", Some(status.as_u16())))
+        }
+    }
+
+    async fn put_cached(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+        cache_control: &str,
+    ) -> Result<(), StoreError> {
+        let res = self
+            .send(
+                Method::PUT,
+                bucket,
+                key,
+                Some((bytes, content_type)),
+                Some(cache_control),
+            )
             .await?;
         let status = res.status();
         if status.is_success() {
@@ -289,7 +321,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete(&self, bucket: Bucket, key: &str) -> Result<(), StoreError> {
-        let res = self.send(Method::DELETE, bucket, key, None).await?;
+        let res = self.send(Method::DELETE, bucket, key, None, None).await?;
         let status = res.status();
         if status.is_success() || status.as_u16() == 404 {
             Ok(())

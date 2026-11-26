@@ -1,6 +1,7 @@
 pub mod access_codes;
 pub mod admin;
 pub mod app_config;
+pub mod art;
 pub mod audit;
 pub mod auth;
 pub mod cart;

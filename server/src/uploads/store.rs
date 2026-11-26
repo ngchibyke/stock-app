@@ -64,6 +64,19 @@ pub trait ObjectStore: Send + Sync {
         content_type: &str,
     ) -> Result<(), StoreError>;
 
+    /// [`put`](Self::put) with a `Cache-Control` header, for art that never changes under
+    /// its name. A store that cannot set one stores the object without it.
+    async fn put_cached(
+        &self,
+        bucket: Bucket,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+        _cache_control: &str,
+    ) -> Result<(), StoreError> {
+        self.put(bucket, key, bytes, content_type).await
+    }
+
     /// Deleting what is already gone succeeds.
     async fn delete(&self, bucket: Bucket, key: &str) -> Result<(), StoreError>;
 }
