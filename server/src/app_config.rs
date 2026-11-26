@@ -175,12 +175,24 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/app/config", get(show))
 }
 
+/// The page the payment provider sends the buyer back to (`PUBLIC_REDIRECT_URL`), so the
+/// app's payment view knows when to close. It is fixed configuration with no personal data.
+fn with_return_url(mut view: serde_json::Value, url: &str) -> serde_json::Value {
+    if let Some(map) = view.as_object_mut() {
+        map.insert("payment_return_url".into(), url.into());
+    }
+    view
+}
+
 async fn show(State(state): State<AppState>) -> impl IntoResponse {
     (
         [(
             header::CACHE_CONTROL,
             format!("public, max-age={CACHE_SECS}"),
         )],
-        Json(state.app_config.view()),
+        Json(with_return_url(
+            state.app_config.view(),
+            &state.payment_redirect_url,
+        )),
     )
 }
