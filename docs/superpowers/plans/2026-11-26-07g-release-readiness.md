@@ -20,7 +20,7 @@ This container has no Android SDK, no Gradle run and no Mac. Anything in `*.grad
 4. **iOS.** `UIBackgroundModes` with `remote-notification`, `ITSAppUsesNonExemptEncryption` false, the release entitlements file.
 5. **Workflows.** `release.yml` (manual: checks, a signed AAB, an IPA, uploads when their secrets exist) and an Android debug build job in `ci.yml`. YAML parsed and linted here.
 6. **Accessibility.** A widget test that walks the main screens and fails on an unlabelled tap target or one under 48 dp.
-7. **Docs.** `docs/release/`: how to release, the secrets list, listings, Play data safety, Apple privacy labels, review notes, policy points, one ordered device checklist. App README, roadmap, plan status.
+7. **Docs.** `docs/release/go-live-costs-and-placeholders.md` (requested by the owner on 2026-11-26, written when the roadmap is done: everything to pay for to begin live testing, and every placeholder to replace); `docs/release/`: how to release, the secrets list, listings, Play data safety, Apple privacy labels, review notes, policy points, one ordered device checklist. App README, roadmap, plan status.
 
 ## Checks
 
