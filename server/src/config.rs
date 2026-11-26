@@ -41,6 +41,12 @@ pub struct Config {
     pub termii: Option<TermiiConfig>,
     /// What the app is told at start-up: minimum versions, links, a maintenance notice.
     pub app: crate::app_config::AppClientConfig,
+    /// Which identity provider checks sellers (`IDENTITY_PROVIDER`); `None` when unset
+    /// (production then refuses to serve; elsewhere the check answers 503).
+    pub identity_provider: Option<String>,
+    /// Key of the NIN fingerprint (`NIN_INDEX_KEY`). Never rotate it: every verified
+    /// seller would have to verify again.
+    pub nin_index_key: Option<[u8; 32]>,
     /// Folder holding the market `layout.json` and `rooms/` (`MARKET_LAYOUT_DIR`).
     pub market_layout_dir: std::path::PathBuf,
 }
@@ -399,6 +405,46 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>, dev: bool) -> Result<Option<
     }))
 }
 
+/// Identity providers this build knows. Only the fake exists until the owner picks one.
+const KNOWN_IDENTITY_PROVIDERS: &[&str] = &["fake"];
+
+/// `IDENTITY_PROVIDER` and `NIN_INDEX_KEY` (production needing both is `main`'s check, like
+/// the other providers). A provider needs the key; the key must differ
+/// from the other two; the fake is refused in production; an unknown name is an error.
+fn identity_config(
+    var: &impl Fn(&str) -> Option<String>,
+    production: bool,
+    other_keys: &[[u8; 32]],
+) -> Result<(Option<String>, Option<[u8; 32]>)> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let key = get("NIN_INDEX_KEY")
+        .map(|raw| key_from_b64("NIN_INDEX_KEY", &raw))
+        .transpose()?;
+    if key.as_ref().is_some_and(|k| other_keys.contains(k)) {
+        bail!("NIN_INDEX_KEY must differ from FIELD_KEY and INDEX_KEY");
+    }
+    let provider = get("IDENTITY_PROVIDER").map(|v| v.to_lowercase());
+    if let Some(name) = &provider {
+        if !KNOWN_IDENTITY_PROVIDERS.contains(&name.as_str()) {
+            bail!(
+                "IDENTITY_PROVIDER is not a known provider (known: {})",
+                KNOWN_IDENTITY_PROVIDERS.join(", ")
+            );
+        }
+        if name == "fake" && production {
+            bail!("IDENTITY_PROVIDER=fake is not allowed when APP_ENV is production");
+        }
+        if key.is_none() {
+            bail!("NIN_INDEX_KEY is required when IDENTITY_PROVIDER is set");
+        }
+    }
+    Ok((provider, key))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
@@ -435,7 +481,11 @@ impl Config {
         let fcm = fcm_config(&var)?;
         let s3 = s3_config(&var, DEV_ECHO_ENVS.contains(&app_env.as_str()))?;
         let (sms_provider, termii) = sms_config(&var)?;
+        let (identity_provider, nin_index_key) =
+            identity_config(&var, app_env == "production", &[field_key, index_key])?;
         Ok(Self {
+            identity_provider,
+            nin_index_key,
             public_redirect_url,
             mono,
             shipbubble,
@@ -482,6 +532,40 @@ mod tests {
         .into();
         env.extend(pairs.iter().copied());
         Config::from_lookup(|k| env.get(k).map(|v| v.to_string()))
+    }
+
+    #[test]
+    fn identity_config_rules() {
+        const KEY_C: &str = "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=";
+        // Nothing set: fine (the check is then unavailable).
+        let cfg = load(&[]).unwrap();
+        assert!(cfg.identity_provider.is_none() && cfg.nin_index_key.is_none());
+        // The fake with its own key, outside production.
+        let cfg = load(&[("IDENTITY_PROVIDER", " Fake "), ("NIN_INDEX_KEY", KEY_C)]).unwrap();
+        assert_eq!(cfg.identity_provider.as_deref(), Some("fake"));
+        assert_eq!(cfg.nin_index_key, Some([11u8; 32]));
+        // A provider without the key, and the key equal to either other key.
+        let err = load(&[("IDENTITY_PROVIDER", "fake")]).unwrap_err();
+        assert!(err.to_string().contains("NIN_INDEX_KEY"), "{err}");
+        for same in [KEY_A, KEY_B] {
+            let err = load(&[("NIN_INDEX_KEY", same)]).unwrap_err();
+            assert!(err.to_string().contains("must differ"), "{err}");
+        }
+        // The fake never runs in production; unknown names and bad keys are errors.
+        let env = |k: &str| match k {
+            "IDENTITY_PROVIDER" => Some("fake".to_string()),
+            "NIN_INDEX_KEY" => Some(KEY_C.to_string()),
+            _ => None,
+        };
+        let err = identity_config(&env, true, &[]).unwrap_err();
+        assert!(err.to_string().contains("IDENTITY_PROVIDER"), "{err}");
+        let err = load(&[("IDENTITY_PROVIDER", "smileid"), ("NIN_INDEX_KEY", KEY_C)]).unwrap_err();
+        assert!(err.to_string().contains("not a known provider"), "{err}");
+        let err = load(&[("NIN_INDEX_KEY", "short")]).unwrap_err();
+        assert!(err.to_string().contains("NIN_INDEX_KEY"), "{err}");
+        // The key never shows in Debug.
+        let dbg = format!("{:?}", load(&[("NIN_INDEX_KEY", KEY_C)]).unwrap());
+        assert!(!dbg.to_lowercase().contains("nin_index"), "{dbg}");
     }
 
     #[test]

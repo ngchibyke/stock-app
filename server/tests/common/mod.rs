@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 pub const TEST_FIELD_KEY: [u8; 32] = [7u8; 32];
 pub const TEST_INDEX_KEY: [u8; 32] = [9u8; 32];
+pub const TEST_NIN_KEY: [u8; 32] = [11u8; 32];
 pub const TEST_PASSWORD: &str = "correct-horse-1";
 pub const TEST_REDIRECT_URL: &str = "http://localhost:8080/checkout/return";
 /// The business phone of stores made by `make_active_store_with_product`.
@@ -97,6 +98,8 @@ pub struct TestApp {
     pub tone: Arc<server::moderation::fake::FakeTone>,
     /// The push double the state sends through.
     pub push: Arc<server::notify::fake::FakePush>,
+    /// The identity provider double the state uses.
+    pub identity: Arc<server::identity::fake::FakeIdentity>,
     /// The photo store the state uses.
     pub objects: Arc<server::uploads::fake::FakeStore>,
     /// Numbers `shipped_order`'s sellers and buyers, so it can run many times.
@@ -120,6 +123,7 @@ impl TestApp {
         let push = Arc::new(server::notify::fake::FakePush::new());
         let objects = Arc::new(server::uploads::fake::FakeStore::new());
         let statement = Arc::new(server::statement::fake::FakeStatement::new());
+        let identity = Arc::new(server::identity::fake::FakeIdentity::new());
         let state = AppState {
             db: pool.clone(),
             cipher: Arc::new(FieldCipher::new(TEST_FIELD_KEY)),
@@ -147,6 +151,8 @@ impl TestApp {
                 )
                 .expect("the shipped market layout loads"),
             ),
+            identity: Some(identity.clone()),
+            nin_key: Some(Arc::new(TEST_NIN_KEY)),
         };
         Self {
             router: build_app(state.clone()),
@@ -159,6 +165,7 @@ impl TestApp {
             push,
             objects,
             statement,
+            identity,
             shipped_seq: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -175,6 +182,17 @@ impl TestApp {
     /// Replaces what `GET /app/config` answers.
     pub fn use_app_config(&mut self, config: server::app_config::AppClientConfig) {
         self.state.app_config = Arc::new(config);
+        self.router = build_app(self.state.clone());
+    }
+
+    /// Runs the app without the identity provider and/or its key.
+    pub fn disable_identity(&mut self, provider: bool, key: bool) {
+        if provider {
+            self.state.identity = None;
+        }
+        if key {
+            self.state.nin_key = None;
+        }
         self.router = build_app(self.state.clone());
     }
 
@@ -461,7 +479,32 @@ impl TestApp {
         let (id, token) = self.sign_up_verified(phone).await;
         let res = self.redeem(&token, &code).await;
         assert_eq!(res.status, 200, "redeem failed: {}", res.json);
+        // Sellers in these tests have passed the identity check, so earlier suites keep
+        // their meaning. The identity suites make their own sellers.
+        self.pass_identity(id).await;
         (id, token)
+    }
+
+    /// Signs up and verifies a phone, as [`sign_up_verified`](Self::sign_up_verified), and
+    /// the person has passed the identity check (a team member who may act on orders).
+    pub async fn sign_up_cleared(&self, phone: &str) -> (Uuid, String) {
+        let (id, token) = self.sign_up_verified(phone).await;
+        self.pass_identity(id).await;
+        (id, token)
+    }
+
+    /// Marks `user` as having passed the identity check (a stand-in fingerprint, no NIN).
+    pub async fn pass_identity(&self, user: Uuid) {
+        sqlx::query(
+            "INSERT INTO identity_checks (user_id, provider, status, nin_idx, full_name_enc, \
+                                          birth_year, decided_at) \
+             VALUES ($1, 'fake', 'passed', sha256($1::text::bytea), $2, 1990, now())",
+        )
+        .bind(user)
+        .bind(self.state.cipher.encrypt("Ada Obi"))
+        .execute(&self.pool)
+        .await
+        .expect("pass identity");
     }
 
     /// Seller (`phone`) with an active store named `store_name`, activated the real

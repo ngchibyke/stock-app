@@ -1,4 +1,4 @@
-//! The nineteen kinds of notice and their fixed copy. Notices store no text:
+//! The twenty-two kinds of notice and their fixed copy. Notices store no text:
 //! the title and body come from the kind when they are read or pushed.
 
 use serde::Serialize;
@@ -25,10 +25,13 @@ pub enum Kind {
     OrderReadyForCollection,
     CollectReminder,
     CollectionExpired,
+    IdentityPassed,
+    IdentityDeclined,
+    IdentityDue,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 19] = [
+    pub const ALL: [Kind; 22] = [
         Kind::OrderPaid,
         Kind::OrderPickedUp,
         Kind::OrderOutForDelivery,
@@ -48,6 +51,9 @@ impl Kind {
         Kind::OrderReadyForCollection,
         Kind::CollectReminder,
         Kind::CollectionExpired,
+        Kind::IdentityPassed,
+        Kind::IdentityDeclined,
+        Kind::IdentityDue,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -71,6 +77,9 @@ impl Kind {
             Kind::OrderReadyForCollection => "order_ready_for_collection",
             Kind::CollectReminder => "collect_reminder",
             Kind::CollectionExpired => "collection_expired",
+            Kind::IdentityPassed => "identity_passed",
+            Kind::IdentityDeclined => "identity_declined",
+            Kind::IdentityDue => "identity_due",
         }
     }
 
@@ -99,6 +108,9 @@ impl Kind {
             Kind::OrderReadyForCollection => "Ready to collect",
             Kind::CollectReminder => "Your order is waiting",
             Kind::CollectionExpired => "Order not collected",
+            Kind::IdentityPassed => "Identity confirmed",
+            Kind::IdentityDeclined => "Identity check not completed",
+            Kind::IdentityDue => "Confirm your identity to keep selling",
         }
     }
 
@@ -145,6 +157,13 @@ impl Kind {
             Kind::CollectionExpired => {
                 "An order was not collected in time. It has been cancelled and refunded in full."
             }
+            Kind::IdentityPassed => "Your identity is confirmed. Your stores can take orders.",
+            Kind::IdentityDeclined => {
+                "We could not confirm your identity. Open the app to see what to do next."
+            }
+            Kind::IdentityDue => {
+                "Confirm your identity in the app so your store can keep taking orders."
+            }
         }
     }
 }
@@ -155,7 +174,7 @@ mod tests {
 
     #[test]
     fn kinds_have_the_exact_copy() {
-        let table: [(&str, &str, &str); 19] = [
+        let table: [(&str, &str, &str); 22] = [
             (
                 "order_paid",
                 "Paid \u{2014} please ship",
@@ -251,6 +270,21 @@ mod tests {
                 "Order not collected",
                 "An order was not collected in time. It has been cancelled and refunded in full.",
             ),
+            (
+                "identity_passed",
+                "Identity confirmed",
+                "Your identity is confirmed. Your stores can take orders.",
+            ),
+            (
+                "identity_declined",
+                "Identity check not completed",
+                "We could not confirm your identity. Open the app to see what to do next.",
+            ),
+            (
+                "identity_due",
+                "Confirm your identity to keep selling",
+                "Confirm your identity in the app so your store can keep taking orders.",
+            ),
         ];
         for (kind, title, body) in table {
             let k = Kind::parse(kind).unwrap_or_else(|| panic!("unknown kind {kind}"));
@@ -258,6 +292,6 @@ mod tests {
             assert_eq!(k.title(), title);
             assert_eq!(k.body(), body);
         }
-        assert_eq!(Kind::ALL.len(), 19);
+        assert_eq!(Kind::ALL.len(), 22);
     }
 }

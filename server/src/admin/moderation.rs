@@ -1,6 +1,7 @@
 //! Moderation desk. Support sees metadata and resolves flags; only the owner
 //! reads a flagged original, and every read of one is audited. A ban stops
-//! posting only: orders, tracking and money are untouched.
+//! posting only: orders, tracking and money are untouched, except that it also blocks the
+//! user's NIN fingerprints and suspends their stores (see `identity::service::on_ban`).
 //!
 //! Row locks follow the global order: users, then flags; stores, then reviews.
 //! The ban reason lives only in the audit log, and no audit row holds message
@@ -27,6 +28,7 @@ use crate::{
     checkout::service::busy_err,
     error::AppError,
     extract::{AppJson, AppQuery},
+    identity::service as identity,
     moderation::strikes::recalculate_mute,
     orders::views::Cursor,
     reviews::service::{begin, recount},
@@ -307,8 +309,17 @@ async fn review_queue(
     Ok(Json(Items { items }))
 }
 
+/// What else an action on a user does (the identity check's part of a ban).
+#[derive(Clone, Copy)]
+enum Effect {
+    None,
+    Ban,
+    Unban,
+}
+
 /// One owner action on a user: locks them, runs `sql`, refuses with `code` if
 /// nothing changed, and audits.
+#[allow(clippy::too_many_arguments)]
 async fn act_on_user(
     state: &AppState,
     actor: Uuid,
@@ -316,6 +327,7 @@ async fn act_on_user(
     action: &str,
     detail: serde_json::Value,
     code: &'static str,
+    effect: Effect,
     sql: &str,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut tx = begin(&state.db).await?;
@@ -331,6 +343,11 @@ async fn act_on_user(
         return Err(AppError::Conflict(code));
     }
     audit::record(&mut tx, Some(actor), action, "user", Some(user), detail).await?;
+    match effect {
+        Effect::None => {}
+        Effect::Ban => identity::on_ban(&mut tx, actor, user).await?,
+        Effect::Unban => identity::on_unban(&mut tx, actor, &state.market, user).await?,
+    }
     tx.commit().await.context("commit")?;
     Ok(Json(json!({ "user_id": user })))
 }
@@ -347,6 +364,7 @@ async fn unmute(
         "moderation.unmuted",
         json!({}),
         "not_muted",
+        Effect::None,
         "UPDATE user_moderation SET muted_until = NULL \
          WHERE user_id = $1 AND muted_until > now() AND $2::uuid IS NOT NULL",
     )
@@ -373,6 +391,7 @@ async fn ban(
         "moderation.banned",
         json!({ "reason": reason }),
         "already_banned",
+        Effect::Ban,
         "INSERT INTO user_moderation (user_id, banned_at, banned_by) VALUES ($1, now(), $2) \
          ON CONFLICT (user_id) DO UPDATE SET banned_at = now(), banned_by = $2 \
          WHERE user_moderation.banned_at IS NULL",
@@ -392,6 +411,7 @@ async fn unban(
         "moderation.unbanned",
         json!({}),
         "not_banned",
+        Effect::Unban,
         "UPDATE user_moderation SET banned_at = NULL, banned_by = NULL \
          WHERE user_id = $1 AND banned_at IS NOT NULL AND $2::uuid IS NOT NULL",
     )

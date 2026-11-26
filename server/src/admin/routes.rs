@@ -45,6 +45,7 @@ pub fn router() -> Router<AppState> {
             put(set_holiday).delete(remove_holiday),
         )
         .merge(moderation::router())
+        .merge(super::identity::router())
         .merge(super::users::router())
         .merge(super::stores::router())
         .merge(super::order_search::router())

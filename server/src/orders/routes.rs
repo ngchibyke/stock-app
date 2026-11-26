@@ -246,8 +246,8 @@ async fn seller_order(
     user: &AuthUser,
     order_id: Uuid,
 ) -> Result<(String, Option<String>), AppError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(&format!(
-        "SELECT o.status::text, o.delivery_method::text \
+    let row: Option<(String, Option<String>, bool)> = sqlx::query_as(&format!(
+        "SELECT o.status::text, o.delivery_method::text, s.owner_id = $2 \
          FROM orders o JOIN stores s ON s.id = o.store_id \
          WHERE o.id = $1 AND {} AND o.status <> 'pending_payment'",
         covers_branch_sql("$2", "o.branch_id")
@@ -257,7 +257,15 @@ async fn seller_order(
     .fetch_optional(&state.db)
     .await
     .context("load seller order")?;
-    row.ok_or(AppError::NotFound)
+    let (status, delivery, is_owner) = row.ok_or(AppError::NotFound)?;
+    // Managers and staff act on orders only after their identity check; viewing stays open.
+    if !is_owner {
+        let mut conn = state.db.acquire().await.context("acquire")?;
+        if !crate::identity::service::member_cleared(&mut conn, user.id).await? {
+            return Err(AppError::Forbidden("identity_required"));
+        }
+    }
+    Ok((status, delivery))
 }
 
 /// An order the member may act on, which must be delivered by `method`; any other

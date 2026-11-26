@@ -292,6 +292,7 @@ async fn unsuspend(
     .fetch_one(&mut *tx)
     .await
     .context("payout account")?;
+    let verified = verified && crate::identity::service::store_clear(&mut tx, id).await?;
     let next = if verified { "active" } else { "pending" };
     sqlx::query(
         "UPDATE stores SET status = $2::store_status, suspended_at = NULL, \
