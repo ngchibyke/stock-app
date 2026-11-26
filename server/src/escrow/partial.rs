@@ -24,8 +24,11 @@
 //! No provider call runs here: the caller commits, then sends the refund with
 //! [`super::refund::send_refund`] and the payout with [`release::send_payout`].
 //!
-//! Lock order: the order is locked first (`orders`), then `release_in` locks
-//! it again in the same transaction; the payout row is inserted after.
+//! Lock order: the order's siblings of the same checkout and store and the
+//! order itself are locked first (`orders`, id order,
+//! [`release::lock_store_orders`]; a caller that locked the order already
+//! took them before it), then `release_in` locks them again in the same
+//! transaction; the payout row is inserted after.
 
 use anyhow::Context;
 use serde_json::json;
@@ -99,6 +102,7 @@ pub async fn partial_refund_in(
         .execute(&mut *conn)
         .await
         .map_err(db_err("set lock_timeout"))?;
+    release::lock_store_orders(&mut *conn, order_id).await?;
     let row: PartialRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.platform_cut_bps, \
                 o.platform_cut_kobo, o.checkout_id, c.provider, o.held_at IS NOT NULL AS held, \

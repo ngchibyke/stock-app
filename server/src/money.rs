@@ -60,12 +60,19 @@ pub fn payout_fee_kobo(payout_before_fee: i64, s: &FeeSchedule) -> i64 {
     } else {
         s.large_fee
     };
-    let duty = if payout_before_fee >= s.stamp_duty_threshold {
+    base.saturating_add(stamp_duty_kobo(payout_before_fee, s))
+}
+
+/// The stamp duty part of [`payout_fee_kobo`] alone: `stamp_duty_kobo` when
+/// `payout_before_fee` is at or above `stamp_duty_threshold`, else 0. A
+/// statutory levy on each transfer, so it is charged even where the
+/// platform's own payout fee is waived (`escrow::release`).
+pub fn stamp_duty_kobo(payout_before_fee: i64, s: &FeeSchedule) -> i64 {
+    if payout_before_fee >= s.stamp_duty_threshold {
         s.stamp_duty_kobo
     } else {
         0
-    };
-    base.saturating_add(duty)
+    }
 }
 
 /// Splits `total` across `weights` by the largest-remainder method, so the

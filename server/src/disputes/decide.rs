@@ -1,6 +1,8 @@
 //! The owner's decision on a dispute: a full refund, a release, or a partial
-//! refund. One transaction, in the global lock order: the order is locked,
-//! then the dispute is marked decided (a state-conditional update, so a second
+//! refund. One transaction, in the global lock order: the order is locked
+//! (a decision that releases money locks the order's siblings of the same
+//! checkout and store first, [`lock_store_orders`], which decide who pays the
+//! payout fee), then the dispute is marked decided (a state-conditional update, so a second
 //! decision racing this one finds it closed), then the escrow engine's
 //! in-transaction step books the money. Nothing is sent inside the
 //! transaction: after the commit the refund and/or payout are sent, and a
@@ -23,7 +25,7 @@ use crate::{
     escrow::{
         partial::{PartialIn, partial_refund_in},
         refund::{owner_begin_in, send_refund},
-        release::{ReleaseReason, ReleasedIn, release_in, send_payout},
+        release::{ReleaseReason, ReleasedIn, lock_store_orders, release_in, send_payout},
     },
     notify::{kinds::Kind, service as notify},
     settings,
@@ -95,7 +97,11 @@ pub async fn decide(
     let settings = settings::load(&state.db).await?;
 
     let mut tx = begin_locked(state).await?;
-    // Orders before disputes (global lock order).
+    // Orders before disputes (global lock order). A release takes the sibling
+    // orders' locks before the order's own (see escrow::release).
+    if !matches!(decision, Decision::FullRefund) {
+        lock_store_orders(&mut tx, order_id).await?;
+    }
     let items_total: i64 =
         sqlx::query_scalar("SELECT items_total_kobo FROM orders WHERE id = $1 FOR UPDATE")
             .bind(order_id)

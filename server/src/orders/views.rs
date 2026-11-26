@@ -11,7 +11,11 @@
 //!   status. The expected payout uses the fee schedule snapshotted on the
 //!   order when it was paid (the live one only for orders paid before the
 //!   snapshot existed), is never below 0, and is left out once the order is
-//!   cancelled or refunded.
+//!   cancelled or refunded. The seller pays one payout fee per store per
+//!   checkout (`escrow::release`): before release the estimate takes the fee
+//!   off unless another order of the same checkout and store has already
+//!   been released (it paid the fee; the stamp duty, if due, is still taken
+//!   off); once released it is the payout's own amount.
 //! - Both views carry `refunded_kobo` (the order's refund amount, full or
 //!   partial) when the order has a refund. After a partial refund the
 //!   order's `platform_cut_kobo` is the cut on the retained items.
@@ -228,6 +232,9 @@ struct Row {
     payout_amount_kobo: Option<i64>,
     /// The order's refund amount (full or partial; one refund per order).
     refunded_kobo: Option<i64>,
+    /// Another order of the same checkout and store has a payout: it paid
+    /// the payout fee, so this one pays only the stamp duty, if due.
+    sibling_released: bool,
     fee_small_kobo: Option<i64>,
     fee_large_kobo: Option<i64>,
     fee_threshold_kobo: Option<i64>,
@@ -275,11 +282,13 @@ impl Row {
             .saturating_sub(self.platform_cut_kobo)
             .saturating_sub(self.collection_fee_share_kobo)
             .saturating_add(seller_delivery);
-        Some(
-            before_fee
-                .saturating_sub(money::payout_fee_kobo(before_fee, schedule))
-                .max(0),
-        )
+        // A sibling paid the payout fee: only the stamp duty is left.
+        let fee = if self.sibling_released {
+            money::stamp_duty_kobo(before_fee, schedule)
+        } else {
+            money::payout_fee_kobo(before_fee, schedule)
+        };
+        Some(before_fee.saturating_sub(fee).max(0))
     }
 }
 
@@ -296,6 +305,9 @@ fn select(viewer_member: &str) -> String {
         o.created_at, u.display_name AS buyer_display_name, \
         p.status::text AS payout_status, p.amount_kobo AS payout_amount_kobo, \
         rf.amount_kobo AS refunded_kobo, \
+        EXISTS (SELECT 1 FROM payouts sp JOIN orders so ON so.id = sp.order_id \
+                WHERE so.checkout_id = o.checkout_id AND so.store_id = o.store_id \
+                  AND so.id <> o.id) AS sibling_released, \
         o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
         o.stamp_duty_kobo, o.stamp_duty_threshold_kobo \
      FROM orders o \
