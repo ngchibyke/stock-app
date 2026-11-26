@@ -346,23 +346,41 @@ async fn close_refused_with_open_orders_and_for_last_branch(pool: PgPool) {
     let first = first_branch(&app, l.store_id).await;
     let garki = added(&app, &l.seller_token, l.store_id, "Garki").await;
 
-    // A pending checkout is an open order at the first branch.
+    // A pending checkout is an open order. Checkout still sends from the first branch
+    // (until task 7), so the order is moved to Garki by hand.
     let (_, buyer) = app.sign_up_verified(BUYER_PHONE).await;
     assert_eq!(app.set_cart(&buyer, l.variant_id, 1).await.status, 200);
     let res = app.checkout(&buyer, "mono_directpay").await;
     assert_eq!(res.status, 201, "{}", res.json);
+    sqlx::query("UPDATE orders SET branch_id = $1 WHERE store_id = $2")
+        .bind(garki)
+        .bind(l.store_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
 
-    let res = close(&app, &l.seller_token, l.store_id, first).await;
+    let res = close(&app, &l.seller_token, l.store_id, garki).await;
     assert_eq!((res.status, code_of(&res)), (409, "branch_has_open_orders"));
     let open: bool =
         sqlx::query_scalar("SELECT closed_at IS NULL FROM store_branches WHERE id = $1")
-            .bind(first)
+            .bind(garki)
             .fetch_one(&app.pool)
             .await
             .unwrap();
     assert!(open);
 
-    // Garki has none; it closes, and closing it again is refused.
+    // Once the order is cancelled (its unit given back), Garki closes, and closing it
+    // again is refused.
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE store_id = $1")
+        .bind(l.store_id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let mut tx = app.pool.begin().await.unwrap();
+    stock::apply(&mut tx, first, l.variant_id, 0, -1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     let res = close(&app, &l.seller_token, l.store_id, garki).await;
     assert_eq!(res.status, 200, "{}", res.json);
     assert!(res.json["closed_at"].is_string());
@@ -392,6 +410,35 @@ async fn close_refused_with_open_orders_and_for_last_branch(pool: PgPool) {
     assert_eq!(res.status, 404);
     let res = close(&app, &other.seller_token, other.store_id, garki).await;
     assert_eq!(res.status, 404);
+}
+
+#[sqlx::test]
+async fn first_branch_cannot_close_while_checkout_uses_it(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let l = shop(&app, 1).await;
+    let first = first_branch(&app, l.store_id).await;
+    let garki = added(&app, &l.seller_token, l.store_id, "Garki").await;
+
+    let res = close(&app, &l.seller_token, l.store_id, first).await;
+    assert_eq!((res.status, code_of(&res)), (409, "first_branch"));
+    let open: bool =
+        sqlx::query_scalar("SELECT closed_at IS NULL FROM store_branches WHERE id = $1")
+            .bind(first)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert!(open);
+    assert!(
+        audits(&app, "store.branch_closed", l.store_id)
+            .await
+            .is_empty()
+    );
+
+    // The other branch closes; then the first is the last open branch.
+    let res = close(&app, &l.seller_token, l.store_id, garki).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let res = close(&app, &l.seller_token, l.store_id, first).await;
+    assert_eq!((res.status, code_of(&res)), (409, "last_branch"));
 }
 
 #[sqlx::test]

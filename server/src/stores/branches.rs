@@ -5,7 +5,8 @@
 //!
 //! **Closing** is refused while the branch has an order not yet in a final state
 //! (409 `branch_has_open_orders`) or when it is the last open branch (409
-//! `last_branch`). It takes the branch's stock out of the variant totals and revokes
+//! `last_branch`); the first branch cannot close yet (409 `first_branch`), since
+//! checkout and deliveries still send from it. It takes the branch's stock out of the variant totals and revokes
 //! open invites tied to it. Staff tied to it stay in the team but lose its orders and
 //! stock ([`access`] treats a closed branch as nobody's) until the owner moves them to
 //! another branch. Positions are never reused, so a closed branch keeps its own.
@@ -491,17 +492,21 @@ async fn close(
     let mut tx = state.db.begin().await.context("begin")?;
     access::require(&mut tx, store, user.id, Action::ManageBranches).await?;
     lock_store(&mut tx, store).await?;
-    if load_branch(&mut tx, store, id, true)
-        .await?
-        .closed_at
-        .is_some()
-    {
+    let current = load_branch(&mut tx, store, id, true).await?;
+    if current.closed_at.is_some() {
         return Err(branch_closed());
     }
     if open_count(&mut tx, store).await? <= 1 {
         return Err(AppError::ConflictDetail(
             "last_branch",
             "A store needs at least one open branch".into(),
+        ));
+    }
+    // Task 8 lifts this once checkout, options and PATCH /stores stop using position 0.
+    if current.position == 0 {
+        return Err(AppError::ConflictDetail(
+            "first_branch",
+            "The store's first branch cannot be closed yet".into(),
         ));
     }
     let branch: Branch = sqlx::query_as(&format!(
