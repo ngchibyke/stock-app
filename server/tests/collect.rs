@@ -244,7 +244,7 @@ async fn staff_at(
     branch: Uuid,
     owner: Uuid,
 ) -> (Uuid, String) {
-    let (id, token) = app.sign_up_verified(phone).await;
+    let (id, token) = app.sign_up_cleared(phone).await;
     sqlx::query(
         "INSERT INTO store_members (store_id, user_id, role, branch_id, added_by) \
          VALUES ($1, $2, 'staff', $3, $4)",

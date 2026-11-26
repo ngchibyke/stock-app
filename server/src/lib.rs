@@ -15,6 +15,7 @@ pub mod disputes;
 pub mod error;
 pub mod escrow;
 pub mod extract;
+pub mod identity;
 pub mod ledger;
 pub mod limits;
 pub mod market;
@@ -75,6 +76,10 @@ pub struct AppState {
     pub app_config: Arc<app_config::AppClientConfig>,
     /// The market map and its room types, checked once at startup.
     pub market: Arc<market::layout::Layout>,
+    /// Identity check provider; `None` until `IDENTITY_PROVIDER` is set (starts answer 503).
+    pub identity: Option<Arc<dyn identity::IdentityProvider>>,
+    /// Key of the NIN fingerprint (`NIN_INDEX_KEY`), its own key. `None` disables the check.
+    pub nin_key: Option<Arc<[u8; 32]>>,
 }
 
 async fn health() -> Json<Value> {
@@ -137,6 +142,7 @@ pub fn build_app(state: AppState) -> Router {
         .merge(chat::routes::router())
         .merge(reviews::routes::router())
         .merge(disputes::routes::router())
+        .merge(identity::routes::router())
         .merge(notify::routes::router())
         .merge(delivery::addresses::router())
         .merge(delivery::options::router())

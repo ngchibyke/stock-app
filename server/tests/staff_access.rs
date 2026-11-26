@@ -279,7 +279,7 @@ async fn team(pool: PgPool) -> Team {
         let (id, token) = if n > 5 {
             app.make_seller(&phone).await
         } else {
-            app.sign_up_verified(&phone).await
+            app.sign_up_cleared(&phone).await
         };
         ids.push(id);
         tokens.push(token);
@@ -1270,4 +1270,80 @@ async fn deleted_store_dispute_and_review_still_answered(pool: PgPool) {
         ],
     )
     .await;
+}
+
+/// Managers and staff act on orders and edit stock only after their own identity check;
+/// they may still look. The owner is held back at the store instead.
+#[sqlx::test]
+async fn members_need_the_identity_check_to_act(pool: PgPool) {
+    let t = team(pool).await;
+    let order = t.paid_order("self").await;
+    for who in [MANAGER, STAFF_A] {
+        sqlx::query("DELETE FROM identity_checks WHERE user_id = $1")
+            .bind(t.ids[who])
+            .execute(&t.app.pool)
+            .await
+            .unwrap();
+        let res = t
+            .call(
+                who,
+                Method::POST,
+                &format!("/orders/{order}/picked-up"),
+                None,
+            )
+            .await;
+        assert_eq!(res.status, 403, "{}", res.json);
+        assert_eq!(res.json["error"]["code"], "identity_required");
+        // Looking is allowed: the order and the store's list.
+        let res = t
+            .call(who, Method::GET, &format!("/orders/{order}"), None)
+            .await;
+        assert_eq!(res.status, 200, "{}", res.json);
+        let res = t
+            .call(
+                who,
+                Method::GET,
+                &format!("/stores/{}/orders", t.store_id),
+                None,
+            )
+            .await;
+        assert_eq!(res.status, 200, "{}", res.json);
+        // Not a stock edit either.
+        let res = t
+            .call(
+                who,
+                Method::PUT,
+                &format!("/branches/{}/stock", t.branch_a),
+                Some(json!({ "items": [{ "variant_id": t.variant, "stock": 5 }] })),
+            )
+            .await;
+        assert_eq!(res.status, 403, "{}", res.json);
+        assert_eq!(res.json["error"]["code"], "identity_required");
+    }
+    // The order is untouched, and a member who passes may act.
+    t.app.pass_identity(t.ids[STAFF_A]).await;
+    let res = t
+        .call(
+            STAFF_A,
+            Method::POST,
+            &format!("/orders/{order}/picked-up"),
+            None,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    // The owner needs no check of their own to act (their store is gated instead).
+    sqlx::query("DELETE FROM identity_checks WHERE user_id = $1")
+        .bind(t.ids[OWNER])
+        .execute(&t.app.pool)
+        .await
+        .unwrap();
+    let res = t
+        .call(
+            OWNER,
+            Method::POST,
+            &format!("/orders/{order}/out-for-delivery"),
+            None,
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
 }

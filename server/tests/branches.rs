@@ -116,7 +116,7 @@ async fn join(
     role: &str,
     branch: Option<Uuid>,
 ) -> (Uuid, String) {
-    let (id, token) = app.sign_up_verified(phone).await;
+    let (id, token) = app.sign_up_cleared(phone).await;
     let invite = send_invite(app, owner, store, phone, role, branch).await;
     let res = app
         .request(

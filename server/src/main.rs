@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
         require_push(&config.app_env, config.fcm.is_some())?;
         require_uploads(&config.app_env, config.s3.is_some())?;
         require_sms(&config.app_env, sms.is_some())?;
+        require_identity(
+            &config.app_env,
+            config.identity_provider.is_some() && config.nin_index_key.is_some(),
+        )?;
     }
     // Before connecting: a broken layout is a deploy mistake, so name it and stop.
     let market = Arc::new(Layout::load(&config.market_layout_dir).with_context(|| {
@@ -144,6 +148,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let identity: Option<Arc<dyn server::identity::IdentityProvider>> = match config
+        .identity_provider
+        .as_deref()
+    {
+        Some("fake") => {
+            tracing::warn!("IDENTITY_PROVIDER=fake: identity checks are scripted, not real");
+            Some(Arc::new(server::identity::fake::FakeIdentity::new()))
+        }
+        _ => {
+            tracing::warn!("IDENTITY_PROVIDER not set: the seller identity check is unavailable");
+            None
+        }
+    };
+
     let state = AppState {
         db,
         cipher: Arc::new(FieldCipher::new(config.field_key)),
@@ -168,6 +186,8 @@ async fn main() -> anyhow::Result<()> {
         statements: None,
         app_config: Arc::new(config.app.clone()),
         market,
+        identity,
+        nin_key: config.nin_index_key.map(Arc::new),
     };
 
     if matches!(command, Command::Serve) {
@@ -297,6 +317,17 @@ fn sms_sender(config: &Config) -> anyhow::Result<Option<Arc<dyn OtpSender>>> {
 fn require_sms(app_env: &str, configured: bool) -> anyhow::Result<()> {
     if app_env == "production" && !configured {
         bail!("APP_ENV is production but no SMS sender is configured (set SMS_PROVIDER)");
+    }
+    Ok(())
+}
+
+/// Production refuses to start without an identity provider: no seller could be verified,
+/// so no store could take orders.
+fn require_identity(app_env: &str, configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !configured {
+        bail!(
+            "APP_ENV is production but no identity provider is configured (set IDENTITY_PROVIDER and NIN_INDEX_KEY)"
+        );
     }
     Ok(())
 }

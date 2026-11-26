@@ -39,6 +39,10 @@ export const ALERT_LABELS: Record<string, { title: string; hint: string }> = {
     title: "Provider statement does not match",
     hint: "A day's statement differs from the ledger by more than the tolerance.",
   },
+  "identity.budget_exhausted": {
+    title: "Identity checks paused",
+    hint: "Today's budget for identity provider calls is used up, so sellers cannot start a check. Raise the budget in settings, or wait for the day to roll over.",
+  },
   "order.no_delivery_method": {
     title: "Paid order with no delivery method",
     hint: "An old order the ship-deadline job cannot judge. Decide whether to release or refund it.",

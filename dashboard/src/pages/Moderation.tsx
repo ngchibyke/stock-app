@@ -10,6 +10,7 @@ import { ConfirmDialog } from "../ui/Modal";
 import { DataTable, LoadMore } from "../ui/Table";
 import { Badge, Card, CopyChip, EmptyState, ErrorNote, Segmented, Skeleton, StatusBadge, Tabs } from "../ui/kit";
 import { PageHeader } from "../ui/PageHeader";
+import { IdentityReview } from "./Identity";
 import { SkeletonTable } from "../ui/Skeleton";
 
 interface Flag {
@@ -37,17 +38,18 @@ interface ReviewRow {
 const sevTone = (s: string) => (s === "serious" ? "bad" : s === "unreviewable" ? "warn" : "neutral");
 
 export function Moderation() {
-  const [tab, setTab] = useState<"flags" | "bans" | "reviews">("flags");
+  const [tab, setTab] = useState<"flags" | "bans" | "identity" | "reviews">("flags");
   const { user } = useAuth();
   const owner = user?.role === "owner";
   return (
     <>
       <PageHeader title="Moderation" subtitle="Messages the filters caught, people waiting on a ban decision, and reviews to hide." />
       <div style={{ marginTop: 14 }}>
-        <Tabs id="mod" value={tab} onChange={setTab} tabs={[{ value: "flags", label: "Flagged messages" }, { value: "bans", label: "Ban review" }, { value: "reviews", label: "Reviews" }]} />
+        <Tabs id="mod" value={tab} onChange={setTab} tabs={[{ value: "flags", label: "Flagged messages" }, { value: "bans", label: "Ban review" }, { value: "identity", label: "Identity review" }, { value: "reviews", label: "Reviews" }]} />
       </div>
       {tab === "flags" && <Flags owner={owner} />}
       {tab === "bans" && <BanReview owner={owner} />}
+      {tab === "identity" && <IdentityReview owner={owner} />}
       {tab === "reviews" && <HideReview />}
     </>
   );
@@ -207,7 +209,7 @@ function BanReview({ owner }: { owner: boolean }) {
       <ConfirmDialog
         open={target?.kind === "ban"}
         title="Ban this person?"
-        summary={<>They cannot post in chat or reviews. You can lift it later from Users.</>}
+        summary={<>They cannot post in chat or reviews, their stores are suspended and their NIN is blocked from any other account. You can lift it later from Users.</>}
         confirmLabel="Ban"
         danger
         noteLabel="Reason (the person sees this)"
