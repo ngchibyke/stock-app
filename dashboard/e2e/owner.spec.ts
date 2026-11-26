@@ -106,6 +106,14 @@ test("settings save only what changed and survive a reload", async ({ page }) =>
   await expect(page.getByText(/Settings saved/).first()).toBeVisible();
 });
 
+test("with no partner configured the settings page says so and offers no partner switches", async ({ page }) => {
+  await signIn(page, OWNER.phone, OWNER.password);
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Partner service" })).toBeVisible();
+  await expect(page.getByText(/No partner is connected/)).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Use the partner" })).toHaveCount(0);
+});
+
 test("a bad value is held back with a reason", async ({ page }) => {
   await signIn(page, OWNER.phone, OWNER.password);
   await page.getByRole("link", { name: "Settings" }).click();

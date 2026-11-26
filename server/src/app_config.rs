@@ -185,14 +185,20 @@ fn with_return_url(mut view: serde_json::Value, url: &str) -> serde_json::Value 
 }
 
 async fn show(State(state): State<AppState>) -> impl IntoResponse {
+    // Partner-powered screens show only when their flag is true. The partner never makes
+    // this route fail: any trouble reads as no features.
+    let features = crate::partners::routes::app_features(&state)
+        .await
+        .unwrap_or_default();
+    let mut view = with_return_url(state.app_config.view(), &state.payment_redirect_url);
+    if let Some(map) = view.as_object_mut() {
+        map.insert("features".into(), serde_json::json!(features));
+    }
     (
         [(
             header::CACHE_CONTROL,
             format!("public, max-age={CACHE_SECS}"),
         )],
-        Json(with_return_url(
-            state.app_config.view(),
-            &state.payment_redirect_url,
-        )),
+        Json(view),
     )
 }

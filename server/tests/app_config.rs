@@ -41,6 +41,8 @@ async fn config_route_reads_settings(pool: PgPool) {
             "maintenance": { "active": true, "message": "Back at 6pm." },
             "assets": null,
             "payment_return_url": common::TEST_REDIRECT_URL,
+            // No partner feature is named, so none is on.
+            "features": {},
         })
     );
 }
@@ -97,6 +99,8 @@ async fn defaults_are_null_not_empty(pool: PgPool) {
             "maintenance": { "active": false, "message": null },
             "assets": null,
             "payment_return_url": common::TEST_REDIRECT_URL,
+            // No partner feature is named, so none is on.
+            "features": {},
         })
     );
 }

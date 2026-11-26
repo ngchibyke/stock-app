@@ -101,6 +101,8 @@
 //!     -> [`privacy::export::run`](crate::privacy::export::run).
 //! 24. `retention`: the Owner's retention windows are applied
 //!     -> [`privacy::retention::run`](crate::privacy::retention::run).
+//! 25. `partner_events`: received partner events are marked processed and old ones pruned
+//!     -> [`partners::jobs::run`](crate::partners::jobs::run).
 //!
 //! **Time.** Every due comparison uses the database clock (`now()` in SQL),
 //! and only the deadlines stored on each row: a settings change never moves an
@@ -156,6 +158,7 @@ use crate::{
     error::AppError,
     identity::jobs as identity_jobs,
     notify::reminders,
+    partners::jobs as partner_jobs,
     privacy::{export as privacy_export, jobs as privacy_jobs, retention as privacy_retention},
     settings,
     statement::job as statement_job,
@@ -239,6 +242,7 @@ pub struct JobReport {
     pub identity_attempts: u32,
     pub identity_grace: u32,
     pub privacy: u32,
+    pub partner_events: u32,
     pub failed: u32,
 }
 
@@ -266,7 +270,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
     {
         tracing::warn!(error = %e, "job push-backs not pruned");
     }
-    let jobs: [(&str, Job); 24] = [
+    let jobs: [(&str, Job); 25] = [
         (EXPIRE, Job::Expire),
         (REVERIFY, Job::Reverify),
         (SHIP_DEADLINE, Job::ShipDeadline),
@@ -291,6 +295,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
         (privacy_jobs::ERASE_ACCOUNTS, Job::EraseAccounts),
         (privacy_export::BUILD_EXPORTS, Job::BuildExports),
         (privacy_retention::RETENTION, Job::Retention),
+        (partner_jobs::PARTNER_EVENTS, Job::PartnerEvents),
     ];
     for (name, job) in jobs {
         if cancel.is_cancelled() {
@@ -328,6 +333,7 @@ pub async fn run_due_jobs_until(state: &AppState, cancel: &CancellationToken) ->
             Job::IdentityAttempts => &mut report.identity_attempts,
             Job::IdentityGrace => &mut report.identity_grace,
             Job::EraseAccounts | Job::BuildExports | Job::Retention => &mut report.privacy,
+            Job::PartnerEvents => &mut report.partner_events,
         };
         *slot += stats.done;
     }
@@ -369,6 +375,7 @@ pub async fn run_loop_every(state: AppState, cancel: CancellationToken, period: 
                 identity_attempts = r.identity_attempts,
                 identity_grace = r.identity_grace,
                 privacy = r.privacy,
+                partner_events = r.partner_events,
                 failed = r.failed,
                 "jobs tick"
             );
@@ -428,6 +435,7 @@ enum Job {
     EraseAccounts,
     BuildExports,
     Retention,
+    PartnerEvents,
 }
 
 impl Job {
@@ -457,6 +465,7 @@ impl Job {
             Job::EraseAccounts => privacy_jobs::run_erase(state, cancel).await,
             Job::BuildExports => privacy_export::run(state, cancel).await,
             Job::Retention => privacy_retention::run(state, cancel).await,
+            Job::PartnerEvents => partner_jobs::run(state, cancel).await,
         }
     }
 }

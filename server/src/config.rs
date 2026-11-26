@@ -34,6 +34,8 @@ pub struct Config {
     /// Photo storage settings; `None` when none of the `S3_*` variables are set
     /// (production then refuses to serve; elsewhere uploads answer 503).
     pub s3: Option<S3Config>,
+    /// The partner service; `None` when none of the `PARTNER_*` variables are set (it is optional).
+    pub partner: Option<crate::partners::PartnerConfig>,
     /// Which SMS provider sends sign-up and reset codes (`SMS_PROVIDER`); `None` when unset
     /// (production then refuses to serve; elsewhere codes go to the log).
     pub sms_provider: Option<String>,
@@ -502,6 +504,7 @@ impl Config {
             claude,
             fcm,
             s3,
+            partner: crate::partners::config::from_lookup(&var)?,
             database_url: var("DATABASE_URL").context("DATABASE_URL is required")?,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
             app_env,

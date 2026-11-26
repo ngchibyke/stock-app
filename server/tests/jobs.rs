@@ -1799,6 +1799,7 @@ async fn job_runs_record_last_success(pool: PgPool) {
             "expire_collections",
             "identity_attempts",
             "identity_grace",
+            "partner_events",
             "payouts",
             "place_market",
             "poll_shipments",

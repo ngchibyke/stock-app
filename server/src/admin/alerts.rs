@@ -36,8 +36,9 @@ const NOTE_MAX: usize = 500;
 /// A handover code that has locked this many times raises an alert.
 pub const LOCKOUTS_BEFORE_ALERT: i64 = 3;
 const STATES: [&str; 3] = ["open", "acked", "all"];
-const AUDIT_ALERTS: [&str; 6] = [
+const AUDIT_ALERTS: [&str; 7] = [
     "identity.budget_exhausted",
+    crate::partners::usage::BUDGET_ALERT,
     crate::statement::MISMATCH,
     "payout.provider_outcome_after_close",
     "payout.reversed_after_success",
