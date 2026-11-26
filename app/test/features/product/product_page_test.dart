@@ -7,6 +7,8 @@ import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';
 import 'package:market/features/catalog/catalog_models.dart';
+import 'package:market/features/chat/chat_pages.dart' show ConversationPage;
+import 'package:market/features/chat/chat_strings.dart';
 import 'package:market/features/product/product_page.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -278,5 +280,18 @@ void main() {
     await tester.drag(find.byType(Scrollable).first, const Offset(0, -600));
     await settle(tester);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('ask_the_seller_opens_a_chat_about_this_product', (tester) async {
+    final t = _Harness();
+    t.catalog.details['p1'] = _product();
+    await t.pump(tester);
+    await tester.tap(find.text(ChatStrings.askSeller));
+    await settle(tester);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(t.h.chat.opened, 1);
+    expect(find.byType(ConversationPage), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(minutes: 1));
   });
 }
