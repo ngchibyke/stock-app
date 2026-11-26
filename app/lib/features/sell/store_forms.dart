@@ -139,6 +139,7 @@ class _CreateStorePageState extends ConsumerState<CreateStorePage>
             ),
             const SizedBox(height: Tokens.s3),
             DropdownButtonFormField<AreaCouncil>(
+              isExpanded: true,
               initialValue: _council,
               decoration: const InputDecoration(
                 labelText: SellStrings.areaCouncil,
@@ -344,6 +345,7 @@ class _PayoutPageState extends ConsumerState<PayoutPage> with BusyAction {
                     const SizedBox(height: Tokens.s5),
                   ],
                   DropdownButtonFormField<String>(
+                    isExpanded: true,
                     initialValue: _bank,
                     decoration: const InputDecoration(
                       labelText: SellStrings.bank,

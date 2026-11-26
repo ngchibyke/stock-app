@@ -253,7 +253,8 @@ final sellRepositoryProvider = Provider<SellRepository>(
 
 /// What the app needs from products, orders, reviews and disputes.
 abstract class WorkRepository {
-  Future<List<Listing>> listings(String storeSlugOrId);
+  /// A store's products, by its slug (the server lists by slug, creates by id).
+  Future<List<Listing>> listings(String storeSlug);
   Future<Listing> createListing(
     String storeId,
     ListingInput input, {

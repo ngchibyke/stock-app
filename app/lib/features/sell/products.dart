@@ -34,6 +34,7 @@ final branchesProvider = FutureProvider.autoDispose
       (ref, storeId) => ref.watch(sellRepositoryProvider).branches(storeId),
     );
 
+/// The server lists a store's products by its slug (and creates them by its id).
 /// The Products tab: the store's products and a way to add one.
 class ProductsTab extends ConsumerWidget {
   const ProductsTab({super.key, required this.store});
@@ -42,28 +43,29 @@ class ProductsTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final listings = ref.watch(listingsProvider(store.id));
+    final listings = ref.watch(listingsProvider(store.slug));
     return Scaffold(
       backgroundColor: context.tokens.bg,
       appBar: sellRootAppBar(context, SellStrings.tabProducts),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           await pushPage<void>(context, ProductFormPage(store: store));
-          ref.invalidate(listingsProvider(store.id));
+          ref.invalidate(listingsProvider(store.slug));
         },
         icon: const Icon(Icons.add),
         label: const Text(SellStrings.addProduct),
       ),
       body: AsyncBody<List<Listing>>(
         value: listings,
-        onRetry: () => ref.invalidate(listingsProvider(store.id)),
+        onRetry: () => ref.invalidate(listingsProvider(store.slug)),
         builder: (items) => items.isEmpty
             ? const EmptyState(
                 title: SellStrings.noProducts,
                 body: SellStrings.noProductsBody,
               )
             : RefreshIndicator(
-                onRefresh: () => ref.refresh(listingsProvider(store.id).future),
+                onRefresh: () =>
+                    ref.refresh(listingsProvider(store.slug).future),
                 child: ListView.separated(
                   padding: const EdgeInsets.only(bottom: 96),
                   itemCount: items.length,
@@ -85,7 +87,7 @@ class ProductsTab extends ConsumerWidget {
                           context,
                           ProductFormPage(store: store, listing: p),
                         );
-                        ref.invalidate(listingsProvider(store.id));
+                        ref.invalidate(listingsProvider(store.slug));
                       },
                     );
                   },
@@ -378,6 +380,7 @@ class _ProductFormPageState extends ConsumerState<ProductFormPage>
                   ),
                   const SizedBox(height: Tokens.s3),
                   DropdownButtonFormField<String>(
+                    isExpanded: true,
                     initialValue: categories.any((c) => c.slug == _category)
                         ? _category
                         : null,

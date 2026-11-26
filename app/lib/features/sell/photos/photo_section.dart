@@ -7,8 +7,8 @@ import '../../../core/theme/tokens.dart';
 import '../../../core/ui/pressable.dart';
 import '../sell_strings.dart';
 
-/// The most photos one product holds in the app.
-const int maxProductPhotos = 8;
+/// The most photos one product holds (the server takes 1 to 10).
+const int maxProductPhotos = 10;
 
 enum PhotoStatus { uploading, ready, failed }
 

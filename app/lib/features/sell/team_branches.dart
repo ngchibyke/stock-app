@@ -199,6 +199,7 @@ class _InvitePageState extends ConsumerState<InvitePage> with BusyAction {
             if (_role == StoreRole.staff && open.length > 1) ...[
               const SizedBox(height: Tokens.s3),
               DropdownButtonFormField<String?>(
+                isExpanded: true,
                 initialValue: _branch,
                 decoration: const InputDecoration(
                   labelText: SellStrings.tiedTo,
@@ -268,6 +269,9 @@ class InvitesPage extends ConsumerWidget {
                             child: const Text(SellStrings.decline),
                           ),
                           FilledButton(
+                            style: FilledButton.styleFrom(
+                              minimumSize: const Size(0, Tokens.minTap),
+                            ),
                             onPressed: () async {
                               await ref
                                   .read(sellRepositoryProvider)
@@ -381,10 +385,12 @@ class _BranchFormPageState extends ConsumerState<BranchFormPage>
     super.dispose();
   }
 
+  // A store that delivers itself needs a fee at every branch.
   bool get _ready =>
       _name.text.trim().isNotEmpty &&
       _address.text.trim().isNotEmpty &&
-      _phone.text.trim().length >= 10;
+      _phone.text.trim().length >= 10 &&
+      (!widget.store.deliverySelf || nairaToKobo(_fee.text) != null);
 
   Future<void> _toggleCollect(bool on) async {
     if (!on) {
@@ -488,6 +494,7 @@ class _BranchFormPageState extends ConsumerState<BranchFormPage>
           ),
           const SizedBox(height: Tokens.s3),
           DropdownButtonFormField<AreaCouncil>(
+            isExpanded: true,
             initialValue: _council,
             decoration: const InputDecoration(
               labelText: SellStrings.areaCouncil,

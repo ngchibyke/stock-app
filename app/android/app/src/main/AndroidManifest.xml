@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Taking product photos in the selling area; asked for only when the camera opens. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
     <application
         android:label="market"
         android:allowBackup="false"

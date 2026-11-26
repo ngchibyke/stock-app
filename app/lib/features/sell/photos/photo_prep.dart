@@ -18,8 +18,8 @@ int targetEdge(int side, {int maxEdge = photoMaxEdge}) =>
 
 /// Makes a camera or gallery picture ready to upload: turned upright by its
 /// orientation, cut to the centred square, shrunk to [photoMaxEdge] and saved
-/// again as JPEG. Saving again drops every other tag, so a location in the
-/// original never leaves the phone. Returns null when [bytes] is not a picture.
+/// again as JPEG with every tag cleared, so a location in the original never
+/// leaves the phone. Returns null when [bytes] is not a picture.
 ///
 /// Heavy: call [preparePhoto] so it runs off the main thread.
 Uint8List? preparePhotoSync(Uint8List bytes) {
@@ -43,7 +43,9 @@ Uint8List? preparePhotoSync(Uint8List bytes) {
           height: edge,
           interpolation: img.Interpolation.average,
         );
-  // A fresh image has no EXIF; the JPEG encoder writes none.
+  // Cropping and resizing keep the original's tags, so they are cleared here: a
+  // location in the original must not go with the upload.
+  sized.exif = img.ExifData();
   return Uint8List.fromList(img.encodeJpg(sized, quality: photoQuality));
 }
 
