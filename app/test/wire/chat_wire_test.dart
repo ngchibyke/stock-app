@@ -1,8 +1,9 @@
 // Chat wire check: the app's real chat repository and socket against a REAL local
 // server. A buyer asks about a product, the owner sees and answers it, the socket
 // pushes the answer, and a dropped link catches up by sequence number. The tone check
-// needs a language-model key, so a held or rewritten message cannot be seen here; the
-// widget tests and the server's own tests cover those.
+// needs a language-model key, so this check starts the server with TONE_PROVIDER=fake: a message
+// containing [[mild]] is rewritten, [[down]] is held, and the word filter still blocks
+// contact details.
 //
 // Skipped unless WIRE_BASE_URL and WIRE_OTP_LOG are set (see "Wire check" in
 // README.md). Also needs WIRE_DATABASE_URL (the scratch database) and the server started
@@ -16,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_client.dart';
 import 'package:market/core/api/api_error.dart';
 import 'package:market/features/auth/auth_repository.dart';
+import 'package:market/features/buy/buy_repository.dart';
 import 'package:market/features/chat/chat_models.dart';
 import 'package:market/features/chat/chat_repository.dart';
 import 'package:market/features/sell/sell_models.dart';
@@ -199,6 +201,12 @@ void main() {
       expect(seen.you, Side.seller);
       expect(seen.with_, 'Buyer', reason: 'the buyer stays anonymous');
       expect(seen.unread, 1);
+      // The owner's inbox carries a notice that opens this conversation by id, and its
+      // text is fixed words, never the buyer's message.
+      final box = await ApiInboxRepository(seller.api).inbox();
+      final notice = box.items.singleWhere((n) => n.kind == 'chat_message');
+      expect(notice.conversationId, conv.id);
+      expect(notice.body, isNot(contains('dress')));
       final answered = await seller.chat.send(
         conv.id,
         clientMessageId: '22222222-2222-4222-8222-222222222222',
@@ -236,6 +244,62 @@ void main() {
       expect((await buyer.chat.conversations()).items.single.unread, 1);
       await buyer.chat.markRead(conv.id, pushed.seq);
       expect((await buyer.chat.conversations()).items.single.unread, 0);
+
+      // A rude message is not sent: the buyer is offered the server's own rewrite, and
+      // sends it by its id (the app never sends the suggestion's text itself).
+      final rude = await buyer.chat.send(
+        conv.id,
+        clientMessageId: '44444444-4444-4444-8444-444444444444',
+        body: '[[mild]] you are slow',
+      );
+      expect(rude.outcome, Outcome.rewrite);
+      expect(rude.suggested, 'Could we say that more kindly?');
+      expect(rude.flagId, isNotNull);
+      expect(
+        (await seller.chat.history(conv.id)).messages.map((m) => m.body),
+        isNot(contains('[[mild]] you are slow')),
+        reason: 'the other side never sees a message that was not sent',
+      );
+      final softened = await buyer.chat.sendSuggestion(
+        conv.id,
+        rude.flagId!,
+        clientMessageId: '55555555-5555-4555-8555-555555555555',
+      );
+      expect(softened.outcome, Outcome.delivered);
+      expect(softened.message?.body, 'Could we say that more kindly?');
+
+      // The tone check being down holds the message: the sender sees it as pending,
+      // the other side sees nothing yet.
+      final held = await buyer.chat.send(
+        conv.id,
+        clientMessageId: '66666666-6666-4666-8666-666666666666',
+        body: '[[down]] still there?',
+      );
+      expect(held.outcome, Outcome.held);
+      final mine = await buyer.chat.history(conv.id);
+      final waiting = mine.pending.singleWhere(
+        (p) => p.clientMessageId == '66666666-6666-4666-8666-666666666666',
+      );
+      expect(waiting.body, '[[down]] still there?');
+      expect(waiting.status, isNot('delivered'));
+      expect(
+        (await seller.chat.history(conv.id)).messages.map((m) => m.body),
+        isNot(contains('[[down]] still there?')),
+      );
+
+      // Contact details are refused in plain words, with a strike, and nothing is stored.
+      final blocked = await buyer.chat.send(
+        conv.id,
+        clientMessageId: '77777777-7777-4777-8777-777777777777',
+        body: 'call me on 08031234567',
+      );
+      expect(blocked.outcome, Outcome.blocked);
+      expect(blocked.reason, isNotEmpty);
+      expect(blocked.strikes, greaterThanOrEqualTo(1));
+      expect(
+        (await seller.chat.history(conv.id)).messages.map((m) => m.body),
+        isNot(contains('call me on 08031234567')),
+      );
 
       // A stranger cannot read or write it, and learns nothing about it.
       final stranger = await signUp('Stranger');
