@@ -49,18 +49,9 @@ async fn paid_order(app: &TestApp) -> Fixture {
     let address = app.buyer_address(&buyer).await;
     let opts = app.delivery_options(&buyer, address).await;
     assert_eq!(opts.status, 200, "{}", opts.json);
-    let option: Uuid = opts.json["stores"][0]["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|o| o["method"] == "courier")
-        .expect("a courier option")["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let option = common::group_option(&opts.json, "courier");
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let reference = res.json["reference"].as_str().unwrap().to_string();
@@ -220,8 +211,9 @@ async fn patch_store(app: &TestApp, f: &Fixture, body: Value) {
     assert_eq!(res.status, 200, "{}", res.json);
 }
 
+/// The courier address code of the store's (one) branch.
 async fn pickup_code(app: &TestApp, f: &Fixture) -> Option<i64> {
-    sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores WHERE id = $1")
+    sqlx::query_scalar("SELECT pickup_courier_address_code FROM store_branches WHERE store_id = $1")
         .bind(f.store_id)
         .fetch_one(&app.pool)
         .await
@@ -518,7 +510,7 @@ async fn cleared_pickup_code_counts_as_moved(pool: PgPool) {
     patch_store(&app, &f, json!({ "pickup_address": "9 New Road, Garki" })).await;
     assert_eq!(pickup_code(&app, &f).await, None);
     // A later quote refills the code; the order was still quoted from the old place.
-    sqlx::query("UPDATE stores SET pickup_courier_address_code = 777 WHERE id = $1")
+    sqlx::query("UPDATE store_branches SET pickup_courier_address_code = 777 WHERE store_id = $1")
         .bind(f.store_id)
         .execute(&app.pool)
         .await
@@ -575,7 +567,7 @@ async fn resaving_the_same_address_still_books(pool: PgPool) {
     // Still cleared, as before: only the booking decision changes.
     assert_eq!(pickup_code(&app, &f).await, None);
     let moved: Option<time::OffsetDateTime> =
-        sqlx::query_scalar("SELECT pickup_moved_at FROM stores WHERE id = $1")
+        sqlx::query_scalar("SELECT pickup_moved_at FROM store_branches WHERE store_id = $1")
             .bind(f.store_id)
             .fetch_one(&app.pool)
             .await
@@ -589,11 +581,13 @@ async fn resaving_the_same_address_still_books(pool: PgPool) {
 async fn move_before_the_quote_still_books(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = ready_order(&app).await;
-    sqlx::query("UPDATE stores SET pickup_moved_at = now() - interval '1 day' WHERE id = $1")
-        .bind(f.store_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE store_branches SET pickup_moved_at = now() - interval '1 day' WHERE store_id = $1",
+    )
+    .bind(f.store_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
     tick(&app).await;
     assert_eq!(status(&app, f.order_id).await, "booked");
     let started = audits(&app, "shipment.booking_started").await;
@@ -908,22 +902,11 @@ async fn late_payment_on_a_reused_quote_raises_attention(pool: PgPool) {
     let (_, buyer) = app.sign_up_verified(BUYER).await;
     app.set_cart(&buyer, listing.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
-    let courier_option = |json: &Value| -> Uuid {
-        json["stores"][0]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["method"] == "courier")
-            .expect("a courier option")["id"]
-            .as_str()
-            .unwrap()
-            .parse()
-            .unwrap()
-    };
+    let courier_option = |json: &Value| common::group_option(json, "courier");
     let opts = app.delivery_options(&buyer, address).await;
     let option = courier_option(&opts.json);
     let first = app
-        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(first.status, 201, "{}", first.json);
     let checkout_a: Uuid = first.json["checkout_id"].as_str().unwrap().parse().unwrap();
@@ -941,7 +924,7 @@ async fn late_payment_on_a_reused_quote_raises_attention(pool: PgPool) {
     let opts = app.delivery_options(&buyer, address).await;
     assert_eq!(courier_option(&opts.json), option);
     let second = app
-        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(second.status, 201, "{}", second.json);
 
@@ -984,18 +967,9 @@ async fn late_payment_alone_on_its_quote_raises_nothing(pool: PgPool) {
     app.set_cart(&buyer, listing.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let opts = app.delivery_options(&buyer, address).await;
-    let option: Uuid = opts.json["stores"][0]["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|o| o["method"] == "courier")
-        .unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let option = common::group_option(&opts.json, "courier");
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     let checkout: Uuid = res.json["checkout_id"].as_str().unwrap().parse().unwrap();
     let reference = res.json["reference"].as_str().unwrap().to_string();

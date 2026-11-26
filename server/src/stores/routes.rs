@@ -7,10 +7,17 @@ use axum::{
 };
 use uuid::Uuid;
 
-use super::service::{self, NewStore, PublicStore, StorePatch};
+use anyhow::Context;
+use serde::Serialize;
+
+use super::{
+    access::require_seller_or_member,
+    service::{self, NewStore, OwnerStore, PublicStore, StorePatch},
+};
 use crate::{
     AppState,
     auth::{AuthUser, extractor::bearer_token},
+    delivery::area::AreaCouncil,
     error::AppError,
     extract::AppJson,
 };
@@ -21,6 +28,8 @@ pub fn router() -> Router<AppState> {
         .route("/stores", axum::routing::post(create))
         .route("/stores/mine", get(mine))
         .route("/stores/{key}", get(show).patch(update).delete(remove))
+        .merge(super::team::router())
+        .merge(super::branches::router())
 }
 
 /// Optional authentication: no credentials means anonymous; bad credentials are still rejected.
@@ -45,6 +54,42 @@ pub(crate) fn require_seller(user: &AuthUser) -> Result<(), AppError> {
     } else {
         Err(AppError::Forbidden("not_a_seller"))
     }
+}
+
+/// [`require_seller_or_member`] on a pooled connection, for the seller routes.
+pub(crate) async fn require_seller_or_team(
+    state: &AppState,
+    user: &AuthUser,
+) -> Result<(), AppError> {
+    if user.is_seller {
+        return Ok(());
+    }
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    require_seller_or_member(&mut conn, user).await
+}
+
+/// One of `GET /stores/mine`: the store as its team sees it, and the caller's place.
+#[derive(Debug, Serialize)]
+struct MineView {
+    #[serde(flatten)]
+    store: MineStore,
+    my_role: String,
+    my_branch_id: Option<Uuid>,
+}
+
+/// The owner and managers see the pickup address and delivery details; staff see
+/// what they see of a branch: no address, postcode or phone.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MineStore {
+    Full(OwnerStore),
+    Staff {
+        #[serde(flatten)]
+        store: PublicStore,
+        district: String,
+        plot: Option<String>,
+        pickup_area_council: Option<AreaCouncil>,
+    },
 }
 
 fn parse_id(key: &str) -> Result<Uuid, AppError> {
@@ -73,14 +118,31 @@ async fn mine(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let stores = service::list_mine(&state.db, user.id).await?;
-    let ids: Vec<Uuid> = stores.iter().map(|s| s.id).collect();
+    let ids: Vec<Uuid> = stores.iter().map(|s| s.store.id).collect();
     let mut plots = service::plots_of(&state.db, &ids).await?;
     let views = stores
-        .iter()
-        .map(|s| s.owner_view(&state.cipher, &*state.objects, plots.remove(&s.id)))
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(|m| {
+            let plot = plots.remove(&m.store.id);
+            let store = if m.my_role == "staff" {
+                MineStore::Staff {
+                    store: m.store.public(&*state.objects),
+                    district: m.store.district.clone(),
+                    plot,
+                    pickup_area_council: m.store.pickup_area_council,
+                }
+            } else {
+                MineStore::Full(m.store.owner_view(&state.cipher, &*state.objects, plot)?)
+            };
+            Ok(MineView {
+                store,
+                my_role: m.my_role,
+                my_branch_id: m.my_branch_id,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(views)))
 }
 
@@ -99,7 +161,7 @@ async fn update(
     Path(key): Path<String>,
     AppJson(patch): AppJson<StorePatch>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let store = service::update_store(
         &state.db,
         &state.cipher,
@@ -123,7 +185,7 @@ async fn remove(
     user: AuthUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     service::delete_store(&state.db, &state.market, user.id, parse_id(&key)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

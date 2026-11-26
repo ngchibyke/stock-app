@@ -56,14 +56,15 @@ async fn insert_product(
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO product_variants (product_id, attributes, stock) VALUES ($1, '{}'::jsonb, $2)",
+    let variant: Uuid = sqlx::query_scalar(
+        "INSERT INTO product_variants (product_id, attributes, stock) \
+         VALUES ($1, '{}'::jsonb, 0) RETURNING id",
     )
     .bind(id)
-    .bind(stock)
-    .execute(&app.pool)
+    .fetch_one(&app.pool)
     .await
     .unwrap();
+    app.set_counts(variant, stock, 0).await;
     id
 }
 
@@ -199,19 +200,11 @@ async fn a_unit_reserved_to_zero_leaves_the_shelf(pool: PgPool) {
     let slug = slug_of(&app, l.store_id).await;
     assert_eq!(names(&room(&app, &slug, None).await).len(), 1);
 
-    sqlx::query("UPDATE product_variants SET reserved_quantity = stock WHERE id = $1")
-        .bind(l.variant_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    app.set_counts(l.variant_id, 1, 1).await;
     let res = room(&app, &slug, None).await;
     assert!(placed(&res).is_empty(), "{}", res.json);
 
-    sqlx::query("UPDATE product_variants SET reserved_quantity = stock - 1 WHERE id = $1")
-        .bind(l.variant_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    app.set_counts(l.variant_id, 1, 0).await;
     assert_eq!(placed(&room(&app, &slug, None).await).len(), 1);
 }
 

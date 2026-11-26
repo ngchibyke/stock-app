@@ -12,7 +12,7 @@ use crate::{
     auth::AuthUser,
     error::AppError,
     extract::AppJson,
-    stores::routes::{MaybeAuth, require_seller},
+    stores::routes::{MaybeAuth, require_seller_or_team},
 };
 
 // `/stores/{key}` reuses the store routes' param name: the key is a store id for POST, a slug for GET.
@@ -33,7 +33,7 @@ async fn create(
     Path(key): Path<String>,
     AppJson(body): AppJson<NewProduct>,
 ) -> Result<(StatusCode, Json<ProductView>), AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let product = service::create_product(&state.db, user.id, parse_id(&key)?, body).await?;
     Ok((
         StatusCode::CREATED,
@@ -70,7 +70,7 @@ async fn update(
     Path(id): Path<String>,
     AppJson(patch): AppJson<ProductPatch>,
 ) -> Result<Json<ProductView>, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let view = service::update_product(&state.db, user.id, parse_id(&id)?, patch).await?;
     Ok(Json(view.with_urls(&*state.objects)))
 }
@@ -81,7 +81,7 @@ async fn replace_variants(
     Path(id): Path<String>,
     AppJson(variants): AppJson<Vec<VariantInput>>,
 ) -> Result<Json<ProductView>, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     let view = service::replace_variants(&state.db, user.id, parse_id(&id)?, variants).await?;
     Ok(Json(view.with_urls(&*state.objects)))
 }
@@ -91,7 +91,7 @@ async fn remove(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_seller(&user)?;
+    require_seller_or_team(&state, &user).await?;
     service::delete_product(&state.db, user.id, parse_id(&id)?).await?;
     Ok(StatusCode::NO_CONTENT)
 }

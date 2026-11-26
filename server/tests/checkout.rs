@@ -846,9 +846,10 @@ async fn failure_to_store_payment_page_expires_checkout(pool: PgPool) {
 
 // ---- Delivery at checkout (Part 3, Task 6) ----
 
-type Quotes = Vec<(Uuid, Vec<serde_json::Value>)>;
+type Quotes = Vec<(Uuid, String, Vec<serde_json::Value>)>;
 
-/// `(store_id, options)` for every store in the buyer's delivery-options answer.
+/// `(store_id, group_id, options)` for every store in the buyer's delivery-options
+/// answer (each of these stores has one branch, so one group).
 async fn quoted(app: &TestApp, buyer: &str, address: Uuid) -> Quotes {
     let res = app.delivery_options(buyer, address).await;
     assert_eq!(res.status, 200, "{}", res.json);
@@ -857,25 +858,28 @@ async fn quoted(app: &TestApp, buyer: &str, address: Uuid) -> Quotes {
         .unwrap()
         .iter()
         .map(|s| {
+            let group = &s["groups"][0];
             (
                 s["store_id"].as_str().unwrap().parse().unwrap(),
-                s["options"].as_array().unwrap().clone(),
+                group["group_id"].as_str().unwrap().to_string(),
+                group["options"].as_array().unwrap().clone(),
             )
         })
         .collect()
 }
 
-/// The id of the first option with `method` quoted for `store`.
-fn option_id(quotes: &Quotes, store: Uuid, method: &str) -> Uuid {
-    let (_, options) = quotes.iter().find(|(s, _)| *s == store).unwrap();
-    options
+/// `(group_id, option_id)` of the first option with `method` quoted for `store`.
+fn option_id(quotes: &Quotes, store: Uuid, method: &str) -> (String, Uuid) {
+    let (_, group, options) = quotes.iter().find(|(s, _, _)| *s == store).unwrap();
+    let id = options
         .iter()
         .find(|o| o["method"] == method)
         .unwrap_or_else(|| panic!("no {method} option: {options:?}"))["id"]
         .as_str()
         .unwrap()
         .parse()
-        .unwrap()
+        .unwrap();
+    (group.clone(), id)
 }
 
 /// The checkout transaction holds locks while it checks the chosen options, so
@@ -903,12 +907,7 @@ async fn checkout_runs_on_a_pool_of_one(pool: PgPool) {
     let own = option_id(&quotes, b.store_id, "self");
 
     let res = app
-        .checkout_with(
-            &buyer,
-            METHOD,
-            address,
-            &[(a.store_id, courier), (b.store_id, own)],
-        )
+        .checkout_with(&buyer, METHOD, address, &[courier.clone(), own.clone()])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     app.pool.close().await;
@@ -988,12 +987,7 @@ async fn checkout_charges_items_plus_delivery(pool: PgPool) {
     let own = option_id(&quotes, b.store_id, "self");
 
     let res = app
-        .checkout_with(
-            &buyer,
-            METHOD,
-            address,
-            &[(a.store_id, courier), (b.store_id, own)],
-        )
+        .checkout_with(&buyer, METHOD, address, &[courier.clone(), own.clone()])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     // Items 200_000 + 50_000, delivery 150_000 (courier charge) + 70_000 (self fee).
@@ -1048,7 +1042,7 @@ async fn checkout_charges_items_plus_delivery(pool: PgPool) {
                 200_000,
                 150_000,
                 Some("courier".into()),
-                Some(courier),
+                Some(courier.1),
                 Some("amac".into()),
                 Some("fake-token".into()),
                 Some("kwik".into()),
@@ -1061,7 +1055,7 @@ async fn checkout_charges_items_plus_delivery(pool: PgPool) {
                 50_000,
                 70_000,
                 Some("self".into()),
-                Some(own),
+                Some(own.1),
                 Some("amac".into()),
                 None,
                 None,
@@ -1073,10 +1067,11 @@ async fn checkout_charges_items_plus_delivery(pool: PgPool) {
     );
     let sum: i64 = rows.iter().map(|r| r.1 + r.2).sum();
     assert_eq!(sum, 470_000);
-    // The courier order keeps the sender address code its quote was made from.
+    // The courier order keeps the sender address code its quote was made from: its
+    // branch's.
     let (order_sender, store_code): (Option<i64>, Option<i64>) = sqlx::query_as(
-        "SELECT o.courier_sender_code, s.pickup_courier_address_code \
-         FROM orders o JOIN stores s ON s.id = o.store_id WHERE o.store_id = $1",
+        "SELECT o.courier_sender_code, b.pickup_courier_address_code \
+         FROM orders o JOIN store_branches b ON b.id = o.branch_id WHERE o.store_id = $1",
     )
     .bind(a.store_id)
     .fetch_one(&app.pool)
@@ -1125,26 +1120,26 @@ async fn checkout_refuses_expired_or_foreign_option(pool: PgPool) {
     };
 
     refused(
-        app.checkout_with(&buyer, METHOD, address, &[(l.store_id, Uuid::new_v4())])
+        app.checkout_with(&buyer, METHOD, address, &[(mine.0.clone(), Uuid::new_v4())])
             .await,
         "unknown",
     );
     refused(
-        app.checkout_with(&buyer, METHOD, address, &[(l.store_id, theirs)])
+        app.checkout_with(&buyer, METHOD, address, std::slice::from_ref(&theirs))
             .await,
         "another buyer's",
     );
     // Quoted for one address, shipped to another (ruling P3).
     let second_address = app.add_address(&buyer, "bwari").await;
     refused(
-        app.checkout_with(&buyer, METHOD, second_address, &[(l.store_id, mine)])
+        app.checkout_with(&buyer, METHOD, second_address, std::slice::from_ref(&mine))
             .await,
         "another address",
     );
     // The cart changed after quoting (ruling T6a); restoring it makes the option valid again.
     app.set_cart(&buyer, l.variant_id, 2).await;
     refused(
-        app.checkout_with(&buyer, METHOD, address, &[(l.store_id, mine)])
+        app.checkout_with(&buyer, METHOD, address, std::slice::from_ref(&mine))
             .await,
         "cart changed",
     );
@@ -1152,12 +1147,12 @@ async fn checkout_refuses_expired_or_foreign_option(pool: PgPool) {
     sqlx::query(
         "UPDATE delivery_options SET expires_at = now() - interval '1 second' WHERE id = $1",
     )
-    .bind(mine)
+    .bind(mine.1)
     .execute(&app.pool)
     .await
     .unwrap();
     refused(
-        app.checkout_with(&buyer, METHOD, address, &[(l.store_id, mine)])
+        app.checkout_with(&buyer, METHOD, address, std::slice::from_ref(&mine))
             .await,
         "expired",
     );
@@ -1166,7 +1161,7 @@ async fn checkout_refuses_expired_or_foreign_option(pool: PgPool) {
 
     let fresh = option_id(&quoted(&app, &buyer, address).await, l.store_id, "self");
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, fresh)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&fresh))
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
 }
@@ -1189,19 +1184,19 @@ async fn checkout_requires_one_option_per_store(pool: PgPool) {
     let ob = option_id(&quotes, b.store_id, "self");
 
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(a.store_id, oa)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&oa))
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(error_code(&res), "delivery_option_required");
     let res = app.checkout_with(&buyer, METHOD, address, &[]).await;
     assert_eq!(error_code(&res), "delivery_option_required");
-    // Swapped: each option belongs to the other store.
+    // Swapped: each option belongs to the other store's group.
     let res = app
         .checkout_with(
             &buyer,
             METHOD,
             address,
-            &[(a.store_id, ob), (b.store_id, oa)],
+            &[(oa.0.clone(), ob.1), (ob.0.clone(), oa.1)],
         )
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
@@ -1212,7 +1207,7 @@ async fn checkout_requires_one_option_per_store(pool: PgPool) {
             &buyer,
             METHOD,
             address,
-            &[(a.store_id, oa), (a.store_id, oa), (b.store_id, ob)],
+            &[oa.clone(), oa.clone(), ob.clone()],
         )
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
@@ -1223,7 +1218,7 @@ async fn checkout_requires_one_option_per_store(pool: PgPool) {
             &buyer,
             METHOD,
             address,
-            &[(a.store_id, oa), (b.store_id, ob), (Uuid::new_v4(), oa)],
+            &[oa.clone(), ob.clone(), ("0".repeat(64), oa.1)],
         )
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
@@ -1231,12 +1226,7 @@ async fn checkout_requires_one_option_per_store(pool: PgPool) {
     assert_eq!(count(&app, "SELECT count(*) FROM checkouts").await, 0);
 
     let res = app
-        .checkout_with(
-            &buyer,
-            METHOD,
-            address,
-            &[(a.store_id, oa), (b.store_id, ob)],
-        )
+        .checkout_with(&buyer, METHOD, address, &[oa.clone(), ob.clone()])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
 }
@@ -1260,7 +1250,7 @@ async fn checkout_refuses_address_outside_fct(pool: PgPool) {
         .unwrap();
 
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(error_code(&res), "outside_service_area");
@@ -1275,7 +1265,7 @@ async fn checkout_refuses_address_outside_fct(pool: PgPool) {
     let (_, other) = app.sign_up_verified(BUYER2).await;
     app.set_cart(&other, l.variant_id, 1).await;
     let res = app
-        .checkout_with(&other, METHOD, address, &[(l.store_id, option)])
+        .checkout_with(&other, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(res.status, 404, "{}", res.json);
 }
@@ -1310,13 +1300,13 @@ async fn promised_date_snapshotted_at_payment(pool: PgPool) {
     app.set_cart(&buyer, l.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let quotes = quoted(&app, &buyer, address).await;
-    let shown = quotes[0].1.iter().find(|o| o["method"] == "self").unwrap()["promised_date"]
+    let shown = quotes[0].2.iter().find(|o| o["method"] == "self").unwrap()["promised_date"]
         .as_str()
         .unwrap()
         .to_string();
     let option = option_id(&quotes, l.store_id, "self");
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, option)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let at_checkout: time::Date = sqlx::query_scalar("SELECT promised_date FROM orders")
@@ -1436,7 +1426,7 @@ async fn option_is_single_use_across_checkouts(pool: PgPool) {
     app.set_cart(&buyer, l.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let option = option_id(&quoted(&app, &buyer, address).await, l.store_id, "self");
-    let chosen = [(l.store_id, option)];
+    let chosen = [option];
     let choose = || app.checkout_with(&buyer, METHOD, address, &chosen);
 
     let first = choose().await;
@@ -1484,20 +1474,21 @@ async fn courier_quote_is_used_once(pool: PgPool) {
     app.set_cart(&buyer, l.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let quotes = quoted(&app, &buyer, address).await;
+    let group = quotes[0].1.clone();
     let couriers: Vec<Uuid> = quotes[0]
-        .1
+        .2
         .iter()
         .filter(|o| o["method"] == "courier")
         .map(|o| o["id"].as_str().unwrap().parse().unwrap())
         .collect();
     assert_eq!(couriers.len(), 2);
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, couriers[0])])
+        .checkout_with(&buyer, METHOD, address, &[(group.clone(), couriers[0])])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     // The other rate of the same quote shares its request token: refused.
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, couriers[1])])
+        .checkout_with(&buyer, METHOD, address, &[(group.clone(), couriers[1])])
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(error_code(&res), "delivery_option_invalid");
@@ -1525,7 +1516,7 @@ async fn checkout_refuses_a_method_the_store_no_longer_offers(pool: PgPool) {
 
     assert_eq!(patch(json!({ "delivery_self": false })).await.status, 200);
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, own)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&own))
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(error_code(&res), "delivery_option_invalid");
@@ -1536,7 +1527,7 @@ async fn checkout_refuses_a_method_the_store_no_longer_offers(pool: PgPool) {
         200
     );
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, courier)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&courier))
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(error_code(&res), "delivery_option_invalid");
@@ -1545,7 +1536,7 @@ async fn checkout_refuses_a_method_the_store_no_longer_offers(pool: PgPool) {
     // A fresh quote from the new pickup works.
     let fresh = option_id(&quoted(&app, &buyer, address).await, l.store_id, "courier");
     let res = app
-        .checkout_with(&buyer, METHOD, address, &[(l.store_id, fresh)])
+        .checkout_with(&buyer, METHOD, address, std::slice::from_ref(&fresh))
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
 }

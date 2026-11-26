@@ -23,7 +23,8 @@
 //!
 //!    Paid: checkout and orders `paid`, deadlines and the payout fee schedule
 //!    snapshotted from the settings, each delivery order's `promised_date`
-//!    recomputed from `paid_at` (never earlier than the date shown at checkout),
+//!    recomputed from `paid_at` (never earlier than the date shown at checkout;
+//!    a collect order's is the day it will be ready, the ship deadline's date),
 //!    provider fee split across orders (each order's seller part on its items
 //!    and any self-delivery fee, the platform's part on a courier fee), ledger
 //!    `buyer_funds -T`, `escrow +T` per order, provider hold ->
@@ -42,20 +43,23 @@ use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::service::{db_err, lock_reserved};
+use super::service::{Held, db_err, lock_reserved};
 use crate::{
     AppState, audit,
     delivery::{
         options::QUOTE_REUSED,
-        promise::{load_holidays, promised_date},
+        promise::{collect_ready_date, load_holidays, promised_date},
     },
     error::AppError,
     escrow::refund::{begin_refund, send_refund},
     ledger::{self, Account, Entry},
     money::split_proportional,
-    notify::{kinds::Kind, service as notify},
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Audience},
+    },
     payments::PaymentStatus,
-    settings,
+    settings, stock,
 };
 
 /// Longest wait for the provider's verify answer; past it the outcome is "retry later".
@@ -250,8 +254,9 @@ async fn apply(
         .await
         .map_err(db_err("read transaction time"))?;
     let promised = promised_date(paid_at, settings.delivery_cutoff_minutes, &holidays);
+    let ready = collect_ready_date(paid_at, settings.ship_deadline_hours);
 
-    // product_variants (id order) -> checkouts -> orders.
+    // product_variants (id order) -> branch_stock -> checkouts -> orders.
     let items = lock_reserved(&mut tx, checkout_id).await?;
     let (status, total_kobo, buyer_id): (String, i64, Uuid) = sqlx::query_as(
         "SELECT status::text, total_kobo, buyer_id FROM checkouts WHERE id = $1 FOR UPDATE",
@@ -351,26 +356,16 @@ async fn apply(
     // Stock: commit the reservation, or (after expiry) take it from what is available.
     let mut refund = false;
     if after_expiry {
-        let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
-        let rows: Vec<(Uuid, i32, i32)> = sqlx::query_as(
-            "SELECT id, stock, reserved_quantity FROM product_variants WHERE id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db_err("load variants"))?;
-        let covered = items.iter().all(|(id, q)| {
-            rows.iter()
-                .any(|(vid, stock, reserved)| vid == id && stock - reserved >= *q)
-        });
+        // Each line must be free at its own order's branch (already locked).
+        let mut covered = true;
+        for h in &items {
+            if stock::lock_available(&mut tx, h.branch_id, h.variant_id).await? < h.quantity {
+                covered = false;
+            }
+        }
         if covered {
-            for (variant_id, quantity) in &items {
-                sqlx::query("UPDATE product_variants SET stock = stock - $2 WHERE id = $1")
-                    .bind(variant_id)
-                    .bind(quantity)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_err("take stock"))?;
+            for h in &items {
+                stock::apply(&mut tx, h.branch_id, h.variant_id, -h.quantity, 0).await?;
             }
         } else {
             refund = true;
@@ -430,6 +425,8 @@ async fn apply(
                     fee_small_kobo = $5, fee_large_kobo = $6, fee_threshold_kobo = $7, \
                     stamp_duty_kobo = $8, stamp_duty_threshold_kobo = $9, \
                     promised_date = CASE WHEN delivery_method IS NULL THEN NULL \
+                                         WHEN delivery_method = 'collect' \
+                                              THEN GREATEST(promised_date, $12) \
                                          ELSE GREATEST(promised_date, $10) END \
              WHERE id = $1",
         )
@@ -444,6 +441,7 @@ async fn apply(
         .bind(fees.stamp_duty_threshold)
         .bind(promised)
         .bind(parts[1])
+        .bind(ready)
         .execute(&mut *tx)
         .await
         .map_err(db_err("mark order paid"))?;
@@ -494,7 +492,7 @@ async fn apply(
         }
         clear_cart_lines(&mut tx, buyer_id, &items).await?;
         for (order_id, ..) in &orders {
-            notify::tell_seller(&mut tx, Kind::OrderPaid, *order_id).await?;
+            notify::tell_team(&mut tx, Kind::OrderNew, *order_id, Audience::Order).await?;
         }
         audit::record(
             &mut tx,
@@ -530,7 +528,8 @@ async fn flag_reused_quotes(conn: &mut PgConnection, checkout_id: Uuid) -> Resul
         "SELECT o.id, other.id FROM orders o \
          JOIN delivery_options d ON d.id = o.delivery_option_id AND d.method = 'courier' \
          JOIN delivery_options u ON u.method = 'courier' AND u.buyer_id = d.buyer_id \
-              AND u.store_id = d.store_id AND u.created_at = d.created_at \
+              AND u.store_id = d.store_id AND u.branch_id = d.branch_id \
+              AND u.created_at = d.created_at \
          JOIN orders other ON other.delivery_option_id = u.id AND other.id <> o.id \
          WHERE o.checkout_id = $1 AND other.status <> 'cancelled' \
          ORDER BY o.id, other.id",
@@ -553,18 +552,11 @@ async fn flag_reused_quotes(conn: &mut PgConnection, checkout_id: Uuid) -> Resul
     Ok(())
 }
 
-/// Releases a pending checkout's reservation (`reserved_quantity -= q`); the
-/// variants are already locked by the caller.
-async fn release_reserved(conn: &mut PgConnection, items: &[(Uuid, i32)]) -> Result<(), AppError> {
-    for (variant_id, quantity) in items {
-        sqlx::query(
-            "UPDATE product_variants SET reserved_quantity = reserved_quantity - $2 WHERE id = $1",
-        )
-        .bind(variant_id)
-        .bind(quantity)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err("release reservation"))?;
+/// Releases a pending checkout's reservation (`reserved_quantity -= q` at each
+/// order's branch); the rows are already locked by the caller.
+async fn release_reserved(conn: &mut PgConnection, items: &[Held]) -> Result<(), AppError> {
+    for h in items {
+        stock::apply(conn, h.branch_id, h.variant_id, 0, -h.quantity).await?;
     }
     Ok(())
 }
@@ -573,9 +565,9 @@ async fn release_reserved(conn: &mut PgConnection, items: &[(Uuid, i32)]) -> Res
 async fn clear_cart_lines(
     conn: &mut PgConnection,
     buyer: Uuid,
-    items: &[(Uuid, i32)],
+    items: &[Held],
 ) -> Result<(), AppError> {
-    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<Uuid> = items.iter().map(|h| h.variant_id).collect();
     sqlx::query("DELETE FROM cart_items WHERE user_id = $1 AND variant_id = ANY($2)")
         .bind(buyer)
         .bind(&ids)

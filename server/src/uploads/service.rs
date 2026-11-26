@@ -27,7 +27,7 @@ use crate::{
     auth::AuthUser,
     error::AppError,
     limits::{MAX_UPLOAD_BYTES, UPLOAD_URL_TTL_SECS, UPLOADS_PER_HOUR},
-    stores::routes::require_seller,
+    stores::routes::require_seller_or_team,
 };
 
 /// What a photo is for. The purpose decides who may upload it and where it ends up.
@@ -126,7 +126,7 @@ pub async fn create(
         )
     })?;
     if purpose.seller_only() {
-        require_seller(user)?;
+        require_seller_or_team(state, user).await?;
     }
     if !["image/jpeg", "image/png", "image/webp"].contains(&req.content_type.as_str()) {
         return Err(AppError::Validation(

@@ -171,13 +171,15 @@ async fn add(
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO product_variants (product_id, attributes, stock) VALUES ($1, '{}'::jsonb, 5)",
+    let variant: Uuid = sqlx::query_scalar(
+        "INSERT INTO product_variants (product_id, attributes, stock) \
+         VALUES ($1, '{}'::jsonb, 0) RETURNING id",
     )
     .bind(id)
-    .execute(&app.pool)
+    .fetch_one(&app.pool)
     .await
     .unwrap();
+    app.set_counts(variant, 5, 0).await;
     id
 }
 
@@ -451,13 +453,16 @@ async fn relevance_paging_stops_at_200(pool: PgPool) {
     .execute(&app.pool)
     .await
     .unwrap();
-    sqlx::query(
+    let variants: Vec<Uuid> = sqlx::query_scalar(
         "INSERT INTO product_variants (product_id, attributes, stock) \
-         SELECT id, '{}'::jsonb, 5 FROM products WHERE name LIKE 'Rice bag %'",
+         SELECT id, '{}'::jsonb, 0 FROM products WHERE name LIKE 'Rice bag %' RETURNING id",
     )
-    .execute(&app.pool)
+    .fetch_all(&app.pool)
     .await
     .unwrap();
+    for v in variants {
+        app.set_counts(v, 5, 0).await;
+    }
     let mut seen = std::collections::HashSet::new();
     let mut cursor: Option<String> = None;
     let mut pages = 0;
@@ -526,14 +531,18 @@ async fn price_from_uses_variant_overrides_and_in_stock_follows_reservations(poo
         .execute(&app.pool)
         .await
         .unwrap();
-    sqlx::query(
+    let variants: Vec<(Uuid, i32)> = sqlx::query_as(
         "INSERT INTO product_variants (product_id, attributes, stock, price_kobo) VALUES \
-         ($1, '{\"size\":\"S\"}'::jsonb, 2, 800), ($1, '{\"size\":\"L\"}'::jsonb, 1, NULL)",
+         ($1, '{\"size\":\"S\"}'::jsonb, 0, 800), ($1, '{\"size\":\"L\"}'::jsonb, 0, NULL) \
+         RETURNING id, CASE WHEN price_kobo IS NULL THEN 1 ELSE 2 END",
     )
     .bind(id)
-    .execute(&app.pool)
+    .fetch_all(&app.pool)
     .await
     .unwrap();
+    for &(v, n) in &variants {
+        app.set_counts(v, n, 0).await;
+    }
     let res = browse(&app, "").await;
     assert_eq!(res.json["items"][0]["price_from_kobo"], 800);
     assert_eq!(res.json["items"][0]["in_stock"], true);
@@ -545,11 +554,9 @@ async fn price_from_uses_variant_overrides_and_in_stock_follows_reservations(poo
     assert!(names(&browse(&app, "?min_price_kobo=900").await).is_empty());
 
     // Every unit held by pending checkouts: nothing left to buy.
-    sqlx::query("UPDATE product_variants SET reserved_quantity = stock WHERE product_id = $1")
-        .bind(id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    for &(v, n) in &variants {
+        app.set_counts(v, n, n).await;
+    }
     assert_eq!(browse(&app, "").await.json["items"][0]["in_stock"], false);
 }
 

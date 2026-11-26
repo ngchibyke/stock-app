@@ -995,22 +995,13 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     assert_eq!(app.set_cart(&buyer, shop.variant_id, 1).await.status, 200);
     let address = app.buyer_address(&buyer).await;
     let opts = app.delivery_options(&buyer, address).await;
-    let option: Uuid = opts.json["stores"][0]["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|o| o["method"] == "courier")
-        .expect("a courier option")["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let option = common::group_option(&opts.json, "courier");
     let res = app
         .checkout_with(
             &buyer,
             "mono_directpay",
             address,
-            &[(shop.store_id, option)],
+            std::slice::from_ref(&option),
         )
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
@@ -1062,7 +1053,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
             .await
             .contains(&"order_delivered".to_string())
     );
-    assert_eq!(kinds(shop.seller_id).await, ["order_paid"]);
+    assert_eq!(kinds(shop.seller_id).await, ["order_new"]);
 
     // 2. The buyer reports damage, with a photo.
     let evidence = app.ready_photo_for(&buyer, "dispute").await;
@@ -1074,10 +1065,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let id = res.json["id"].as_str().unwrap().to_string();
-    assert_eq!(
-        kinds(shop.seller_id).await,
-        ["dispute_opened", "order_paid"]
-    );
+    assert_eq!(kinds(shop.seller_id).await, ["dispute_opened", "order_new"]);
 
     // 3. The seller answers; the item comes back at the seller's cost.
     let res = respond(&app, &id, &shop.seller_token, REPLY).await;
@@ -1133,7 +1121,7 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
             "dispute_decided",
             "dispute_opened",
             "funds_released",
-            "order_paid",
+            "order_new",
             "return_requested"
         ]
     );

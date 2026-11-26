@@ -26,8 +26,9 @@ use crate::{
     moderation::filter::{Category, Scan, Severity, scan},
     notify::{
         kinds::Kind,
-        service::{self as notify, Notice},
+        service::{self as notify, Audience},
     },
+    stores::access::{self, Action, covers_branch_sql},
     uploads::{
         claim::{Kind as PhotoKind, claim},
         service::Purpose,
@@ -215,7 +216,6 @@ struct DisputeRow {
     id: Uuid,
     order_id: Uuid,
     buyer_id: Uuid,
-    owner_id: Uuid,
     status: String,
     reason: String,
     opened_at: OffsetDateTime,
@@ -229,18 +229,19 @@ struct DisputeRow {
     decided_at: Option<OffsetDateTime>,
 }
 
-/// The dispute as the parties see it, plus the two people allowed to see it.
+/// The dispute as the parties see it, plus its buyer. The seller side is the store's
+/// team members who may act on the order ([`seller_side`]).
 pub(crate) async fn load(
     conn: &mut PgConnection,
     state: &AppState,
     dispute_id: Uuid,
-) -> Result<(DisputeView, Uuid, Uuid), AppError> {
+) -> Result<(DisputeView, Uuid), AppError> {
     let d: DisputeRow = sqlx::query_as(
-        "SELECT d.id, d.order_id, d.buyer_id, s.owner_id, d.status, d.reason, d.opened_at, \
+        "SELECT d.id, d.order_id, d.buyer_id, d.status, d.reason, d.opened_at, \
                 d.seller_respond_by, d.seller_missed_deadline, d.return_paid_by, \
                 d.return_requested_at, d.return_received_at, d.decision, d.refund_kobo, \
                 d.decided_at \
-         FROM disputes d JOIN stores s ON s.id = d.store_id WHERE d.id = $1",
+         FROM disputes d WHERE d.id = $1",
     )
     .bind(dispute_id)
     .fetch_optional(&mut *conn)
@@ -289,7 +290,26 @@ pub(crate) async fn load(
             decided_at: d.decided_at,
         }),
     };
-    Ok((view, d.buyer_id, d.owner_id))
+    Ok((view, d.buyer_id))
+}
+
+/// `user` is on the seller side of the dispute: a member of its store who may act on
+/// its order (the owner, a manager, store-wide staff, or staff of the order's branch).
+async fn seller_side(
+    conn: &mut PgConnection,
+    dispute_id: Uuid,
+    user: Uuid,
+) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM disputes d JOIN orders o ON o.id = d.order_id \
+         JOIN stores s ON s.id = d.store_id WHERE d.id = $1 AND {})",
+        covers_branch_sql("$2", "o.branch_id")
+    ))
+    .bind(dispute_id)
+    .bind(user)
+    .fetch_one(conn)
+    .await
+    .context("check dispute seller side")?)
 }
 
 pub(crate) async fn begin_locked(
@@ -416,13 +436,15 @@ pub async fn open(
         json!({ "reason": reason.as_str(), "prior_status": order.status }),
     )
     .await?;
-    let (_, seller) = notify::order_parties(&mut tx, order_id).await?;
-    notify::enqueue(
+    notify::tell_team_dispute(
         &mut tx,
-        Notice::dispute(seller, Kind::DisputeOpened, dispute_id),
+        Kind::DisputeOpened,
+        order_id,
+        dispute_id,
+        Audience::Managers,
     )
     .await?;
-    let (view, _, _) = load(&mut tx, state, dispute_id).await?;
+    let (view, _) = load(&mut tx, state, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(view)
 }
@@ -480,7 +502,7 @@ pub async fn withdraw(
         json!({ "prior_status": status, "unheld": unheld }),
     )
     .await?;
-    let (dispute, _, _) = load(&mut tx, state, dispute_id).await?;
+    let (dispute, _) = load(&mut tx, state, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(WithdrawResponse {
         dispute,
@@ -488,15 +510,15 @@ pub async fn withdraw(
     })
 }
 
-/// The dispute for its buyer or the store's owner; anyone else gets 404.
+/// The dispute for its buyer or its seller side ([`seller_side`]); anyone else gets 404.
 pub async fn view(
     state: &AppState,
     viewer: Uuid,
     dispute_id: Uuid,
 ) -> Result<DisputeView, AppError> {
     let mut conn = state.db.acquire().await.context("acquire")?;
-    let (view, buyer, owner) = load(&mut conn, state, dispute_id).await?;
-    if viewer != buyer && viewer != owner {
+    let (view, buyer) = load(&mut conn, state, dispute_id).await?;
+    if viewer != buyer && !seller_side(&mut conn, dispute_id, viewer).await? {
         return Err(AppError::NotFound);
     }
     Ok(view)
@@ -510,8 +532,8 @@ pub struct PhotoLink {
     pub expires_at: OffsetDateTime,
 }
 
-/// A signed link to one photo of a dispute, for its buyer, the seller of its
-/// store, or staff (Owner any dispute; Support open ones only). Anyone else gets
+/// A signed link to one photo of a dispute, for its buyer, its seller side
+/// ([`seller_side`]), or staff (Owner any dispute; Support open ones only). Anyone else gets
 /// 404. A photo that is not in the dispute's statements is 404 for everyone, so
 /// keys cannot be probed. Staff reads are audited before the link is returned.
 pub async fn photo_link(
@@ -521,15 +543,14 @@ pub async fn photo_link(
     key: &str,
 ) -> Result<PhotoLink, AppError> {
     let mut conn = state.db.acquire().await.context("acquire")?;
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT d.buyer_id, s.owner_id, d.status FROM disputes d          JOIN stores s ON s.id = d.store_id WHERE d.id = $1",
-    )
-    .bind(dispute_id)
-    .fetch_optional(&mut *conn)
-    .await
-    .context("find dispute")?;
-    let (buyer, seller, status) = row.ok_or(AppError::NotFound)?;
-    let party = user.id == buyer || user.id == seller;
+    let row: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT buyer_id, status FROM disputes WHERE id = $1")
+            .bind(dispute_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .context("find dispute")?;
+    let (buyer, status) = row.ok_or(AppError::NotFound)?;
+    let party = user.id == buyer || seller_side(&mut conn, dispute_id, user.id).await?;
     let staff = !party && matches!(user.role, Role::Owner | Role::Support);
     if !party && !staff {
         return Err(AppError::NotFound);
@@ -603,19 +624,21 @@ impl PaidBy {
     }
 }
 
-/// The dispute's order, for the order-before-dispute lock order. `owner` of
-/// `Some` restricts to that store owner (404 otherwise).
+/// The dispute's (order, store), for the order-before-dispute lock order. `member`
+/// of `Some` restricts to a member who may act on the order (404 otherwise).
 async fn order_of(
     state: &AppState,
     dispute_id: Uuid,
-    owner: Option<Uuid>,
-) -> Result<Uuid, AppError> {
-    sqlx::query_scalar(
-        "SELECT d.order_id FROM disputes d JOIN stores s ON s.id = d.store_id \
-         WHERE d.id = $1 AND ($2::uuid IS NULL OR s.owner_id = $2)",
-    )
+    member: Option<Uuid>,
+) -> Result<(Uuid, Uuid), AppError> {
+    sqlx::query_as(&format!(
+        "SELECT d.order_id, d.store_id FROM disputes d JOIN orders o ON o.id = d.order_id \
+         JOIN stores s ON s.id = d.store_id \
+         WHERE d.id = $1 AND ($2::uuid IS NULL OR {})",
+        covers_branch_sql("$2", "o.branch_id")
+    ))
     .bind(dispute_id)
-    .bind(owner)
+    .bind(member)
     .fetch_optional(&state.db)
     .await
     .context("find dispute")?
@@ -654,14 +677,19 @@ async fn lock_both(
     Ok((tx, locked))
 }
 
-/// The seller answers once, before `seller_respond_by`.
+/// The seller answers once, before `seller_respond_by`: the owner or a manager, also
+/// for a deleted store's order (the dispute outlives it)
+/// (other members get 403, anyone else 404).
 pub async fn respond(
     state: &AppState,
     seller: Uuid,
     dispute_id: Uuid,
     s: Statement,
 ) -> Result<DisputeView, AppError> {
-    let order_id = order_of(state, dispute_id, Some(seller)).await?;
+    let (order_id, store_id) = order_of(state, dispute_id, None).await?;
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    access::require_even_if_deleted(&mut conn, store_id, seller, Action::AnswerDisputes).await?;
+    drop(conn);
     check_statement(&s)?;
     let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
     if d.responded {
@@ -711,7 +739,7 @@ pub async fn respond(
         json!({ "photos": s.photo_keys.len() }),
     )
     .await?;
-    let (view, _, _) = load(&mut tx, state, dispute_id).await?;
+    let (view, _) = load(&mut tx, state, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(view)
 }
@@ -724,7 +752,7 @@ pub async fn request_return(
     paid_by: PaidBy,
     note: &str,
 ) -> Result<(), AppError> {
-    let order_id = order_of(state, dispute_id, None).await?;
+    let (order_id, _) = order_of(state, dispute_id, None).await?;
     let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
     match DisputeStatus::parse(&d.status) {
         Some(DisputeStatus::AwaitingDecision) => {}
@@ -757,13 +785,14 @@ pub async fn request_return(
     Ok(())
 }
 
-/// The seller confirms the item is back; the dispute returns to the queue.
+/// The seller confirms the item is back; the dispute returns to the queue. Any
+/// member who may act on the order: the parcel comes back to its branch.
 pub async fn return_received(
     state: &AppState,
     seller: Uuid,
     dispute_id: Uuid,
 ) -> Result<DisputeView, AppError> {
-    let order_id = order_of(state, dispute_id, Some(seller)).await?;
+    let (order_id, _) = order_of(state, dispute_id, Some(seller)).await?;
     let (mut tx, d) = lock_both(state, order_id, dispute_id).await?;
     match DisputeStatus::parse(&d.status) {
         Some(DisputeStatus::AwaitingReturn) => {}
@@ -787,7 +816,7 @@ pub async fn return_received(
         json!({}),
     )
     .await?;
-    let (view, _, _) = load(&mut tx, state, dispute_id).await?;
+    let (view, _) = load(&mut tx, state, dispute_id).await?;
     tx.commit().await.context("commit")?;
     Ok(view)
 }

@@ -143,10 +143,37 @@ struct StoreDetail {
     open_order_count: i64,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    /// Read-only. Names and standing only: no addresses, postcodes or phones.
+    #[sqlx(skip)]
+    branches: Vec<BranchRow>,
+    #[sqlx(skip)]
+    team: Vec<MemberRow>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct BranchRow {
+    id: Uuid,
+    name: String,
+    area_council: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    closed_at: Option<OffsetDateTime>,
+    collect_enabled: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct MemberRow {
+    /// The membership row: a member removed then re-added has two rows.
+    id: Uuid,
+    user_id: Uuid,
+    display_name: String,
+    role: String,
+    branch_id: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    removed_at: Option<OffsetDateTime>,
 }
 
 async fn detail(db: &PgPool, id: Uuid) -> Result<StoreDetail, AppError> {
-    sqlx::query_as(
+    let mut store: StoreDetail = sqlx::query_as(
         "SELECT s.id, s.name, s.slug, s.owner_id, s.status::text AS status, \
                 s.status = 'suspended' AS suspended, s.suspended_reason, s.suspended_at, \
                 (SELECT pa.status::text FROM payout_accounts pa WHERE pa.store_id = s.id) \
@@ -164,7 +191,22 @@ async fn detail(db: &PgPool, id: Uuid) -> Result<StoreDetail, AppError> {
     .fetch_optional(db)
     .await
     .context("load store")?
-    .ok_or(AppError::NotFound)
+    .ok_or(AppError::NotFound)?;
+    store.branches = sqlx::query_as(
+        "SELECT id, name, pickup_area_council::text AS area_council, closed_at, collect_enabled          FROM store_branches WHERE store_id = $1 ORDER BY position",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    .context("load store branches")?;
+    store.team = sqlx::query_as(
+        "SELECT m.id, m.user_id, u.display_name, m.role::text AS role, m.branch_id, m.removed_at          FROM store_members m JOIN users u ON u.id = m.user_id          WHERE m.store_id = $1          ORDER BY (m.removed_at IS NOT NULL), (m.role = 'staff'), m.created_at, m.id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+    .context("load store team")?;
+    Ok(store)
 }
 
 async fn view(

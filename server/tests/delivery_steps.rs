@@ -70,17 +70,8 @@ async fn paid_order(app: &TestApp, method: &str) -> Fixture {
         let address = app.buyer_address(&buyer).await;
         let opts = app.delivery_options(&buyer, address).await;
         assert_eq!(opts.status, 200, "{}", opts.json);
-        let option: Uuid = opts.json["stores"][0]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["method"] == "courier")
-            .expect("a courier option")["id"]
-            .as_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        app.checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        let option = common::group_option(&opts.json, "courier");
+        app.checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
             .await
     };
     let order_id = pay(app, res).await;

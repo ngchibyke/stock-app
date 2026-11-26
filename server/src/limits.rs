@@ -3,8 +3,11 @@
 
 /// Largest unit price (product base price or variant override): NGN 10m in kobo.
 pub const MAX_PRICE_KOBO: i64 = 1_000_000_000;
-/// Largest stock level of a single variant.
+/// Largest stock level of a single variant at one branch.
 pub const MAX_STOCK: i32 = 100_000;
+/// Most open branches one store may have. A variant's total stock is capped at this
+/// many times [`MAX_STOCK`] (`migrations/0046_variant_stock_totals.sql`).
+pub const MAX_OPEN_BRANCHES: i64 = 20;
 /// Largest quantity of one cart line (enforced when carts are added).
 pub const MAX_LINE_QUANTITY: i32 = 100;
 /// Largest checkout total in kobo (NGN 50m).

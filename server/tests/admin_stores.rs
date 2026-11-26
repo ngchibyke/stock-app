@@ -261,3 +261,81 @@ async fn admin_detail_shows_the_plot_the_store_holds(pool: PgPool) {
     assert!(one.json["plot"].is_null(), "{}", one.json);
     assert!(one.json.get("plot").is_some());
 }
+
+#[sqlx::test]
+async fn admin_detail_lists_branches_and_team_without_addresses_or_phones(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let owner = app.owner_token().await;
+    let l = app
+        .make_active_store_with_product("08031110021", "Branchy", 500_000, 5)
+        .await;
+    let addr = app.state.cipher.encrypt("9 Secret Road, Garki");
+    let second: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO store_branches (store_id, name, pickup_address_enc, pickup_postcode, \
+                                     collect_enabled, position, closed_at) \
+         VALUES ($1, 'Garki', $2, 'FC12ABCDEFG', true, 1, now()) RETURNING id",
+    )
+    .bind(l.store_id)
+    .bind(addr)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    let (staff, _) = app.sign_up_verified("08031110022").await;
+    let (gone, _) = app.sign_up_verified("08031110023").await;
+    for (user, role, branch, removed) in [
+        (staff, "staff", Some(second), false),
+        (gone, "manager", None, true),
+    ] {
+        sqlx::query(
+            "INSERT INTO store_members (store_id, user_id, role, branch_id, added_by, removed_at, removed_by) \
+             VALUES ($1, $2, $3::store_member_role, $4, $5, CASE WHEN $6 THEN now() END, CASE WHEN $6 THEN $5 END)",
+        )
+        .bind(l.store_id)
+        .bind(user)
+        .bind(role)
+        .bind(branch)
+        .bind(l.seller_id)
+        .bind(removed)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    }
+
+    let res = get(&app, &format!("/admin/stores/{}", l.store_id), &owner).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let branches = res.json["branches"].as_array().unwrap();
+    assert_eq!(branches.len(), 2);
+    assert_eq!(branches[1]["id"], second.to_string());
+    assert_eq!(branches[1]["name"], "Garki");
+    assert_eq!(branches[1]["collect_enabled"], true);
+    assert!(branches[1]["closed_at"].is_string());
+    assert!(branches[0]["closed_at"].is_null());
+    assert!(branches[0].get("area_council").is_some());
+
+    let team = res.json["team"].as_array().unwrap();
+    assert_eq!(team.len(), 2);
+    assert_eq!(team[0]["user_id"], staff.to_string());
+    assert_eq!(team[0]["role"], "staff");
+    assert_eq!(team[0]["branch_id"], second.to_string());
+    assert!(team[0]["removed_at"].is_null());
+    assert!(team[0]["display_name"].is_string());
+    assert_eq!(team[1]["user_id"], gone.to_string());
+    assert!(team[1]["removed_at"].is_string());
+    // Each row carries its membership id, so a re-added member keys apart.
+    assert!(team[0]["id"].is_string() && team[1]["id"].is_string());
+    assert_ne!(team[0]["id"], team[1]["id"]);
+
+    let text = res.json.to_string();
+    for banned in [
+        "Secret",
+        "Garki Road",
+        "FC12ABCDEFG",
+        "0803111",
+        "pickup",
+        "phone",
+        "address",
+        "postcode",
+    ] {
+        assert!(!text.contains(banned), "leaked {banned}: {text}");
+    }
+}

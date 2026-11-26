@@ -24,7 +24,23 @@
 //!    `provider_fees` out of `platform_revenue`, and never touches the payout.
 //!    The payout fee is fixed here, from the fee schedule snapshotted on the
 //!    order when it was paid (orders paid before that snapshot existed use the
-//!    schedule at release). An owner decision ([`release_by_owner`]) also
+//!    schedule at release). **One payout fee per store per checkout** (owner
+//!    decision, part 7e-1): a checkout split across branches of one store is
+//!    one order per branch, all the same owner's. The first of those orders
+//!    (same `checkout_id` and `store_id`) to be released pays the fee, at its
+//!    own tier as above; every later one pays no platform payout fee, so its
+//!    seller keeps that fee in the payout. The stamp duty is not ours to
+//!    waive (a statutory levy on each transfer): a later sibling still pays it
+//!    exactly as today when its payout reaches the duty threshold, and
+//!    `payouts.fee_kobo` / `platform_revenue +payout_fee` carry the duty alone
+//!    (0 below the threshold). A sibling refunded or cancelled without release never pays it.
+//!    The platform absorbs the extra transfer: its real cost is booked by
+//!    [`settle_payout`] like every payout's (`provider_fees +fee`,
+//!    `platform_revenue −fee`). "First" is decided under the sibling locks
+//!    ([`lock_store_orders`]): every order of the (checkout, store), in id
+//!    order, before the order itself is read, so two siblings released at
+//!    once run one after the other and the second sees the first's payout.
+//!    A single-branch checkout has no sibling and is unchanged. An owner decision ([`release_by_owner`]) also
 //!    clears the order's hold in the same transaction, so the payout can go.
 //!    The payout waits for the provider's settlement of the buyer's payment:
 //!    `send_after = max(now, settlement_time(paid_at) + buffer)`. The work
@@ -57,7 +73,10 @@
 //! ([`round_ref`]): the payout id for round 1, `id:round` after that.
 //!
 //! Lock order (global: `... checkouts -> orders -> payouts`): every step locks
-//! the order first, then the payout row. `payout_accounts` comes after
+//! the order first, then the payout row. A release locks the order's
+//! siblings with it, all in id order ([`lock_store_orders`]), before any other
+//! order lock of its transaction: the owner's release and a dispute's
+//! decision take them before they lock the order themselves. `payout_accounts` comes after
 //! `payouts`: the send reads it under `FOR SHARE`, and a reversal
 //! ([`close_reversed_attempt`]) updates it (back to `pending`) while holding
 //! the order and payout locks. The seller's account change and the owner's
@@ -83,7 +102,10 @@ use crate::{
     error::AppError,
     ledger::{self, Account, Entry},
     money::{self, FeeSchedule},
-    notify::{kinds::Kind, service as notify},
+    notify::{
+        kinds::Kind,
+        service::{self as notify, Audience},
+    },
     payments::{self, PayoutHandle, PayoutRequest, PayoutState, ProviderError},
     settings,
 };
@@ -233,6 +255,9 @@ struct ReleaseRow {
     checkout_id: Uuid,
     paid_at: Option<OffsetDateTime>,
     has_payout: bool,
+    /// Another order of the same checkout and store already has a payout:
+    /// it paid the payout fee.
+    sibling_released: bool,
     held: bool,
     provider_flagged: bool,
     delivered: bool,
@@ -294,6 +319,10 @@ pub struct ReleaseInputs {
     pub cut: i64,
     pub share: i64,
     pub courier_share: i64,
+    /// Another order of the same checkout and store was released first and
+    /// paid the payout fee: this one pays only the stamp duty, if due (see
+    /// the module docs).
+    pub fee_waived: bool,
 }
 
 /// The release's ledger amounts and the seller's payout.
@@ -326,6 +355,7 @@ pub fn release_amounts(i: &ReleaseInputs, s: &FeeSchedule) -> Result<ReleaseAmou
         cut,
         share,
         courier_share,
+        fee_waived,
     } = *i;
     // A self-delivery fee belongs to the seller; a courier fee (or none, on
     // part-2 orders) stays with the platform, which pays the courier. The
@@ -343,7 +373,13 @@ pub fn release_amounts(i: &ReleaseInputs, s: &FeeSchedule) -> Result<ReleaseAmou
     // The fee tier and the stamp-duty threshold are compared against the
     // payout BEFORE the fee (Task 1 ruling): a payout just over ₦10,000 pays
     // the duty even if the net lands just under it.
-    let payout_fee = money::payout_fee_kobo(before_fee, s);
+    // A waived fee is the platform's own transfer fee only: the stamp duty,
+    // a statutory levy on every transfer, is still charged (owner ruling).
+    let payout_fee = if fee_waived {
+        money::stamp_duty_kobo(before_fee, s)
+    } else {
+        money::payout_fee_kobo(before_fee, s)
+    };
     let computed = before_fee.checked_sub(payout_fee).ok_or_else(too_large)?;
     // Fees above the order: the seller is owed nothing (never a negative
     // payable); the platform absorbs the shortfall out of its cut + delivery.
@@ -365,6 +401,24 @@ pub fn release_amounts(i: &ReleaseInputs, s: &FeeSchedule) -> Result<ReleaseAmou
         shortfall,
         seller_delivery,
     })
+}
+
+/// Locks every order of `order_id`'s checkout and store (the order itself
+/// among them) `FOR UPDATE`, in id order: the sibling lock that decides which
+/// of them pays the payout fee (see the module docs). Call it before any other
+/// order lock in the transaction; taking it again later is a no-op. An
+/// unknown order locks nothing (the caller's own read answers 404).
+pub async fn lock_store_orders(conn: &mut PgConnection, order_id: Uuid) -> Result<(), AppError> {
+    sqlx::query(
+        "SELECT s.id FROM orders o \
+         JOIN orders s ON s.checkout_id = o.checkout_id AND s.store_id = o.store_id \
+         WHERE o.id = $1 ORDER BY s.id FOR UPDATE OF s",
+    )
+    .bind(order_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err("lock store orders"))?;
+    Ok(())
 }
 
 /// Step 1 (see the module docs). Idempotent: an order that is not
@@ -418,6 +472,9 @@ async fn release(
         .execute(&mut *tx)
         .await
         .map_err(db_err("set lock_timeout"))?;
+    // The sibling orders first, in id order (see the module docs), then the
+    // order itself below.
+    lock_store_orders(&mut tx, order_id).await?;
     // The owner's audit names the order's state before the release: read it
     // under the order lock, which release_in takes again in this transaction.
     let prior: Option<(String, bool)> = match owner {
@@ -487,7 +544,9 @@ async fn release(
 }
 
 /// Step 1 of a release (see the module docs), **inside the caller's
-/// transaction**: locks the order, checks its state and the release rules,
+/// transaction**: locks the order (after its siblings, [`lock_store_orders`]:
+/// a caller that locked the order earlier in the transaction must have taken
+/// the sibling locks before it), checks its state and the release rules,
 /// books the ledger (key `("release", order_id)`), inserts the payout row,
 /// completes the order and audits `order.released`. It neither commits nor
 /// sends: after the commit the caller sends the payout with [`send_payout`]
@@ -508,12 +567,16 @@ pub async fn release_in(
         .execute(&mut *conn)
         .await
         .map_err(db_err("set lock_timeout"))?;
+    lock_store_orders(&mut *conn, order_id).await?;
     let row: ReleaseRow = sqlx::query_as(
         "SELECT o.status::text AS status, o.items_total_kobo, o.delivery_fee_kobo, \
                 COALESCE(o.delivery_method::text = 'self', false) AS self_delivery, \
                 o.platform_cut_kobo, o.collection_fee_share_kobo, \
                 o.collection_fee_courier_kobo, o.checkout_id, c.paid_at, \
                 EXISTS (SELECT 1 FROM payouts p WHERE p.order_id = o.id) AS has_payout, \
+                EXISTS (SELECT 1 FROM payouts p JOIN orders s ON s.id = p.order_id \
+                        WHERE s.checkout_id = o.checkout_id AND s.store_id = o.store_id \
+                          AND s.id <> o.id) AS sibling_released, \
                 o.held_at IS NOT NULL AS held, c.provider_flagged, o.delivered_at IS NOT NULL AS delivered, \
                 COALESCE(o.release_at <= now(), false) AS release_due, \
                 o.fee_small_kobo, o.fee_large_kobo, o.fee_threshold_kobo, \
@@ -567,6 +630,7 @@ pub async fn release_in(
             cut,
             share: row.collection_fee_share_kobo,
             courier_share: row.collection_fee_courier_kobo,
+            fee_waived: row.sibling_released,
         },
         &schedule,
     )?;
@@ -644,13 +708,15 @@ pub async fn release_in(
             "self_delivery_fee_kobo": seller_delivery,
             "shortfall_kobo": shortfall,
             "payout_fee_kobo": payout_fee,
+            // A sibling order of the checkout and store paid the fee.
+            "payout_fee_waived": row.sibling_released,
             "payout_status": status,
             // Fraud signal: a buyer confirming minutes after paying.
             "minutes_since_paid": (now - paid_at).whole_minutes(),
         }),
     )
     .await?;
-    notify::tell_seller(conn, Kind::FundsReleased, order_id).await?;
+    notify::tell_team(conn, Kind::FundsReleased, order_id, Audience::Managers).await?;
     Ok(ReleasedIn::Done {
         payout_id,
         status,
@@ -1637,6 +1703,7 @@ mod tests {
                 cut: 50_000,
                 share: 1_500,
                 courier_share: 0,
+                fee_waived: false,
             },
             &s,
         )
@@ -1664,6 +1731,7 @@ mod tests {
                 cut: 150,
                 share: 10,
                 courier_share: 0,
+                fee_waived: false,
             },
             &s,
         )
@@ -1681,6 +1749,52 @@ mod tests {
             }
         );
         // The entries balance: escrow out = everything booked in.
+        assert_eq!(
+            a.gross,
+            a.cut_and_delivery + a.provider_fee + a.payout_fee + a.payout
+        );
+    }
+
+    #[test]
+    fn waived_fee_goes_to_the_seller_but_stamp_duty_stays() {
+        let s = FeeSchedule::default();
+        let waived = |items| {
+            release_amounts(
+                &ReleaseInputs {
+                    items,
+                    delivery: 0,
+                    self_delivery: false,
+                    cut: 50_000,
+                    share: 1_500,
+                    courier_share: 0,
+                    fee_waived: true,
+                },
+                &s,
+            )
+            .unwrap()
+        };
+        // 948,500 before the fee: under the duty threshold, nothing charged.
+        let a = waived(1_000_000);
+        assert_eq!(
+            a,
+            ReleaseAmounts {
+                gross: 1_000_000,
+                cut_and_delivery: 50_000,
+                provider_fee: 1_500,
+                payout_fee: 0,
+                payout: 948_500,
+                shortfall: 0,
+                seller_delivery: 0,
+            }
+        );
+        assert_eq!(
+            a.gross,
+            a.cut_and_delivery + a.provider_fee + a.payout_fee + a.payout
+        );
+        // 1,048,500: over it, the 5,000 duty and no 3,500 fee.
+        let a = waived(1_100_000);
+        assert_eq!(a.payout_fee, 5_000);
+        assert_eq!(a.payout, 1_048_500 - 5_000);
         assert_eq!(
             a.gross,
             a.cut_and_delivery + a.provider_fee + a.payout_fee + a.payout

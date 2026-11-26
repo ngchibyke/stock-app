@@ -513,11 +513,7 @@ async fn paid_after_expiry_refunds_when_stock_gone(pool: PgPool) {
     let b = bought(&app, 1_000, 5, 2).await;
     expire(&app, b.checkout_id).await;
     // Someone else bought most of it meanwhile.
-    sqlx::query("UPDATE product_variants SET stock = 1 WHERE id = $1")
-        .bind(b.listing.variant_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    app.set_counts(b.listing.variant_id, 1, 0).await;
     app.fake
         .set_payment(&b.reference, success(&b.reference, b.total_kobo, 10));
     assert_status(&webhook(&app, "evt-1", &b.reference).await, 200, "received");
@@ -1225,12 +1221,7 @@ async fn refund_restore_clamps_at_stock_cap(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let (b, order_id) = paid_order(&app, 2).await;
     // The seller restocked to one below the cap meanwhile.
-    sqlx::query("UPDATE product_variants SET stock = $2 WHERE id = $1")
-        .bind(b.listing.variant_id)
-        .bind(MAX_STOCK - 1)
-        .execute(&app.pool)
-        .await
-        .unwrap();
+    app.set_counts(b.listing.variant_id, MAX_STOCK - 1, 0).await;
     let out = refund_order(&app.state, order_id, true).await.unwrap();
     assert_eq!(out.status, "manual");
     assert_eq!(app.stock(b.listing.variant_id).await, MAX_STOCK);

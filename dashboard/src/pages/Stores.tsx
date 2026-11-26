@@ -6,7 +6,7 @@ import { Button } from "../ui/Button";
 import { Drawer } from "../ui/Drawer";
 import { ConfirmDialog } from "../ui/Modal";
 import { DataTable, LoadMore, SearchBox } from "../ui/Table";
-import { Card, CopyChip, EmptyState, ErrorNote, Segmented, StatusBadge } from "../ui/kit";
+import { Badge, Card, CopyChip, EmptyState, ErrorNote, Segmented, StatusBadge } from "../ui/kit";
 import { PageHeader } from "../ui/PageHeader";
 import { SkeletonDetail, SkeletonTable } from "../ui/Skeleton";
 
@@ -29,6 +29,23 @@ interface StoreDetail extends StoreRow {
   payout_account_status: string | null;
   product_count: number;
   open_order_count: number;
+  branches: BranchRow[];
+  team: MemberRow[];
+}
+interface BranchRow {
+  id: string;
+  name: string;
+  area_council: string | null;
+  closed_at: string | null;
+  collect_enabled: boolean;
+}
+interface MemberRow {
+  id: string;
+  user_id: string;
+  display_name: string;
+  role: "manager" | "staff";
+  branch_id: string | null;
+  removed_at: string | null;
 }
 
 const day = (iso: string) => new Date(iso).toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" });
@@ -111,6 +128,38 @@ function StoreDrawer({ id, onClose }: { id: string | null; onClose: () => void }
                 </>
               )}
             </dl>
+            <h3 style={{ margin: "16px 0 8px" }}>Branches</h3>
+            {s.branches.length === 0 ? (
+              <EmptyState icon="store" title="No branches" />
+            ) : (
+              <DataTable
+                label="Branches"
+                rows={s.branches}
+                rowKey={(b) => b.id}
+                columns={[
+                  { key: "name", header: "Branch", cell: (b) => <strong>{b.name}</strong> },
+                  { key: "area", header: "Area", cell: (b) => b.area_council ?? <span className="muted">None</span> },
+                  { key: "collect", header: "Collect", cell: (b) => (b.collect_enabled ? "On" : <span className="muted">Off</span>) },
+                  { key: "state", header: "Status", cell: (b) => (b.closed_at ? <Badge tone="neutral">Closed {day(b.closed_at)}</Badge> : <Badge tone="good">Open</Badge>) },
+                ]}
+              />
+            )}
+            <h3 style={{ margin: "16px 0 8px" }}>Team</h3>
+            {s.team.length === 0 ? (
+              <EmptyState icon="users" title="No team members" />
+            ) : (
+              <DataTable
+                label="Team"
+                rows={s.team}
+                rowKey={(m) => m.id}
+                columns={[
+                  { key: "name", header: "Name", cell: (m) => <strong>{m.display_name}</strong> },
+                  { key: "role", header: "Role", cell: (m) => <Badge tone="info">{m.role}</Badge> },
+                  { key: "branch", header: "Branch", cell: (m) => (m.branch_id ? (s.branches.find((b) => b.id === m.branch_id)?.name ?? "Unknown") : <span className="muted">All</span>) },
+                  { key: "state", header: "Status", cell: (m) => (m.removed_at ? <Badge tone="neutral">Removed</Badge> : <Badge tone="good">Active</Badge>) },
+                ]}
+              />
+            )}
             {s.suspended ? (
               <Button icon="undo" variant="primary" loading={unsuspend.busy} done={unsuspend.done} onClick={() => void unsuspend.run(undefined).catch(() => {})}>
                 Unsuspend

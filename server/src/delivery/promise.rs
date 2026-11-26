@@ -64,6 +64,12 @@ pub fn lagos_date(now: OffsetDateTime) -> Date {
     now.to_offset(LAGOS).date()
 }
 
+/// The date a collect order paid at `paid_at` is promised ready at its branch: the
+/// ship deadline's date (Africa/Lagos), with no courier pickup to wait for.
+pub fn collect_ready_date(paid_at: OffsetDateTime, ship_deadline_hours: i32) -> Date {
+    lagos_date(paid_at + Duration::hours(i64::from(ship_deadline_hours)))
+}
+
 /// Holidays the owner maintains in `bank_holidays` (from two days back onwards).
 pub async fn load_holidays(db: &PgPool) -> Result<Vec<Date>, AppError> {
     let from = OffsetDateTime::now_utc().to_offset(LAGOS).date() - Duration::days(2);

@@ -169,18 +169,14 @@ async fn held_self_order_with_fee(app: &TestApp) -> Uuid {
     let address = app.buyer_address(&buyer).await;
     let opts = app.delivery_options(&buyer, address).await;
     assert_eq!(opts.status, 200, "{}", opts.json);
-    let option: Uuid = opts.json["stores"][0]["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|o| o["method"] == "self")
-        .expect("a self option")["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let option = common::group_option(&opts.json, "self");
     let res = app
-        .checkout_with(&buyer, "mono_directpay", address, &[(l.store_id, option)])
+        .checkout_with(
+            &buyer,
+            "mono_directpay",
+            address,
+            std::slice::from_ref(&option),
+        )
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let reference = res.json["reference"].as_str().unwrap().to_string();

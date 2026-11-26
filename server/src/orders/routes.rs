@@ -1,6 +1,7 @@
 //! Order routes: views, buyer cancel and buyer "received", and the seller's
 //! delivery steps (self-delivery: picked up, out for delivery, delivered with
-//! the buyer's handover code; courier: ready for collection).
+//! the buyer's handover code; courier: ready for collection; collect from a
+//! branch: ready at the counter, then collected with the buyer's handover code).
 
 use anyhow::Context;
 use axum::{
@@ -23,9 +24,11 @@ use super::{
 use crate::{
     AppState, audit,
     auth::{AuthUser, extractor::Role},
+    delivery::collect,
     error::AppError,
     escrow::{ReleaseReason, refund::refund_order, release_order},
     extract::{AppJson, AppQuery},
+    stores::access::covers_branch_sql,
 };
 
 pub fn router() -> Router<AppState> {
@@ -92,7 +95,7 @@ async fn show(
     ))
 }
 
-/// The tracking timeline, for the order's buyer or its store owner only. It can
+/// The tracking timeline, for the order's buyer or its store's team only. It can
 /// carry contact details and the handover code, so it is never cached.
 async fn tracking(
     State(state): State<AppState>,
@@ -234,18 +237,21 @@ async fn received(
     ))
 }
 
-/// (status, delivery method) if `user` owns the order's store; anyone else
-/// (buyer, other sellers, staff) gets 404, as for every order route.
+/// (status, delivery method) if `user` may act on the order: its store's owner, a
+/// manager, store-wide staff, or staff of the order's branch. Anyone else (buyer,
+/// other sellers, staff of another branch, platform staff) gets 404, as for every
+/// order route. Read on every request, so a member removed since gets 404.
 async fn seller_order(
     state: &AppState,
     user: &AuthUser,
     order_id: Uuid,
 ) -> Result<(String, Option<String>), AppError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, Option<String>)> = sqlx::query_as(&format!(
         "SELECT o.status::text, o.delivery_method::text \
          FROM orders o JOIN stores s ON s.id = o.store_id \
-         WHERE o.id = $1 AND s.owner_id = $2 AND o.status <> 'pending_payment'",
-    )
+         WHERE o.id = $1 AND {} AND o.status <> 'pending_payment'",
+        covers_branch_sql("$2", "o.branch_id")
+    ))
     .bind(order_id)
     .bind(user.id)
     .fetch_optional(&state.db)
@@ -254,7 +260,7 @@ async fn seller_order(
     row.ok_or(AppError::NotFound)
 }
 
-/// The store owner's order, which must be delivered by `method`; any other
+/// An order the member may act on, which must be delivered by `method`; any other
 /// delivery method (or none, on orders from before delivery existed) is 409.
 async fn seller_order_by(
     state: &AppState,
@@ -317,7 +323,8 @@ struct HandoverBody {
     handover_code: String,
 }
 
-/// Self-delivery: delivered, with the buyer's handover code. Entering it is
+/// Self-delivery or collect: delivered, with the buyer's handover code (the same
+/// lockout either way). Collect: the release clock starts. Self-delivery: entering it is
 /// the buyer's confirmation, so the money is released straight after. If the
 /// release fails (e.g. the order is held), the order stays `delivered` and the
 /// auto-release job covers it.
@@ -328,7 +335,24 @@ async fn delivered(
     AppJson(body): AppJson<HandoverBody>,
 ) -> Result<Json<OrderView>, AppError> {
     let id = parse_id(&id)?;
-    seller_order_by(&state, &user, id, "self").await?;
+    let (_, method) = seller_order(&state, &user, id).await?;
+    match method.as_deref() {
+        Some("self") => {}
+        // Collected at the branch: the release clock starts; nothing is released now.
+        Some("collect") => {
+            collect::collect_with_code(
+                &state.db,
+                &state.cipher,
+                user.id,
+                id,
+                &body.handover_code,
+                OffsetDateTime::now_utc(),
+            )
+            .await?;
+            return seller_view(&state, &user, id).await;
+        }
+        _ => return Err(AppError::Conflict("invalid_order_state")),
+    }
     let outcome = service::deliver_with_code(
         &state.db,
         &state.cipher,
@@ -357,14 +381,21 @@ async fn delivered(
     seller_view(&state, &user, id).await
 }
 
-/// Courier: the parcel is ready for collection (`ready_at` on a `paid` order).
+/// Courier: the parcel is ready for the courier to collect. Collect: the order is
+/// ready at the branch's counter, and the buyer gets their handover code. Both set
+/// `ready_at` on a `paid` order.
 async fn ready(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<OrderView>, AppError> {
     let id = parse_id(&id)?;
-    seller_order_by(&state, &user, id, "courier").await?;
-    service::mark_ready(&state.db, user.id, id, OffsetDateTime::now_utc()).await?;
+    let (_, method) = seller_order(&state, &user, id).await?;
+    let now = OffsetDateTime::now_utc();
+    match method.as_deref() {
+        Some("courier") => service::mark_ready(&state.db, user.id, id, now).await?,
+        Some("collect") => collect::mark_ready(&state.db, &state.cipher, user.id, id, now).await?,
+        _ => return Err(AppError::Conflict("invalid_order_state")),
+    }
     seller_view(&state, &user, id).await
 }

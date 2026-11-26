@@ -33,6 +33,7 @@ use crate::{
     market::{layout::Layout, placement},
     payments::ProviderError,
     settings,
+    stores::access::{self, Action},
 };
 
 /// PUT attempts (accepted, failed re-authentication, or rejected by the provider lookup) allowed per store in a rolling day.
@@ -342,17 +343,10 @@ pub async fn set_account(
 ) -> Result<PayoutAccountView, AppError> {
     validate(&input)?;
 
-    // Ownership and pre-checks; no transaction or lock is held.
-    let owned: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM stores WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(store_id)
-    .bind(owner)
-    .fetch_optional(&state.db)
-    .await
-    .context("check store")?;
-    owned.ok_or(AppError::NotFound)?;
+    // Who may, and pre-checks; no transaction or lock is held. The payout account is
+    // the owner's alone: a member gets 403, anyone else 404.
     let mut conn = state.db.acquire().await.context("acquire")?;
+    access::require(&mut conn, store_id, owner, Action::ManagePayout).await?;
     if recent_attempts(&mut conn, store_id).await? >= MAX_PUTS_PER_DAY {
         return Err(AppError::TooManyRequests("too_many_attempts"));
     }
@@ -488,6 +482,9 @@ pub async fn get_for_owner(
     owner: Uuid,
     store_id: Uuid,
 ) -> Result<PayoutAccountView, AppError> {
+    let mut conn = state.db.acquire().await.context("acquire")?;
+    access::require(&mut conn, store_id, owner, Action::ManagePayout).await?;
+    drop(conn);
     let row: Option<Row> = sqlx::query_as(
         "SELECT pa.bank_code, pa.account_last4, pa.account_name_enc, \
                 pa.status::text AS status, pa.pending_reason, pa.verified_by, pa.changed_at \

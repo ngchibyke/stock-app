@@ -1,19 +1,29 @@
-//! Checkout: reserves stock (`reserved_quantity`; on-hand `stock` changes only
-//! when the payment settles, see [`commit_reserved`]) and creates one checkout plus one order per store,
-//! then asks the payment provider for a payment page.
+//! Checkout: reserves stock at each order's branch (`reserved_quantity`, through
+//! [`crate::stock::apply`]; on-hand `stock` changes only when the payment settles,
+//! see [`commit_reserved`]) and creates one checkout plus one order per fulfilment
+//! group (a store's branch and the lines it sends), then asks the payment provider
+//! for one payment page.
 //!
-//! Delivery (Part 3): the body names the buyer's address and one stored delivery
-//! option per store (see [`crate::delivery::options`]). Each order snapshots its
-//! option (method, fee, courier quote, promised date) and the address, encrypted;
+//! Delivery (Part 3; by branch since 7e-1): the body names the buyer's address and
+//! one `{group_id, option_id}` per group from `POST /checkout/delivery-options` (see
+//! [`crate::delivery::options`]). Under the stock locks, the chosen groups must cover
+//! each store's cart lines exactly and every group's branch must still have the
+//! stock for its lines; otherwise 409 `allocation_changed` and nothing is reserved:
+//! a checkout never re-routes a line after the buyer saw its price. A line no open
+//! branch can fill whole is 409 `out_of_stock`, first. Each order snapshots its
+//! option (method, fee, courier quote, promised date) and the address, encrypted
+//! (not on a collect order: nothing is delivered to it, so no copy is kept);
 //! the checkout total is the items plus every delivery fee. The platform cut is
 //! taken on items only.
 //!
 //! Locking follows the global order `users -> stores -> products ->
-//! product_variants -> access_codes -> checkouts -> orders -> payouts`. The
-//! create transaction locks the buyer's user row, then the variants (standalone
-//! query, ordered by id); product and store data are read after that without
-//! locks. Nothing holding a lock waits on the provider: `initiate` runs after
-//! commit.
+//! product_variants -> branch_stock -> access_codes -> checkouts -> orders -> payouts`.
+//! The create transaction locks the buyer's user row, then the variants (standalone
+//! query, ordered by id), then each line's branch_stock row at its group's branch in
+//! the same order; product, store, branch and option rows are read without locks.
+//! Every stock writer (and a branch close) holds the variant lock first, so what is
+//! read under it is settled. Nothing holding a lock waits on the provider:
+//! `initiate` runs after commit.
 //!
 //! Provider outcomes after commit:
 //! - success with an allowed https `payment_url`: store `provider_payment_id`
@@ -35,16 +45,20 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     cart::service::{BUYABLE, own_store_item},
-    delivery::options::{
-        ChosenOption, DeliveryChoice, DeliveryMethod, checkout_address, chosen_options,
-        still_offered,
+    delivery::{
+        allocate::merge_lines,
+        options::{
+            ChosenOption, DeliveryMethod, GroupChoice, checkout_address, chosen_groups,
+            option_invalid, still_offered,
+        },
     },
     error::AppError,
     limits::MAX_CHECKOUT_TOTAL_KOBO,
     money::{checked_sum, cut_kobo},
     payments::{self, InitiatePayment, ProviderError, payment_url_allowed},
     products::service::unit_price,
-    settings,
+    settings, stock,
+    stores::access::is_member_sql,
 };
 
 /// Most `pending` (unexpired) checkouts one buyer may hold: each one reserves
@@ -68,8 +82,16 @@ pub struct CreatedOrder {
 pub struct CheckoutRequest {
     pub method: String,
     pub address_id: Uuid,
-    /// One `{store_id, option_id}` per store in the cart.
-    pub deliveries: Vec<DeliveryChoice>,
+    /// One `{group_id, option_id}` per fulfilment group of the cart.
+    pub groups: Vec<GroupChoice>,
+}
+
+/// The stock moved since the buyer was shown the groups (a branch sold out or closed).
+fn allocation_changed() -> AppError {
+    AppError::ConflictDetail(
+        "allocation_changed",
+        "Stock has moved since delivery was quoted; please choose delivery again".into(),
+    )
 }
 
 /// The `POST /checkout` response body.
@@ -118,8 +140,6 @@ struct VariantRow {
     id: Uuid,
     product_id: Uuid,
     attributes: serde_json::Value,
-    stock: i32,
-    reserved_quantity: i32,
     price_kobo: Option<i64>,
 }
 
@@ -130,7 +150,8 @@ struct ProductRow {
     base_price_kobo: i64,
     buyable: bool,
     store_id: Uuid,
-    owner_id: Uuid,
+    /// The buyer is the store's owner or a live member of it.
+    buyer_member: bool,
 }
 
 struct Line {
@@ -142,6 +163,8 @@ struct Line {
 }
 
 struct OrderDraft {
+    store_id: Uuid,
+    branch_id: Uuid,
     lines: Vec<Line>,
     items_total_kobo: i64,
     platform_cut_kobo: i64,
@@ -213,24 +236,26 @@ pub async fn create(
 
     // The cart is read, not locked: cart_items rows cascade from variant deletes, and
     // locking them before the variants would invert the lock order.
-    let cart: Vec<(Uuid, i32)> = sqlx::query_as(
+    let raw: Vec<(Uuid, i32)> = sqlx::query_as(
         "SELECT variant_id, quantity FROM cart_items WHERE user_id = $1 ORDER BY variant_id",
     )
     .bind(buyer)
     .fetch_all(&mut *tx)
     .await
     .context("load cart")?;
-    if cart.is_empty() {
+    if raw.is_empty() {
         return Err(AppError::Unprocessable(
             "cart_empty",
             "Your cart is empty".into(),
         ));
     }
-    let ids: Vec<Uuid> = cart.iter().map(|(id, _)| *id).collect();
+    // One line per variant, every quantity at least 1, in variant id order.
+    let cart = merge_lines(&raw)?;
+    let ids: Vec<Uuid> = cart.iter().map(|l| l.variant_id).collect();
 
     // product_variants: one standalone statement, always in id order.
     let variants: HashMap<Uuid, VariantRow> = sqlx::query_as::<_, VariantRow>(
-        "SELECT id, product_id, attributes, stock, reserved_quantity, price_kobo \
+        "SELECT id, product_id, attributes, price_kobo \
          FROM product_variants WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(&ids)
@@ -244,10 +269,12 @@ pub async fn create(
     let product_ids: Vec<Uuid> = variants.values().map(|v| v.product_id).collect();
     let products: HashMap<Uuid, ProductRow> = sqlx::query_as::<_, ProductRow>(&format!(
         "SELECT p.id, p.name, p.base_price_kobo, ({BUYABLE}) AS buyable, \
-                s.id AS store_id, s.owner_id \
-         FROM products p JOIN stores s ON s.id = p.store_id WHERE p.id = ANY($1)"
+                s.id AS store_id, {} AS buyer_member \
+         FROM products p JOIN stores s ON s.id = p.store_id WHERE p.id = ANY($1)",
+        is_member_sql("$2")
     ))
     .bind(&product_ids)
+    .bind(buyer)
     .fetch_all(&mut *tx)
     .await
     .context("load products")?
@@ -261,57 +288,101 @@ pub async fn create(
             format!("Item {id} is no longer available"),
         )
     };
-    let mut by_store: BTreeMap<Uuid, Vec<Line>> = BTreeMap::new();
-    for &(variant_id, quantity) in &cart {
+    let mut by_variant: HashMap<Uuid, Line> = HashMap::with_capacity(cart.len());
+    let mut carts: BTreeMap<Uuid, Vec<crate::delivery::allocate::Line>> = BTreeMap::new();
+    for l in &cart {
         let v = variants
-            .get(&variant_id)
-            .ok_or_else(|| unavailable(variant_id))?;
+            .get(&l.variant_id)
+            .ok_or_else(|| unavailable(l.variant_id))?;
         let p = products
             .get(&v.product_id)
             .filter(|p| p.buyable)
-            .ok_or_else(|| unavailable(variant_id))?;
-        if p.owner_id == buyer {
+            .ok_or_else(|| unavailable(l.variant_id))?;
+        if p.buyer_member {
             return Err(own_store_item());
         }
-        // Available = on hand minus what other pending checkouts hold, read from the locked row.
-        if v.stock - v.reserved_quantity < quantity {
-            return Err(AppError::ConflictDetail(
-                "out_of_stock",
-                format!("Item {variant_id} does not have enough stock"),
-            ));
-        }
-        by_store.entry(p.store_id).or_default().push(Line {
-            variant_id,
-            product_name: p.name.clone(),
-            attributes: v.attributes.clone(),
-            unit_price_kobo: unit_price(p.base_price_kobo, v.price_kobo),
-            quantity,
-        });
+        carts.entry(p.store_id).or_default().push(l.clone());
+        by_variant.insert(
+            l.variant_id,
+            Line {
+                variant_id: l.variant_id,
+                product_name: p.name.clone(),
+                attributes: v.attributes.clone(),
+                unit_price_kobo: unit_price(p.base_price_kobo, v.price_kobo),
+                quantity: l.quantity,
+            },
+        );
     }
 
-    // Exactly one valid delivery option per store, quoted for these exact lines.
-    let carts: BTreeMap<Uuid, Vec<(Uuid, i32)>> = by_store
+    // The buyer's groups, each one valid option quoted for lines still in the cart.
+    let mut groups =
+        chosen_groups(&mut tx, buyer, request.address_id, &request.groups, &carts).await?;
+    let branch_of: HashMap<Uuid, Uuid> = groups
         .iter()
-        .map(|(store, lines)| {
-            (
-                *store,
-                lines.iter().map(|l| (l.variant_id, l.quantity)).collect(),
-            )
-        })
+        .flat_map(|g| g.variant_ids.iter().map(|v| (*v, g.branch_id)))
         .collect();
-    let mut chosen = chosen_options(
-        &mut tx,
-        buyer,
-        request.address_id,
-        &request.deliveries,
-        &carts,
-    )
-    .await?;
-    // A store may have switched the method off (or moved its pickup) since the quote.
-    still_offered(state, &mut tx, &chosen).await?;
 
-    let mut orders: Vec<(Uuid, OrderDraft)> = Vec::with_capacity(by_store.len());
-    for (store_id, lines) in by_store {
+    // Stock, in variant id order (the variants are locked): each line's row at its
+    // group's branch is locked and read; a line short there is checked against the
+    // most one open branch has. Every writer holds the variant lock, so neither
+    // figure can move before commit.
+    let mut moved = false;
+    for l in &cart {
+        let at_branch = match branch_of.get(&l.variant_id) {
+            Some(branch) => Some(stock::lock_available(&mut tx, *branch, l.variant_id).await?),
+            None => None,
+        };
+        if at_branch.is_some_and(|n| n >= l.quantity) {
+            continue;
+        }
+        let best: i64 = sqlx::query_scalar(&format!(
+            "SELECT {} FROM product_variants v WHERE v.id = $1",
+            stock::MAX_AVAILABLE_SQL
+        ))
+        .bind(l.variant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("load availability")?;
+        if best < i64::from(l.quantity) {
+            // Today's rule: no part of a cart is bought while a line is unavailable.
+            return Err(stock::out_of_stock(l.variant_id));
+        }
+        moved |= at_branch.is_some();
+    }
+    // Every line in exactly one chosen group (overlaps were refused above).
+    for store_lines in carts.values() {
+        let covered = store_lines
+            .iter()
+            .filter(|l| branch_of.contains_key(&l.variant_id))
+            .count();
+        if covered == 0 {
+            return Err(AppError::Unprocessable(
+                "delivery_option_required",
+                "Choose a delivery option for every store".into(),
+            ));
+        }
+        if covered < store_lines.len() {
+            return Err(option_invalid());
+        }
+    }
+    if moved {
+        return Err(allocation_changed());
+    }
+    // A store may have switched the method off (or moved its pickup) since the quote.
+    still_offered(state, &mut tx, &groups).await?;
+
+    groups.sort_by_key(|g| (g.store_id, g.branch_id));
+    let mut orders: Vec<OrderDraft> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let lines: Vec<Line> = g
+            .variant_ids
+            .iter()
+            .map(|v| {
+                by_variant
+                    .remove(v)
+                    .ok_or_else(|| anyhow::anyhow!("validated group line missing"))
+            })
+            .collect::<Result<_, _>>()?;
         let totals = lines
             .iter()
             .map(|l| {
@@ -321,24 +392,20 @@ pub async fn create(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let items_total_kobo = checked_sum(&totals)?;
-        let delivery = chosen
-            .remove(&store_id)
-            .ok_or_else(|| anyhow::anyhow!("validated delivery option missing"))?;
-        orders.push((
-            store_id,
-            OrderDraft {
-                // The platform cut applies to items only, never to delivery.
-                platform_cut_kobo: cut_kobo(items_total_kobo, settings.platform_cut_bps),
-                items_total_kobo,
-                lines,
-                delivery,
-            },
-        ));
+        orders.push(OrderDraft {
+            store_id: g.store_id,
+            branch_id: g.branch_id,
+            // The platform cut applies to items only, never to delivery.
+            platform_cut_kobo: cut_kobo(items_total_kobo, settings.platform_cut_bps),
+            items_total_kobo,
+            lines,
+            delivery: g.option,
+        });
     }
     // The buyer pays the items plus every order's delivery fee.
     let order_totals = orders
         .iter()
-        .map(|(_, o)| {
+        .map(|o| {
             o.items_total_kobo
                 .checked_add(o.delivery.fee_kobo)
                 .ok_or_else(too_large)
@@ -348,25 +415,26 @@ pub async fn create(
     let delivery_kobo = checked_sum(
         &orders
             .iter()
-            .map(|(_, o)| o.delivery.fee_kobo)
+            .map(|o| o.delivery.fee_kobo)
             .collect::<Vec<_>>(),
     )?;
     if total_kobo > MAX_CHECKOUT_TOTAL_KOBO {
         return Err(too_large());
     }
 
-    // The reservation: on-hand stock is untouched until the payment settles (commit_reserved).
-    for (_, order) in &orders {
-        for l in &order.lines {
-            sqlx::query(
-                "UPDATE product_variants SET reserved_quantity = reserved_quantity + $2 WHERE id = $1",
-            )
-                .bind(l.variant_id)
-                .bind(l.quantity)
-                .execute(&mut *tx)
-                .await
-                .context("reserve stock")?;
-        }
+    // The reservation, at each order's branch: on-hand stock is untouched until the
+    // payment settles (commit_reserved). Variant id order, as locked above.
+    let mut reserve: Vec<(Uuid, Uuid, i32)> = orders
+        .iter()
+        .flat_map(|o| {
+            o.lines
+                .iter()
+                .map(move |l| (l.variant_id, o.branch_id, l.quantity))
+        })
+        .collect();
+    reserve.sort();
+    for (variant, branch, quantity) in reserve {
+        stock::apply(&mut tx, branch, variant, 0, quantity).await?;
     }
 
     let mut created = None;
@@ -396,26 +464,28 @@ pub async fn create(
     let (checkout_id, reference) =
         created.ok_or_else(|| anyhow::anyhow!("could not allocate a checkout reference"))?;
 
-    for (store_id, order) in &orders {
+    for order in &orders {
         let d = &order.delivery;
         // The courier quote is what the courier will charge (ruling T6f).
         let courier_quote = match d.method {
             DeliveryMethod::Courier => d.charged_kobo,
-            DeliveryMethod::SelfDelivery => None,
+            DeliveryMethod::SelfDelivery | DeliveryMethod::Collect => None,
         };
+        // Data minimisation: a collect order needs no delivery address.
+        let order_address = (d.method != DeliveryMethod::Collect).then_some(&address_enc);
         let order_id: Uuid = sqlx::query_scalar(
             "INSERT INTO orders (checkout_id, store_id, buyer_id, items_total_kobo, \
                                  platform_cut_bps, platform_cut_kobo, delivery_fee_kobo, \
                                  delivery_method, delivery_option_id, delivery_address_enc, \
                                  delivery_area, promised_date, courier_request_token, \
                                  courier_id, service_code, courier_quote_kobo, \
-                                 courier_sender_code) \
+                                 courier_sender_code, branch_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, \
-                     $17) \
+                     $17, $18) \
              RETURNING id",
         )
         .bind(checkout_id)
-        .bind(store_id)
+        .bind(order.store_id)
         .bind(buyer)
         .bind(order.items_total_kobo)
         .bind(settings.platform_cut_bps)
@@ -423,7 +493,7 @@ pub async fn create(
         .bind(d.fee_kobo)
         .bind(d.method)
         .bind(d.id)
-        .bind(&address_enc)
+        .bind(order_address)
         .bind(delivery_area)
         .bind(d.promised_date)
         .bind(courier_quote.and(d.request_token.as_deref()))
@@ -431,6 +501,7 @@ pub async fn create(
         .bind(courier_quote.and(d.service_code.as_deref()))
         .bind(courier_quote)
         .bind(courier_quote.and(d.sender_code))
+        .bind(order.branch_id)
         .fetch_one(&mut *tx)
         .await
         .context("insert order")?;
@@ -612,50 +683,58 @@ async fn load_created(conn: &mut PgConnection, checkout_id: Uuid) -> Result<Crea
     })
 }
 
-/// The checkout's reserved quantities per variant (from the snapshotted
-/// `order_items`, never the live cart), with those variants locked in id order.
+/// One reserved line of a checkout: the order's branch, the variant, the units.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Held {
+    pub branch_id: Uuid,
+    pub variant_id: Uuid,
+    pub quantity: i32,
+}
+
+/// The checkout's reserved quantities per (variant, branch) (from the snapshotted
+/// `order_items` and each order's branch, never the live cart), with those
+/// variants locked in id order, then their branch_stock rows in the same order.
 /// A lock timeout or deadlock is 409 `checkout_busy`.
 pub(crate) async fn lock_reserved(
     conn: &mut PgConnection,
     checkout_id: Uuid,
-) -> Result<Vec<(Uuid, i32)>, AppError> {
-    let items: Vec<(Uuid, i64)> = sqlx::query_as(
-        "SELECT oi.variant_id, sum(oi.quantity)::bigint FROM order_items oi \
+) -> Result<Vec<Held>, AppError> {
+    let items: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(
+        "SELECT oi.variant_id, o.branch_id, sum(oi.quantity)::bigint FROM order_items oi \
          JOIN orders o ON o.id = oi.order_id WHERE o.checkout_id = $1 \
-         GROUP BY oi.variant_id ORDER BY oi.variant_id",
+         GROUP BY oi.variant_id, o.branch_id ORDER BY oi.variant_id, o.branch_id",
     )
     .bind(checkout_id)
     .fetch_all(&mut *conn)
     .await
     .context("load reserved items")?;
-    let ids: Vec<Uuid> = items.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<Uuid> = items.iter().map(|(id, _, _)| *id).collect();
     sqlx::query("SELECT id FROM product_variants WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE")
         .bind(&ids)
         .fetch_all(&mut *conn)
         .await
         .map_err(db_err("lock variants"))?;
-    items
-        .into_iter()
-        .map(|(id, q)| Ok((id, i32::try_from(q).context("quantity range")?)))
-        .collect()
+    let mut held = Vec::with_capacity(items.len());
+    for (variant_id, branch_id, q) in items {
+        stock::lock_available(conn, branch_id, variant_id).await?;
+        held.push(Held {
+            branch_id,
+            variant_id,
+            quantity: i32::try_from(q).context("quantity range")?,
+        });
+    }
+    Ok(held)
 }
 
 /// Turns a checkout's reservation into a sale, inside the caller's transaction:
-/// `stock -= q` and `reserved_quantity -= q` for every line, under the variant
-/// locks (id order). Task 6 calls this when the payment settles, in the same
-/// transaction that moves the checkout `pending -> paid`; that transition is the
-/// gate, so this must run only when it succeeded (never twice).
+/// `stock -= q` and `reserved_quantity -= q` for every line at its order's branch
+/// (and so in the variant's totals), under the locks of [`lock_reserved`]. Task 6
+/// calls this when the payment settles, in the same transaction that moves the
+/// checkout `pending -> paid`; that transition is the gate, so this must run only
+/// when it succeeded (never twice).
 pub async fn commit_reserved(conn: &mut PgConnection, checkout_id: Uuid) -> Result<(), AppError> {
-    for (variant_id, quantity) in lock_reserved(conn, checkout_id).await? {
-        sqlx::query(
-            "UPDATE product_variants \
-             SET stock = stock - $2, reserved_quantity = reserved_quantity - $2 WHERE id = $1",
-        )
-        .bind(variant_id)
-        .bind(quantity)
-        .execute(&mut *conn)
-        .await
-        .context("commit reserved stock")?;
+    for h in lock_reserved(conn, checkout_id).await? {
+        stock::apply(conn, h.branch_id, h.variant_id, -h.quantity, -h.quantity).await?;
     }
     Ok(())
 }
@@ -666,7 +745,8 @@ pub async fn commit_reserved(conn: &mut PgConnection, checkout_id: Uuid) -> Resu
 /// The reservation is released only when this call moves the checkout out of
 /// `pending` (`UPDATE ... WHERE status = 'pending'`), so running it twice, or
 /// racing the expiry job (Task 9) or a paid webhook (Task 6), never releases
-/// twice. Locks the variants (id order), then the checkout, then its orders.
+/// twice. Locks the variants (id order) and their branch_stock rows, then the
+/// checkout, then its orders.
 /// On-hand `stock` is not touched: seller edits made meanwhile stand.
 pub async fn expire_and_restore(
     conn: &mut PgConnection,
@@ -684,15 +764,8 @@ pub async fn expire_and_restore(
     if moved.is_none() {
         return Ok(false);
     }
-    for (variant_id, quantity) in &items {
-        sqlx::query(
-            "UPDATE product_variants SET reserved_quantity = reserved_quantity - $2 WHERE id = $1",
-        )
-        .bind(variant_id)
-        .bind(quantity)
-        .execute(&mut *conn)
-        .await
-        .context("release reservation")?;
+    for h in &items {
+        stock::apply(conn, h.branch_id, h.variant_id, 0, -h.quantity).await?;
     }
     sqlx::query(
         "UPDATE orders SET status = 'cancelled', cancelled_at = now() \

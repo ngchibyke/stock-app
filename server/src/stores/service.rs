@@ -12,6 +12,7 @@ use crate::{
     error::AppError,
     market::{layout::Layout, placement},
     phone::normalize_ng_phone,
+    stores::access::{self, Action, is_member_sql},
     uploads::{
         claim::{Kind, claim},
         service::Purpose,
@@ -62,6 +63,23 @@ pub struct StorePatch {
     pub logo_key: Option<String>,
     /// A ready `store_banner` upload's key; blank removes the banner.
     pub banner_key: Option<String>,
+}
+
+impl StorePatch {
+    /// Anything touching money, delivery or the market plot is the owner's alone:
+    /// the pickup fields (which edit the first branch), the self-delivery fee, the
+    /// delivery flags, the business phone and the district.
+    fn touches_owner_fields(&self) -> bool {
+        self.pickup_address.is_some()
+            || self.pickup_state.is_some()
+            || self.pickup_area_council.is_some()
+            || self.pickup_postcode.is_some()
+            || self.self_delivery_fee_kobo.is_some()
+            || self.delivery_courier.is_some()
+            || self.delivery_self.is_some()
+            || self.business_phone.is_some()
+            || self.district.is_some()
+    }
 }
 
 const REDACTED: &str = "[redacted]";
@@ -119,6 +137,9 @@ impl std::fmt::Debug for StorePatch {
 }
 
 /// A store as stored, with the pickup address still encrypted.
+/// A store, with the pickup details of its first open branch (lowest position): what
+/// `PATCH /stores/{key}` pickup fields edit and the owner's view shows. The store row's
+/// own pickup columns are no longer read or written (part 7e-1, task 8).
 #[derive(Debug, sqlx::FromRow)]
 pub struct Store {
     pub id: Uuid,
@@ -126,6 +147,8 @@ pub struct Store {
     pub name: String,
     pub slug: String,
     pub description: String,
+    /// The first open branch, whose pickup details the fields below are.
+    pub first_branch_id: Uuid,
     pub pickup_address_enc: Vec<u8>,
     pub pickup_state: String,
     pub delivery_courier: bool,
@@ -144,11 +167,21 @@ pub struct Store {
     pub district: String,
 }
 
-const COLUMNS: &str = "id, owner_id, name, slug, description, pickup_address_enc, pickup_state, \
-                       delivery_courier, delivery_self, status::text AS status, created_at, \
-                       pickup_area_council, pickup_postcode, pickup_courier_address_code, \
-                       business_phone_enc, self_delivery_fee_kobo, rating_count, rating_sum, \
-                       logo_key, banner_key, district";
+/// The columns of [`Store`], over [`FROM_STORES`].
+const COLUMNS: &str = "s.id, s.owner_id, s.name, s.slug, s.description, \
+                       fb.id AS first_branch_id, fb.pickup_address_enc, s.pickup_state, \
+                       s.delivery_courier, s.delivery_self, s.status::text AS status, s.created_at, \
+                       fb.pickup_area_council, fb.pickup_postcode, fb.pickup_courier_address_code, \
+                       fb.business_phone_enc, fb.self_delivery_fee_kobo, s.rating_count, \
+                       s.rating_sum, s.logo_key, s.banner_key, s.district";
+
+/// A store `s` with its first open branch `fb`. A store always has one: the last open
+/// branch cannot close.
+const FROM_STORES: &str = "stores s JOIN LATERAL ( \
+       SELECT b.id, b.pickup_address_enc, b.pickup_area_council, b.pickup_postcode, \
+              b.pickup_courier_address_code, b.business_phone_enc, b.self_delivery_fee_kobo \
+       FROM store_branches b WHERE b.store_id = s.id AND b.closed_at IS NULL \
+       ORDER BY b.position LIMIT 1) fb ON true";
 
 /// The public shape: never carries the pickup address.
 #[derive(Debug, Serialize)]
@@ -203,10 +236,13 @@ impl std::fmt::Debug for OwnerStore {
     }
 }
 
-/// What checkout needs to know about how a store delivers (Task 6). Decrypted;
-/// `Debug` redacts the personal fields.
+/// What delivery needs to know about how one branch of a store delivers: the
+/// store-wide method flags with the branch's own pickup details. Decrypted; `Debug`
+/// redacts the personal fields.
 #[derive(Clone)]
 pub struct StoreDelivery {
+    pub branch_id: Uuid,
+    pub branch_name: String,
     pub courier: bool,
     /// `delivery_self`: a fee left on the row after self-delivery is switched
     /// off must not be offered.
@@ -216,11 +252,15 @@ pub struct StoreDelivery {
     pub pickup_area: Option<AreaCouncil>,
     pub pickup_address: String,
     pub pickup_courier_address_code: Option<i64>,
+    /// The branch hands orders over at its counter (`collect_enabled`).
+    pub collect: bool,
 }
 
 impl std::fmt::Debug for StoreDelivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StoreDelivery")
+            .field("branch_id", &self.branch_id)
+            .field("branch_name", &self.branch_name)
             .field("courier", &self.courier)
             .field("self_delivery", &self.self_delivery)
             .field("self_fee_kobo", &self.self_fee_kobo)
@@ -234,6 +274,7 @@ impl std::fmt::Debug for StoreDelivery {
                 "pickup_courier_address_code",
                 &self.pickup_courier_address_code,
             )
+            .field("collect", &self.collect)
             .finish()
     }
 }
@@ -319,7 +360,7 @@ fn slugify(name: &str) -> String {
     }
 }
 
-fn validate_name(name: &str) -> Result<String, AppError> {
+pub(crate) fn validate_name(name: &str) -> Result<String, AppError> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(AppError::Validation(
@@ -338,7 +379,7 @@ fn validate_description(description: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_address(address: &str) -> Result<String, AppError> {
+pub(crate) fn validate_address(address: &str) -> Result<String, AppError> {
     let address = address.trim();
     if address.is_empty() || address.chars().count() > 300 {
         return Err(AppError::Validation(
@@ -368,7 +409,7 @@ fn validate_delivery(courier: bool, own: bool) -> Result<(), AppError> {
 }
 
 /// Checks the full delivery state: each method switched on needs its details.
-fn validate_delivery_details(
+pub(crate) fn validate_delivery_details(
     courier: bool,
     own: bool,
     fee: Option<i64>,
@@ -401,7 +442,7 @@ fn validate_delivery_details(
 }
 
 /// Blank means absent.
-fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
+pub(crate) fn parse_postcode(raw: &str) -> Result<Option<String>, AppError> {
     match raw.trim() {
         "" => Ok(None),
         p => Ok(Some(normalize_postcode(p)?)),
@@ -490,25 +531,20 @@ pub async fn create_store(
             format!("{base}-{n}")
         };
         // The unique index decides; a taken slug (even a deleted store's) yields no row.
-        let inserted: Option<Store> = sqlx::query_as(&format!(
-            "INSERT INTO stores (owner_id, name, slug, description, pickup_address_enc, pickup_state, \
-                                 delivery_courier, delivery_self, pickup_area_council, pickup_postcode, \
-                                 business_phone_enc, self_delivery_fee_kobo, district) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-             ON CONFLICT (slug) DO NOTHING RETURNING {COLUMNS}"
-        ))
+        // The pickup details live on the first branch only (below).
+        let inserted: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO stores (owner_id, name, slug, description, pickup_state, \
+                                 delivery_courier, delivery_self, district) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (slug) DO NOTHING RETURNING id",
+        )
         .bind(owner)
         .bind(&name)
         .bind(&slug)
         .bind(&input.description)
-        .bind(&address_enc)
         .bind(&input.pickup_state)
         .bind(input.delivery_courier)
         .bind(input.delivery_self)
-        .bind(area)
-        .bind(&postcode)
-        .bind(&phone_enc)
-        .bind(input.self_delivery_fee_kobo)
         .bind(&input.district)
         .fetch_optional(&mut *tx)
         .await
@@ -518,7 +554,25 @@ pub async fn create_store(
             break;
         }
     }
-    let store = store.ok_or_else(|| anyhow::anyhow!("could not allocate a store slug"))?;
+    let store_id = store.ok_or_else(|| anyhow::anyhow!("could not allocate a store slug"))?;
+    // The store's first branch (position 0) carries the pickup details it was created with.
+    sqlx::query(
+        "INSERT INTO store_branches (store_id, name, pickup_address_enc, pickup_area_council, \
+                                     pickup_postcode, business_phone_enc, self_delivery_fee_kobo, \
+                                     position) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+    )
+    .bind(store_id)
+    .bind(&name)
+    .bind(&address_enc)
+    .bind(area)
+    .bind(&postcode)
+    .bind(&phone_enc)
+    .bind(input.self_delivery_fee_kobo)
+    .execute(&mut *tx)
+    .await
+    .context("insert first branch")?;
+    let store = load(&mut tx, store_id, false).await?;
     audit::record(
         &mut tx,
         Some(owner),
@@ -532,21 +586,41 @@ pub async fn create_store(
     Ok(store)
 }
 
-pub async fn list_mine(db: &PgPool, owner: Uuid) -> Result<Vec<Store>, AppError> {
+/// A live store the user owns or works at, with their place in it.
+#[derive(Debug, sqlx::FromRow)]
+pub struct MyStore {
+    #[sqlx(flatten)]
+    pub store: Store,
+    /// `owner`, `manager` or `staff`.
+    pub my_role: String,
+    /// Only for staff tied to one branch.
+    pub my_branch_id: Option<Uuid>,
+}
+
+/// The stores the user owns or is a live member of, oldest first.
+pub async fn list_mine(db: &PgPool, user: Uuid) -> Result<Vec<MyStore>, AppError> {
     Ok(sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores WHERE owner_id = $1 AND deleted_at IS NULL ORDER BY created_at, id"
+        "SELECT {COLUMNS}, \
+                CASE WHEN s.owner_id = $1 THEN 'owner' ELSE m.role::text END AS my_role, \
+                CASE WHEN s.owner_id = $1 THEN NULL ELSE m.branch_id END AS my_branch_id \
+         FROM {FROM_STORES} \
+         LEFT JOIN store_members m \
+           ON m.store_id = s.id AND m.user_id = $1 AND m.removed_at IS NULL \
+         WHERE s.deleted_at IS NULL AND (s.owner_id = $1 OR m.id IS NOT NULL) \
+         ORDER BY s.created_at, s.id"
     ))
-    .bind(owner)
+    .bind(user)
     .fetch_all(db)
     .await
     .context("list stores")?)
 }
 
-/// Active stores are public; the owner can also see their own store in any status.
+/// Active stores are public; the owner and the team can also see the store in any status.
 pub async fn get_by_slug(db: &PgPool, slug: &str, viewer: Option<Uuid>) -> Result<Store, AppError> {
     sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores \
-         WHERE slug = $1 AND deleted_at IS NULL AND (status = 'active' OR owner_id = $2)"
+        "SELECT {COLUMNS} FROM {FROM_STORES} \
+         WHERE s.slug = $1 AND s.deleted_at IS NULL AND (s.status = 'active' OR {})",
+        is_member_sql("$2")
     ))
     .bind(slug)
     .bind(viewer)
@@ -560,12 +634,19 @@ pub async fn update_store(
     db: &PgPool,
     cipher: &FieldCipher,
     layout: &Layout,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
     patch: StorePatch,
 ) -> Result<Store, AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    let current = lock_owned(&mut tx, owner, id).await?;
+    // A request with any owner-only field is refused whole.
+    let action = if patch.touches_owner_fields() {
+        Action::EditOwnerFields
+    } else {
+        Action::EditStoreDetails
+    };
+    access::require(&mut tx, id, actor, action).await?;
+    let current = lock_live(&mut tx, id).await?;
 
     if let Some(d) = &patch.district {
         validate_district(layout, d)?;
@@ -695,34 +776,26 @@ pub async fn update_store(
         current.pickup_courier_address_code
     };
 
-    let store: Store = sqlx::query_as(&format!(
-        "UPDATE stores SET name = $2, description = $3, pickup_address_enc = $4, pickup_state = $5, \
-                           delivery_courier = $6, delivery_self = $7, pickup_area_council = $8, \
-                           pickup_postcode = $9, business_phone_enc = $10, \
-                           self_delivery_fee_kobo = $11, pickup_courier_address_code = $12, \
-                           pickup_moved_at = CASE WHEN $13 THEN now() ELSE pickup_moved_at END, \
-                           logo_key = $14, banner_key = $15, district = $16 \
-         WHERE id = $1 RETURNING {COLUMNS}"
-    ))
+    sqlx::query(
+        "UPDATE stores SET name = $2, description = $3, pickup_state = $4, \
+                           delivery_courier = $5, delivery_self = $6, \
+                           logo_key = $7, banner_key = $8, district = $9 \
+         WHERE id = $1",
+    )
     .bind(id)
     .bind(&name)
     .bind(&description)
-    .bind(&address_enc)
     .bind(&state)
     .bind(courier)
     .bind(own)
-    .bind(area)
-    .bind(&postcode)
-    .bind(&phone_enc)
-    .bind(fee)
-    .bind(courier_code)
-    .bind(pickup_moved)
     .bind(&logo_key)
     .bind(&banner_key)
     .bind(&district)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await
     .context("update store")?;
+    // A district move locks plots before the branch write below (lock order:
+    // stores, store_members, store_plots, then store_branches).
     if district != current.district {
         // Both districts are locked up front, in one global order, so two sellers
         // moving in opposite directions cannot deadlock on release then place.
@@ -730,6 +803,31 @@ pub async fn update_store(
         placement::release(&mut tx, layout, id).await?;
         placement::place(&mut tx, layout, id).await?;
     }
+    // The pickup fields edit the first open branch (lock order: stores, then
+    // store_branches). It was named after the store, so it follows a rename while it
+    // still carries the old name.
+    sqlx::query(
+        "UPDATE store_branches SET pickup_address_enc = $2, pickup_area_council = $3, \
+                                   pickup_postcode = $4, business_phone_enc = $5, \
+                                   self_delivery_fee_kobo = $6, pickup_courier_address_code = $7, \
+                                   name = CASE WHEN name = $8 THEN $9 ELSE name END, \
+                                   pickup_moved_at = CASE WHEN $10 THEN now() \
+                                                          ELSE pickup_moved_at END \
+         WHERE id = $1",
+    )
+    .bind(current.first_branch_id)
+    .bind(&address_enc)
+    .bind(area)
+    .bind(&postcode)
+    .bind(&phone_enc)
+    .bind(fee)
+    .bind(courier_code)
+    .bind(&current.name)
+    .bind(&name)
+    .bind(pickup_moved)
+    .execute(&mut *tx)
+    .await
+    .context("update first branch")?;
     for (key, held, purpose) in [
         (&logo_key, &current.logo_key, Purpose::StoreLogo),
         (&banner_key, &current.banner_key, Purpose::StoreBanner),
@@ -739,7 +837,7 @@ pub async fn update_store(
         {
             claim(
                 &mut tx,
-                owner,
+                actor,
                 purpose,
                 std::slice::from_ref(key),
                 (Kind::Store, id),
@@ -758,66 +856,76 @@ pub async fn update_store(
     let detail = serde_json::Value::Object(detail);
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "store.updated",
         "store",
         Some(id),
         detail,
     )
     .await?;
+    let store = load(&mut tx, id, false).await?;
     tx.commit().await.context("commit")?;
     Ok(store)
 }
 
-/// How a live store delivers, decrypted.
-pub async fn delivery_profile(
-    db: &PgPool,
-    cipher: &FieldCipher,
-    store_id: Uuid,
-) -> Result<StoreDelivery, AppError> {
-    let mut conn = db.acquire().await.context("acquire")?;
-    delivery_profile_on(&mut conn, cipher, store_id).await
-}
-
-/// [`delivery_profile`] on the caller's connection. A caller inside a
-/// transaction must use this: waiting for a second pooled connection while it
-/// holds locks can starve the pool.
-pub async fn delivery_profile_on(
+/// How an open branch of a live store delivers, decrypted. A closed branch, or one of
+/// a deleted store, is `NotFound`. Reads on the caller's connection: a caller inside a
+/// transaction must not wait for a second pooled connection while it holds locks.
+pub async fn branch_delivery_on(
     conn: &mut PgConnection,
     cipher: &FieldCipher,
-    store_id: Uuid,
+    branch_id: Uuid,
 ) -> Result<StoreDelivery, AppError> {
-    let store: Store = sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores WHERE id = $1 AND deleted_at IS NULL"
-    ))
-    .bind(store_id)
+    type Row = (
+        String,
+        bool,
+        bool,
+        Option<i64>,
+        Option<Vec<u8>>,
+        Option<AreaCouncil>,
+        Vec<u8>,
+        Option<i64>,
+        bool,
+    );
+    let row: Row = sqlx::query_as(
+        "SELECT b.name, s.delivery_courier, s.delivery_self, b.self_delivery_fee_kobo, \
+                b.business_phone_enc, b.pickup_area_council, b.pickup_address_enc, \
+                b.pickup_courier_address_code, b.collect_enabled \
+         FROM store_branches b JOIN stores s ON s.id = b.store_id \
+         WHERE b.id = $1 AND b.closed_at IS NULL AND s.deleted_at IS NULL",
+    )
+    .bind(branch_id)
     .fetch_optional(conn)
     .await
-    .context("load store delivery")?
+    .context("load branch delivery")?
     .ok_or(AppError::NotFound)?;
+    let (name, courier, own, fee, phone_enc, area, address_enc, code, collect) = row;
     Ok(StoreDelivery {
-        courier: store.delivery_courier,
-        self_delivery: store.delivery_self,
-        self_fee_kobo: store.self_delivery_fee_kobo,
-        business_phone: store
-            .business_phone_enc
+        branch_id,
+        branch_name: name,
+        courier,
+        self_delivery: own,
+        self_fee_kobo: fee,
+        business_phone: phone_enc
             .as_deref()
             .map(|b| cipher.decrypt(b))
             .transpose()?,
-        pickup_area: store.pickup_area_council,
-        pickup_address: cipher.decrypt(&store.pickup_address_enc)?,
-        pickup_courier_address_code: store.pickup_courier_address_code,
+        pickup_area: area,
+        pickup_address: cipher.decrypt(&address_enc)?,
+        pickup_courier_address_code: code,
+        collect,
     })
 }
 
 pub async fn delete_store(
     db: &PgPool,
     layout: &Layout,
-    owner: Uuid,
+    actor: Uuid,
     id: Uuid,
 ) -> Result<(), AppError> {
     let mut tx = db.begin().await.context("begin")?;
-    lock_owned(&mut tx, owner, id).await?;
+    access::require(&mut tx, id, actor, Action::DeleteStore).await?;
+    lock_live(&mut tx, id).await?;
     sqlx::query("UPDATE stores SET deleted_at = now() WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)
@@ -826,7 +934,7 @@ pub async fn delete_store(
     placement::release(&mut tx, layout, id).await?;
     audit::record(
         &mut tx,
-        Some(owner),
+        Some(actor),
         "store.deleted",
         "store",
         Some(id),
@@ -837,20 +945,22 @@ pub async fn delete_store(
     Ok(())
 }
 
-/// Locks a live store row owned by `owner`; anything else is NotFound (existence is not revealed).
-async fn lock_owned(
-    tx: &mut Transaction<'_, Postgres>,
-    owner: Uuid,
-    id: Uuid,
-) -> Result<Store, AppError> {
+/// Locks a live store row; a deleted one is NotFound. The caller has checked who may.
+async fn lock_live(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<Store, AppError> {
+    load(tx, id, true).await
+}
+
+/// A live store with its first open branch's pickup details; the store row locked
+/// when `lock`. A deleted one is NotFound.
+async fn load(conn: &mut PgConnection, id: Uuid, lock: bool) -> Result<Store, AppError> {
+    let lock = if lock { "FOR NO KEY UPDATE OF s" } else { "" };
     sqlx::query_as(&format!(
-        "SELECT {COLUMNS} FROM stores WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
+        "SELECT {COLUMNS} FROM {FROM_STORES} WHERE s.id = $1 AND s.deleted_at IS NULL {lock}"
     ))
     .bind(id)
-    .bind(owner)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(conn)
     .await
-    .context("lock store")?
+    .context("load store")?
     .ok_or(AppError::NotFound)
 }
 
