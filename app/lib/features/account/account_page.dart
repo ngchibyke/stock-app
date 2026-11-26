@@ -19,6 +19,8 @@ import '../chat/chat_strings.dart';
 import '../chat/chat_unread.dart';
 import '../buy/inbox.dart';
 import '../buy/orders_pages.dart';
+import '../privacy/privacy_pages.dart';
+import '../privacy/privacy_strings.dart';
 import '../sell/sell_providers.dart';
 import '../sell/sell_shell.dart';
 import '../sell/sell_strings.dart';
@@ -83,7 +85,7 @@ class _AccountPageState extends ConsumerState<AccountPage> {
     final Widget body;
     if (state is SessionSignedIn) {
       body = _data(context, state.me);
-    } else if (state is SessionSignedOut) {
+    } else if (state is SessionSignedOut || state is SessionDeleting) {
       // The router is about to move on; there is nothing to show.
       body = const SizedBox.shrink();
     } else if (session.isLoading) {
@@ -197,6 +199,11 @@ class _AccountPageState extends ConsumerState<AccountPage> {
           label: Strings.addresses,
           icon: Icons.chevron_right,
           onTap: () => context.push(addressesPath),
+        ),
+        _LinkRow(
+          label: PrivacyStrings.rowLabel,
+          icon: Icons.chevron_right,
+          onTap: () => pushPage<void>(context, const PrivacyPage()),
         ),
         if (termsUrl != null)
           _LinkRow(
