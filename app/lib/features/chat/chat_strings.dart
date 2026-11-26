@@ -28,6 +28,12 @@ abstract final class ChatStrings {
   static const String identityNeeded =
       'Confirm your identity to answer buyers.';
   static String mutedUntil(String when) => 'You cannot post until $when.';
+  static String timeOnDay(String time, int day, int month) =>
+      '$time on $day ${_months[month - 1]}';
+  static const List<String> _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
   static String strikes(int n) => n == 1
       ? 'That is a warning. Repeated breaks lead to a pause.'
       : 'That is $n warnings. More lead to a pause.';

@@ -7,6 +7,10 @@ import 'package:material_ui/material_ui.dart';
 import '../../core/theme/tokens.dart';
 import '../../core/ui/pressable.dart';
 import '../../core/ui/states.dart';
+import '../sell/sell_models.dart';
+import '../sell/sell_providers.dart';
+import '../sell/sell_shell.dart' show confirmIdentity;
+import '../sell/sell_strings.dart';
 import 'chat_controller.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
@@ -21,6 +25,13 @@ Future<T?> _push<T>(BuildContext context, Widget page) =>
 String _clock(DateTime t) {
   final l = t.toLocal();
   return '${l.hour.toString().padLeft(2, '0')}:${l.minute.toString().padLeft(2, '0')}';
+}
+
+/// The time, with the day when that is not today.
+String _until(DateTime t, DateTime now) {
+  final l = t.toLocal();
+  final today = l.year == now.year && l.month == now.month && l.day == now.day;
+  return today ? _clock(t) : ChatStrings.timeOnDay(_clock(t), l.day, l.month);
 }
 
 /// Opens the chat about a product (as a buyer) and shows it.
@@ -228,25 +239,37 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     );
   }
 
+  Widget _local(LocalMessage l) => _LocalBubble(
+    local: l,
+    onRetry: () =>
+        ref.read(conversationProvider(_id).notifier).retry(l.clientId),
+    onEdit: () {
+      _text.text = l.text;
+      setState(() {});
+      ref.read(conversationProvider(_id).notifier).dismiss(l.clientId);
+    },
+    onUseSuggestion: () =>
+        ref.read(conversationProvider(_id).notifier).useSuggestion(l.clientId),
+  );
+
   Widget _list(ConvState s) {
     final c = widget.conversation;
-    final items = <Widget>[
-      for (final m in s.messages) _Bubble(message: m, mine: m.from == c.you),
+    // A stopped message loaded again has no text left: it is history, and goes where
+    // it happened. Everything else of one's own is still in hand, at the bottom.
+    final past = [
       for (final l in s.locals)
-        _LocalBubble(
-          local: l,
-          onRetry: () =>
-              ref.read(conversationProvider(_id).notifier).retry(l.clientId),
-          onEdit: () {
-            _text.text = l.text;
-            setState(() {});
-            ref.read(conversationProvider(_id).notifier).dismiss(l.clientId);
-          },
-          onUseSuggestion: () => ref
-              .read(conversationProvider(_id).notifier)
-              .useSuggestion(l.clientId),
-        ),
+        if (l.text.isEmpty) l,
     ];
+    var next = 0;
+    final items = <Widget>[];
+    for (final m in s.messages) {
+      while (next < past.length && past[next].createdAt.isBefore(m.sentAt)) {
+        items.add(_local(past[next++]));
+      }
+      items.add(_Bubble(message: m, mine: m.from == c.you));
+    }
+    items.addAll(past.skip(next).map(_local));
+    items.addAll(s.locals.where((l) => l.text.isNotEmpty).map(_local));
     // Newest at the bottom, and the list sticks there.
     return ListView(
       reverse: true,
@@ -255,17 +278,35 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
     );
   }
 
+  /// A manager or staff member who has not passed the identity check, as far as the
+  /// app can tell. The server refuses the send either way.
+  bool _unverifiedMember() {
+    final c = widget.conversation;
+    if (c.you != Side.seller) return false;
+    final store = ref
+        .watch(myStoresProvider)
+        .value
+        ?.where((s) => s.id == c.storeId)
+        .firstOrNull;
+    if (store == null || store.role.isOwner) return false;
+    final status = ref.watch(identityStatusProvider).value;
+    return status != null && status.state != IdentityState.passed;
+  }
+
   Widget _composer(ConvState s) {
     final tokens = context.tokens;
     final theme = Theme.of(context);
     final now = DateTime.now();
+    final unverified = _unverifiedMember();
     String? blocked;
+    var needsIdentity = false;
     if (!widget.conversation.writable || s.closed) {
       blocked = ChatStrings.closed;
-    } else if (s.identityRequired) {
+    } else if (s.identityRequired || unverified) {
       blocked = ChatStrings.identityNeeded;
+      needsIdentity = true;
     } else if (s.mutedAt(now)) {
-      blocked = ChatStrings.mutedUntil(_clock(s.mutedUntil!));
+      blocked = ChatStrings.mutedUntil(_until(s.mutedUntil!, now));
     }
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -279,7 +320,22 @@ class _ConversationPageState extends ConsumerState<ConversationPage>
                 liveRegion: true,
                 child: Padding(
                   padding: const EdgeInsets.all(Tokens.s2),
-                  child: Text(blocked, style: theme.textTheme.bodyMedium),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(blocked, style: theme.textTheme.bodyMedium),
+                      if (needsIdentity)
+                        TextButton(
+                          onPressed: () async {
+                            await confirmIdentity(context, ref);
+                            if (mounted) {
+                              ref.invalidate(conversationProvider(_id));
+                            }
+                          },
+                          child: const Text(SellStrings.identityBannerAction),
+                        ),
+                    ],
+                  ),
                 ),
               )
             : Column(
@@ -451,13 +507,15 @@ class _LocalBubble extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      local.text,
-                      style: theme.textTheme.bodyLarge?.copyWith(
-                        color: tokens.mute,
+                    if (local.text.isNotEmpty) ...[
+                      Text(
+                        local.text,
+                        style: theme.textTheme.bodyLarge?.copyWith(
+                          color: tokens.mute,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: Tokens.s1),
+                      const SizedBox(height: Tokens.s1),
+                    ],
                     Semantics(
                       liveRegion: true,
                       child: Text(
@@ -486,14 +544,16 @@ class _LocalBubble extends StatelessWidget {
                             onPressed: onUseSuggestion,
                             child: const Text(ChatStrings.sendInstead),
                           ),
-                          TextButton(
-                            onPressed: onEdit,
-                            child: const Text(ChatStrings.edit),
-                          ),
+                          if (local.text.isNotEmpty)
+                            TextButton(
+                              onPressed: onEdit,
+                              child: const Text(ChatStrings.edit),
+                            ),
                         ],
                       ),
                     ],
-                    if (local.status == LocalStatus.blocked)
+                    if (local.status == LocalStatus.blocked &&
+                        local.text.isNotEmpty)
                       TextButton(
                         onPressed: onEdit,
                         child: const Text(ChatStrings.edit),

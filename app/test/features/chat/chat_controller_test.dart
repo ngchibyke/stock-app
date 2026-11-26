@@ -289,6 +289,99 @@ void main() {
     sub.close();
   });
 
+  test('a_reconnect_fetches_what_was_missed_while_the_link_was_down', () async {
+    env.repo.messageRows = [fakeMessage(1)];
+    await env.open();
+    await env.settle();
+    final link = env.container.read(chatConnectedProvider.notifier);
+    link.set(false);
+    env.repo.messageRows = [fakeMessage(1), fakeMessage(2)];
+    // Back at once, before any poll could run.
+    link.set(true);
+    await env.settle();
+    expect(env.state.messages.map((m) => m.seq), [1, 2]);
+  });
+
+  test('a_live_message_after_a_gap_also_brings_the_missing_ones', () async {
+    env.repo.messageRows = [fakeMessage(1)];
+    await env.open();
+    await env.settle();
+    env.repo.messageRows = [fakeMessage(1), fakeMessage(2), fakeMessage(3)];
+    env.socket.push(MessageFrame(fakeMessage(3)));
+    await env.settle();
+    expect(env.state.messages.map((m) => m.seq), [1, 2, 3]);
+  });
+
+  test('catching_up_reads_every_page_of_what_was_missed', () async {
+    env.repo.messageRows = [fakeMessage(1)];
+    env.repo.pageSize = 100;
+    await env.open();
+    env.repo.messageRows = [for (var i = 1; i <= 250; i++) fakeMessage(i)];
+    await env.ctl.catchUp();
+    expect(env.state.messages, hasLength(250));
+  });
+
+  test('a_stopped_message_taken_back_for_editing_does_not_return', () async {
+    env.repo.pendingRows = [
+      OwnPending(
+        id: 'p',
+        clientMessageId: 'cm1',
+        status: 'withheld',
+        createdAt: DateTime(2026),
+        reason: 'Not sent.',
+      ),
+    ];
+    await env.open();
+    env.ctl.dismiss('cm1');
+    await env.ctl.catchUp();
+    expect(env.state.locals, isEmpty);
+  });
+
+  test('a_rewrite_whose_suggestion_was_sent_does_not_return', () async {
+    env.repo.pendingRows = [
+      OwnPending(
+        id: 'p',
+        clientMessageId: 'cm1',
+        status: 'withheld',
+        createdAt: DateTime(2026),
+        reason: 'Rude.',
+        flagId: 'f1',
+        suggested: 'Kinder',
+      ),
+    ];
+    await env.open();
+    await env.ctl.useSuggestion('cm1');
+    await env.ctl.catchUp();
+    expect(env.state.locals, isEmpty);
+  });
+
+  test('leaving_the_chat_closes_the_connection_at_once', () async {
+    final listen = env.container.listen(chatFramesProvider, (_, _) {});
+    await env.settle(40);
+    expect(env.socket.held(0), isTrue);
+    listen.close();
+    await env.settle(40);
+    expect(env.socket.held(0), isFalse);
+  });
+
+  test(
+    'an_old_connection_ending_late_does_not_mark_the_new_one_down',
+    () async {
+      final first = env.container.listen(chatFramesProvider, (_, _) {});
+      await env.settle(40);
+      first.close();
+      await env.settle(40);
+      env.container.listen(chatFramesProvider, (_, _) {});
+      await env.settle(40);
+      expect(env.container.read(chatConnectedProvider), isTrue);
+      // The server ends the first one later, as it does after a sign-out.
+      env.socket.dropAt(0);
+      await env.settle(40);
+      expect(env.container.read(chatConnectedProvider), isTrue);
+      expect(env.socket.connects, 2);
+    },
+  );
+
   test('the_socket_reconnects_after_a_drop', () async {
     final listen = env.container.listen(chatFramesProvider, (_, _) {});
     await env.settle(40);

@@ -78,6 +78,16 @@ class SellEntryPage extends ConsumerWidget {
   }
 }
 
+/// Shows the identity check, then reads again what depends on it.
+Future<void> confirmIdentity(BuildContext context, WidgetRef ref) async {
+  await pushPage<void>(
+    context,
+    IdentityPage(onPassed: () => Navigator.of(context).pop()),
+  );
+  ref.invalidate(identityStatusProvider);
+  ref.invalidate(myStoresProvider);
+}
+
 /// A line asking the person to confirm their identity, when they have not.
 class IdentityBanner extends ConsumerWidget {
   const IdentityBanner({super.key, required this.owner});
@@ -110,14 +120,7 @@ class IdentityBanner extends ConsumerWidget {
               child: Text(text, style: Theme.of(context).textTheme.bodyMedium),
             ),
             TextButton(
-              onPressed: () async {
-                await pushPage<void>(
-                  context,
-                  IdentityPage(onPassed: () => Navigator.of(context).pop()),
-                );
-                ref.invalidate(identityStatusProvider);
-                ref.invalidate(myStoresProvider);
-              },
+              onPressed: () => confirmIdentity(context, ref),
               child: const Text(SellStrings.identityBannerAction),
             ),
           ],

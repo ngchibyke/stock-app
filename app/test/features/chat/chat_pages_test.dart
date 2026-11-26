@@ -7,6 +7,7 @@ import 'package:market/features/chat/chat_pages.dart';
 import 'package:market/features/chat/chat_strings.dart';
 import 'package:market/features/sell/sell_models.dart';
 import 'package:market/features/sell/sell_shell.dart';
+import 'package:market/features/sell/sell_strings.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../../support/fake_chat.dart';
@@ -30,6 +31,14 @@ Future<void> _open(WidgetTester tester, BuyEnv env, Conversation c) async {
   await pumpBuy(tester, ConversationPage(conversation: c), env);
   await settleFrames(tester, 3);
 }
+
+SellStore _store(StoreRole role) => SellStore(
+  id: 's1',
+  name: 'Ada Shop',
+  slug: 's1',
+  status: 'active',
+  role: role,
+);
 
 void main() {
   group('conversation', () {
@@ -215,6 +224,110 @@ void main() {
         expect(find.byType(TextField), findsNothing);
       },
     );
+
+    testWidgets(
+      'a_stopped_message_loaded_again_has_no_empty_text_or_edit_and_sits_in_time_order',
+      (tester) async {
+        final env = BuyEnv();
+        env.chat.messageRows = [
+          fakeMessage(1, from: Side.buyer, body: 'Before'),
+          fakeMessage(3, from: Side.seller, body: 'After'),
+        ];
+        env.chat.pendingRows = [
+          OwnPending(
+            id: 'p',
+            clientMessageId: 'cm1',
+            status: 'withheld',
+            createdAt: DateTime(2026, 11, 26, 10, 2),
+            reason: 'This message was not sent.',
+          ),
+        ];
+        await _open(tester, env, fakeConversation());
+        final note = find.text('This message was not sent.');
+        expect(note, findsOneWidget);
+        // No empty bubble text (the empty composer is not a Text).
+        expect(
+          find.byWidgetPredicate((w) => w is Text && w.data == ''),
+          findsNothing,
+        );
+        expect(find.text(ChatStrings.edit), findsNothing);
+        final y = tester.getTopLeft(note).dy;
+        expect(y, greaterThan(tester.getTopLeft(find.text('Before')).dy));
+        expect(y, lessThan(tester.getTopLeft(find.text('After')).dy));
+      },
+    );
+
+    testWidgets('a_mute_that_ends_on_another_day_says_which_day', (
+      tester,
+    ) async {
+      final env = BuyEnv();
+      final now = DateTime.now();
+      final until = DateTime(now.year, now.month, now.day + 1, 20, 42);
+      env.chat.results = [
+        SendResult(outcome: Outcome.blocked, reason: 'No.', mutedUntil: until),
+      ];
+      await _open(tester, env, fakeConversation());
+      await _type(tester, 'hello');
+      await tester.tap(find.bySemanticsLabel(ChatStrings.send));
+      await settleFrames(tester, 3);
+      const months = [
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
+      ];
+      expect(
+        find.text(
+          ChatStrings.mutedUntil(
+            '20:42 on ${until.day} ${months[until.month - 1]}',
+          ),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an_unverified_member_is_told_before_they_type', (
+      tester,
+    ) async {
+      for (final role in [StoreRole.manager, StoreRole.staff]) {
+        final env = BuyEnv();
+        env.sell.stores = [_store(role)];
+        await _open(
+          tester,
+          env,
+          fakeConversation(you: Side.seller, with_: 'Buyer'),
+        );
+        expect(find.text(ChatStrings.identityNeeded), findsOneWidget);
+        expect(find.text(SellStrings.identityBannerAction), findsOneWidget);
+        expect(find.byType(TextField), findsNothing, reason: '$role');
+      }
+    });
+
+    testWidgets('the_owner_a_passed_member_and_a_buyer_can_type', (
+      tester,
+    ) async {
+      final owner = BuyEnv()..sell.stores = [_store(StoreRole.owner)];
+      await _open(tester, owner, fakeConversation(you: Side.seller));
+      expect(find.byType(TextField), findsOneWidget);
+
+      final passed = BuyEnv()..sell.stores = [_store(StoreRole.staff)];
+      passed.sell.identity = const IdentityStatus(state: IdentityState.passed);
+      await _open(tester, passed, fakeConversation(you: Side.seller));
+      expect(find.byType(TextField), findsOneWidget);
+
+      // Someone who works at the store but is writing here as a buyer.
+      final buyer = BuyEnv()..sell.stores = [_store(StoreRole.staff)];
+      await _open(tester, buyer, fakeConversation());
+      expect(find.byType(TextField), findsOneWidget);
+    });
 
     testWidgets('a_live_frame_adds_the_message_and_the_read_mark_follows', (
       tester,

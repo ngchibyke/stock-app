@@ -52,6 +52,9 @@ class FakeChatRepository implements ChatRepository {
   Object? failSend;
   Object? failHistory;
 
+  /// The most messages one history call answers; null means all.
+  int? pageSize;
+
   /// What `send` answers, in order; the last repeats. Empty means "delivered".
   List<SendResult> results = [];
 
@@ -86,10 +89,10 @@ class FakeChatRepository implements ChatRepository {
     historyAfter.add(after);
     if (failHistory != null) throw failHistory!;
     return History(
-      messages: [
-        for (final m in messageRows)
-          if (m.seq > after) m,
-      ],
+      messages: messageRows
+          .where((m) => m.seq > after)
+          .take(pageSize ?? messageRows.length)
+          .toList(),
       pending: [...pendingRows],
     );
   }
@@ -161,6 +164,14 @@ class FakeChatSocket implements ChatSocket {
       if (!c.isClosed) c.add(frame);
     }
   }
+
+  /// Ends one connection, counted from the oldest still held.
+  void dropAt(int i) {
+    if (!_open[i].isClosed) _open[i].close();
+  }
+
+  /// Whether anything still holds that connection open.
+  bool held(int i) => _open[i].hasListener && !_open[i].isClosed;
 
   void drop() {
     for (final c in _open) {

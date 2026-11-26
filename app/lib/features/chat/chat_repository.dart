@@ -239,25 +239,48 @@ class _Connected extends Notifier<bool> {
 
 /// Live frames, reconnecting with backoff while something is watching. When nothing
 /// watches (the app has no chat screen open) the socket is closed.
-final chatFramesProvider = StreamProvider.autoDispose<ChatFrame>((ref) async* {
+final chatFramesProvider = StreamProvider.autoDispose<ChatFrame>((ref) {
   final socket = ref.watch(chatSocketProvider);
   final connected = ref.read(chatConnectedProvider.notifier);
-  ref.onDispose(() => Future.microtask(() => connected.set(false)));
+  final out = StreamController<ChatFrame>();
+  // Held here, not in an `async*` loop: that cannot be cancelled while it waits for a
+  // frame, so the socket stayed open and later marked its successor as down.
+  StreamSubscription<ChatFrame>? link;
+  Timer? retry;
   var attempt = 0;
-  while (ref.mounted) {
-    try {
-      await for (final frame in socket.frames(
-        onOpen: () {
-          attempt = 0;
-          connected.set(true);
-        },
-      )) {
-        yield frame;
-      }
-    } on Object {
-      // Dropped: reconnect below.
+  var gone = false;
+
+  void open() {
+    void lost() {
+      if (gone) return;
+      connected.set(false);
+      retry = Timer(reconnectDelay(attempt++), open);
     }
-    connected.set(false);
-    await Future<void>.delayed(reconnectDelay(attempt++));
+
+    link = socket
+        .frames(
+          onOpen: () {
+            if (gone) return;
+            attempt = 0;
+            connected.set(true);
+          },
+        )
+        .listen(
+          out.add,
+          // Dropped: reconnect.
+          onError: (Object _) => lost(),
+          onDone: lost,
+          cancelOnError: true,
+        );
   }
+
+  ref.onDispose(() {
+    gone = true;
+    retry?.cancel();
+    unawaited(link?.cancel());
+    unawaited(out.close());
+    Future.microtask(() => connected.set(false));
+  });
+  open();
+  return out.stream;
 });

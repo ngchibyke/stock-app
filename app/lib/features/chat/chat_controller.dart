@@ -153,6 +153,10 @@ class ConversationController extends AsyncNotifier<ConvState> {
   int _readSent = 0;
   Timer? _poll;
 
+  /// Stopped messages the person has dealt with: the server still lists them, the
+  /// screen no longer does.
+  final Set<String> _done = {};
+
   ChatRepository get _repo => ref.read(chatRepositoryProvider);
 
   @override
@@ -164,8 +168,12 @@ class ConversationController extends AsyncNotifier<ConvState> {
         _onFrame(frame);
       }
     });
-    // While the live link is down, ask for news now and then.
-    ref.listen(chatConnectedProvider, (_, up) => _arm(up));
+    // While the live link is down, ask for news now and then. When it comes back,
+    // ask once for what was sent in between.
+    ref.listen(chatConnectedProvider, (_, up) {
+      _arm(up);
+      if (up) unawaited(catchUp());
+    });
     _arm(ref.read(chatConnectedProvider));
     final first = await _repo.history(conversationId);
     var messages = mergeMessages(const [], first.messages);
@@ -201,6 +209,7 @@ class ConversationController extends AsyncNotifier<ConvState> {
           l,
     ];
     for (final p in pending) {
+      if (_done.contains(p.clientMessageId)) continue;
       final prior = locals
           .where((l) => l.clientId == p.clientMessageId)
           .firstOrNull;
@@ -249,22 +258,41 @@ class ConversationController extends AsyncNotifier<ConvState> {
     }
   }
 
-  /// Fetches what came after the last message, and the person's own pending ones.
+  /// Fetches what is missing, and the person's own pending ones. It asks from the
+  /// last message before any gap, so a live frame that arrived after a lost one does
+  /// not hide it.
   Future<void> catchUp() async {
     final s = state.value;
     if (s == null) return;
+    var after = _unbrokenSeq(s.messages);
     try {
-      final h = await _repo.history(conversationId, after: s.lastSeq);
-      final now = state.value ?? s;
-      state = AsyncData(
-        now.copyWith(
-          messages: mergeMessages(now.messages, h.messages),
-          locals: _fromPending(now.locals, h.pending),
-        ),
-      );
+      // Pages of 100, oldest first.
+      for (var i = 0; i < 10; i++) {
+        final h = await _repo.history(conversationId, after: after);
+        if (!ref.mounted) return;
+        final now = state.value ?? s;
+        state = AsyncData(
+          now.copyWith(
+            messages: mergeMessages(now.messages, h.messages),
+            locals: _fromPending(now.locals, h.pending),
+          ),
+        );
+        if (h.messages.length < 100) return;
+        after = h.messages.last.seq;
+      }
     } on Object {
       // Try again on the next frame or tick.
     }
+  }
+
+  /// The last `seq` reached from the first message held with none skipped.
+  int _unbrokenSeq(List<ChatMessage> messages) {
+    var last = messages.isEmpty ? 0 : messages.first.seq;
+    for (final m in messages.skip(1)) {
+      if (m.seq != last + 1) break;
+      last = m.seq;
+    }
+    return last;
   }
 
   /// Tells the server how far the person has read, once per new message.
@@ -311,6 +339,7 @@ class ConversationController extends AsyncNotifier<ConvState> {
         .firstOrNull;
     final flag = l?.flagId;
     if (l == null || flag == null) return;
+    _done.add(l.clientId);
     // A fresh message id: this is a new send of the stored text.
     final next = _local(l.suggested ?? '');
     _replace(l.clientId, next);
@@ -328,6 +357,7 @@ class ConversationController extends AsyncNotifier<ConvState> {
   void dismiss(String clientId) {
     final s = state.value;
     if (s == null) return;
+    _done.add(clientId);
     state = AsyncData(
       s.copyWith(
         locals: [
