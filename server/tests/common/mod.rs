@@ -739,10 +739,10 @@ impl TestApp {
     }
 
     /// The default checkout body (ruling P4): the buyer's address and, for every
-    /// store in the cart, its self-delivery option (fee 0 on stores made by
-    /// `make_active_store_with_product`). For an empty cart `deliveries` is empty,
-    /// so checkout answers with its own `cart_empty`; any other quote failure fails
-    /// the test here, where its cause is visible.
+    /// branch group of every store in the cart, its self-delivery option (fee 0 on
+    /// stores made by `make_active_store_with_product`). For an empty cart `groups` is
+    /// empty, so checkout answers with its own `cart_empty`; any other quote failure
+    /// fails the test here, where its cause is visible.
     pub async fn checkout_body(&self, token: &str, method: &str) -> Value {
         let address_id = self.buyer_address(token).await;
         let res = self.delivery_options(token, address_id).await;
@@ -752,53 +752,78 @@ impl TestApp {
             res.status,
             res.json
         );
-        let mut deliveries = Vec::new();
+        let mut groups = Vec::new();
         if res.status == 200 {
             for store in res.json["stores"].as_array().unwrap() {
-                let own = store["options"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|o| o["method"] == "self");
-                if let Some(option) = own {
-                    deliveries.push(json!({
-                        "store_id": store["store_id"],
-                        "option_id": option["id"],
-                    }));
+                for group in store["groups"].as_array().unwrap() {
+                    let own = group["options"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|o| o["method"] == "self");
+                    if let Some(option) = own {
+                        groups.push(json!({
+                            "group_id": group["group_id"],
+                            "option_id": option["id"],
+                        }));
+                    }
                 }
             }
         }
-        json!({ "method": method, "address_id": address_id, "deliveries": deliveries })
+        json!({ "method": method, "address_id": address_id, "groups": groups })
     }
 
     /// POST /checkout with `method`, the buyer's address and self-delivery for
-    /// every store (see [`checkout_body`](Self::checkout_body)).
+    /// every group (see [`checkout_body`](Self::checkout_body)).
     pub async fn checkout(&self, token: &str, method: &str) -> TestResponse {
         let body = self.checkout_body(token, method).await;
         self.request(Method::POST, "/checkout", Some(body), Some(token))
             .await
     }
 
-    /// POST /checkout with explicit choices: `deliveries` is `[(store_id, option_id)]`.
+    /// POST /checkout with explicit choices: `groups` is `[(group_id, option_id)]`.
     pub async fn checkout_with(
         &self,
         token: &str,
         method: &str,
         address_id: Uuid,
-        deliveries: &[(Uuid, Uuid)],
+        groups: &[(String, Uuid)],
     ) -> TestResponse {
-        let deliveries: Vec<Value> = deliveries
+        let groups: Vec<Value> = groups
             .iter()
-            .map(|(s, o)| json!({ "store_id": s, "option_id": o }))
+            .map(|(g, o)| json!({ "group_id": g, "option_id": o }))
             .collect();
         self.request(
             Method::POST,
             "/checkout",
-            Some(json!({ "method": method, "address_id": address_id, "deliveries": deliveries })),
+            Some(json!({ "method": method, "address_id": address_id, "groups": groups })),
             Some(token),
         )
         .await
     }
+}
+
+/// The first store's first group in a delivery-options answer, and that group's
+/// first option of `method`: `(group_id, option_id)`.
+pub fn group_option(json: &Value, method: &str) -> (String, Uuid) {
+    let group = &json["stores"][0]["groups"][0];
+    let option = group["options"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no group in {json}"))
+        .iter()
+        .find(|o| o["method"] == method)
+        .unwrap_or_else(|| panic!("no {method} option in {json}"));
+    (
+        group["group_id"].as_str().unwrap().to_string(),
+        option["id"].as_str().unwrap().parse().unwrap(),
+    )
+}
+
+/// The first store's first group's options in a delivery-options answer.
+pub fn first_group_options(json: &Value) -> &Vec<Value> {
+    json["stores"][0]["groups"][0]["options"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no group in {json}"))
 }
 
 /// A paid order moved on to `picked_up`, `out_for_delivery` or `delivered`;
@@ -849,23 +874,9 @@ impl TestApp {
             let address = self.buyer_address(&buyer_token).await;
             let opts = self.delivery_options(&buyer_token, address).await;
             assert_eq!(opts.status, 200, "delivery options: {}", opts.json);
-            let option: Uuid = opts.json["stores"][0]["options"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|o| o["method"] == "courier")
-                .expect("a courier option")["id"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap();
-            self.checkout_with(
-                &buyer_token,
-                "mono_directpay",
-                address,
-                &[(listing.store_id, option)],
-            )
-            .await
+            let choice = group_option(&opts.json, "courier");
+            self.checkout_with(&buyer_token, "mono_directpay", address, &[choice])
+                .await
         } else {
             assert_eq!(method, "self", "unknown delivery method");
             self.checkout(&buyer_token, "mono_directpay").await

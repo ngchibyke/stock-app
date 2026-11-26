@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::service::{self, CheckoutRequest, CheckoutView, Created, Outcome};
 use crate::{
-    AppState, auth::AuthUser, delivery::options::DeliveryChoice, error::AppError, extract::AppJson,
+    AppState, auth::AuthUser, delivery::options::GroupChoice, error::AppError, extract::AppJson,
 };
 
 pub fn router() -> Router<AppState> {
@@ -20,15 +20,15 @@ pub fn router() -> Router<AppState> {
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
-/// `{method, address_id, deliveries: [{store_id, option_id}]}`: one delivery option
-/// per store in the cart, from `POST /checkout/delivery-options`. No amounts: the
-/// server prices everything.
+/// `{method, address_id, groups: [{group_id, option_id}]}`: one delivery option per
+/// fulfilment group, from `POST /checkout/delivery-options`. No amounts: the server
+/// prices everything.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckoutBody {
     method: String,
     address_id: Uuid,
-    deliveries: Vec<DeliveryChoice>,
+    groups: Vec<GroupChoice>,
 }
 
 fn parse_id(key: &str) -> Result<Uuid, AppError> {
@@ -66,7 +66,7 @@ async fn create(
     let request = CheckoutRequest {
         method: body.method,
         address_id: body.address_id,
-        deliveries: body.deliveries,
+        groups: body.groups,
     };
     match service::create(&state, user.id, &request, key.as_deref()).await? {
         Outcome::Created(c) => Ok((StatusCode::CREATED, Json(c))),

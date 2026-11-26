@@ -6,12 +6,13 @@
 //! wallet and the provider has no idempotency key, so the row is the only guard:
 //!
 //! 1. A short transaction, under the order and shipment locks, re-checks the row
-//!    and takes a [`LEASE`] lease in `booking`. A pickup that really moved since
-//!    the quote (`stores.pickup_moved_at`), or a quote [`QUOTE_VALID_DAYS`] old,
-//!    ends in `booking_failed` here, and `book` is never called. A changed sender
-//!    contact alone still books, with `sender_stale` in the audit row: the store's
-//!    address code is also cleared by a phone change and by resaving the same
-//!    address, so it cannot say whether the courier would go to the wrong place.
+//!    and takes a [`LEASE`] lease in `booking`. A pickup of the order's branch that
+//!    really moved since the quote (`store_branches.pickup_moved_at`), or a quote
+//!    [`QUOTE_VALID_DAYS`] old, ends in `booking_failed` here, and `book` is never
+//!    called. A changed sender contact alone still books, with `sender_stale` in the
+//!    audit row: the branch's address code is also cleared by a phone change and by
+//!    resaving the same address, so it cannot say whether the courier would go to
+//!    the wrong place.
 //! 2. `book` runs outside any transaction, cut off after [`BOOK_CALL_TIMEOUT`]
 //!    (well under the lease, so a live worker always answers within it).
 //! 3. The outcome is written under the order lock, fenced on the lease
@@ -328,16 +329,17 @@ async fn take_lease(
         "SELECT s.status = 'booking_pending' AND s.next_attempt_at <= now() \
                     AND o.status = 'paid' AND o.held_at IS NULL \
                     AND NOT c.provider_flagged AS due, \
-                COALESCE(st.pickup_moved_at >= COALESCE(d.created_at, o.created_at), false) \
+                COALESCE(b.pickup_moved_at >= COALESCE(d.created_at, o.created_at), false) \
                     AS pickup_moved, \
-                st.pickup_courier_address_code IS DISTINCT FROM o.courier_sender_code \
+                b.pickup_courier_address_code IS DISTINCT FROM o.courier_sender_code \
                     AS sender_stale, \
                 COALESCE(d.created_at, o.created_at) <= now() - make_interval(days => $2) \
                     AS quote_expired, \
                 s.quoted_kobo, o.courier_request_token AS request_token, o.courier_id, \
                 o.service_code \
          FROM shipments s JOIN orders o ON o.id = s.order_id \
-              JOIN checkouts c ON c.id = o.checkout_id JOIN stores st ON st.id = o.store_id \
+              JOIN checkouts c ON c.id = o.checkout_id \
+              JOIN store_branches b ON b.id = o.branch_id \
               LEFT JOIN delivery_options d ON d.id = o.delivery_option_id \
          WHERE s.id = $1 FOR UPDATE OF s",
     )

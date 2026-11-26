@@ -346,8 +346,8 @@ async fn close_refused_with_open_orders_and_for_last_branch(pool: PgPool) {
     let first = first_branch(&app, l.store_id).await;
     let garki = added(&app, &l.seller_token, l.store_id, "Garki").await;
 
-    // A pending checkout is an open order. Checkout still sends from the first branch
-    // (until task 7), so the order is moved to Garki by hand.
+    // A pending checkout is an open order. Garki holds no stock, so checkout sends
+    // from the first branch; the order is moved to Garki by hand.
     let (_, buyer) = app.sign_up_verified(BUYER_PHONE).await;
     assert_eq!(app.set_cart(&buyer, l.variant_id, 1).await.status, 200);
     let res = app.checkout(&buyer, "mono_directpay").await;
@@ -413,31 +413,55 @@ async fn close_refused_with_open_orders_and_for_last_branch(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn first_branch_cannot_close_while_checkout_uses_it(pool: PgPool) {
+async fn first_branch_closes_and_checkout_routes_to_the_rest(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let l = shop(&app, 1).await;
     let first = first_branch(&app, l.store_id).await;
     let garki = added(&app, &l.seller_token, l.store_id, "Garki").await;
-
-    let res = close(&app, &l.seller_token, l.store_id, first).await;
-    assert_eq!((res.status, code_of(&res)), (409, "first_branch"));
-    let open: bool =
-        sqlx::query_scalar("SELECT closed_at IS NULL FROM store_branches WHERE id = $1")
-            .bind(first)
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
-    assert!(open);
-    assert!(
-        audits(&app, "store.branch_closed", l.store_id)
-            .await
-            .is_empty()
-    );
-
-    // The other branch closes; then the first is the last open branch.
-    let res = close(&app, &l.seller_token, l.store_id, garki).await;
+    let res = app
+        .request(
+            Method::PUT,
+            &format!("/branches/{garki}/stock"),
+            Some(json!({ "items": [{ "variant_id": l.variant_id, "stock": 4 }] })),
+            Some(&l.seller_token),
+        )
+        .await;
     assert_eq!(res.status, 200, "{}", res.json);
+
+    // The first branch is no longer special: it closes like any other.
     let res = close(&app, &l.seller_token, l.store_id, first).await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    let detail = audits(&app, "store.branch_closed", l.store_id).await;
+    assert_eq!(detail, vec![json!({ "branch_id": first })]);
+    // The owner's view now shows the first open branch's pickup.
+    let res = app
+        .request(Method::GET, "/stores/mine", None, Some(&l.seller_token))
+        .await;
+    assert_eq!(res.json[0]["pickup_address"], "4 Ahmadu Bello Way, Garki");
+
+    // Checkout sends from Garki.
+    let (_, buyer) = app.sign_up_verified(BUYER_PHONE).await;
+    assert_eq!(app.set_cart(&buyer, l.variant_id, 2).await.status, 200);
+    let res = app.checkout(&buyer, "mono_directpay").await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let branch: Uuid = sqlx::query_scalar("SELECT branch_id FROM orders WHERE store_id = $1")
+        .bind(l.store_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(branch, garki);
+    let held: i32 = sqlx::query_scalar(
+        "SELECT reserved_quantity FROM branch_stock WHERE branch_id = $1 AND variant_id = $2",
+    )
+    .bind(garki)
+    .bind(l.variant_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(held, 2);
+
+    // Garki is now the last open branch.
+    let res = close(&app, &l.seller_token, l.store_id, garki).await;
     assert_eq!((res.status, code_of(&res)), (409, "last_branch"));
 }
 
@@ -799,14 +823,9 @@ async fn moved_branch_resets_courier_code(pool: PgPool) {
         &json!({ "branch_id": garki, "fields_changed": ["business_phone"] })
     );
 
-    // Moving the first branch also moves the store's pickup, which deliveries still read.
+    // Moving the first branch stamps that branch only: the store row is no longer written.
     let first = first_branch(&app, l.store_id).await;
     set_code(first).await;
-    sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242 WHERE id = $1")
-        .bind(l.store_id)
-        .execute(&app.pool)
-        .await
-        .unwrap();
     let res = patch_branch(
         &app,
         &l.seller_token,
@@ -817,13 +836,15 @@ async fn moved_branch_resets_courier_code(pool: PgPool) {
     .await;
     assert_eq!(res.status, 200, "{}", res.json);
     assert_eq!(code(first).await, None);
-    let store_code: Option<i64> =
-        sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores WHERE id = $1")
-            .bind(l.store_id)
-            .fetch_one(&app.pool)
-            .await
-            .unwrap();
-    assert_eq!(store_code, None);
+    let moved: (bool, bool) = sqlx::query_as(
+        "SELECT b.pickup_moved_at IS NOT NULL, s.pickup_moved_at IS NOT NULL \
+         FROM store_branches b JOIN stores s ON s.id = b.store_id WHERE b.id = $1",
+    )
+    .bind(first)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(moved, (true, false));
     let res = app
         .request(Method::GET, "/stores/mine", None, Some(&l.seller_token))
         .await;

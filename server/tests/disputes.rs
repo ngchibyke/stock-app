@@ -995,22 +995,13 @@ async fn full_path_from_delivery_to_partial_refund(pool: PgPool) {
     assert_eq!(app.set_cart(&buyer, shop.variant_id, 1).await.status, 200);
     let address = app.buyer_address(&buyer).await;
     let opts = app.delivery_options(&buyer, address).await;
-    let option: Uuid = opts.json["stores"][0]["options"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|o| o["method"] == "courier")
-        .expect("a courier option")["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let option = common::group_option(&opts.json, "courier");
     let res = app
         .checkout_with(
             &buyer,
             "mono_directpay",
             address,
-            &[(shop.store_id, option)],
+            std::slice::from_ref(&option),
         )
         .await;
     assert_eq!(res.status, 201, "{}", res.json);

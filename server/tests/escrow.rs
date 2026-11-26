@@ -1594,13 +1594,15 @@ async fn mixed_cart_splits_the_fee_and_refunds_one_order(pool: PgPool) {
     let address = app.buyer_address(&buyer).await;
     let quotes = app.delivery_options(&buyer, address).await;
     assert_eq!(quotes.status, 200, "{}", quotes.json);
-    let option = |store: Uuid, method: &str| -> Uuid {
-        quotes.json["stores"]
+    // `(group_id, option_id)` of the store's one group's option of `method`.
+    let option = |store: Uuid, method: &str| -> (String, Uuid) {
+        let group = &quotes.json["stores"]
             .as_array()
             .unwrap()
             .iter()
             .find(|s| s["store_id"] == store.to_string())
-            .unwrap()["options"]
+            .unwrap()["groups"][0];
+        let id = group["options"]
             .as_array()
             .unwrap()
             .iter()
@@ -1609,17 +1611,15 @@ async fn mixed_cart_splits_the_fee_and_refunds_one_order(pool: PgPool) {
             .as_str()
             .unwrap()
             .parse()
-            .unwrap()
+            .unwrap();
+        (group["group_id"].as_str().unwrap().to_string(), id)
     };
     let res = app
         .checkout_with(
             &buyer,
             METHOD,
             address,
-            &[
-                (a.store_id, option(a.store_id, "courier")),
-                (b.store_id, option(b.store_id, "self")),
-            ],
+            &[option(a.store_id, "courier"), option(b.store_id, "self")],
         )
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
@@ -2222,7 +2222,7 @@ async fn checkout_choosing(
     let address = app.add_address(buyer, "amac").await;
     let opts = app.delivery_options(buyer, address).await;
     assert_eq!(opts.status, 200, "{}", opts.json);
-    let option = opts.json["stores"][0]["options"]
+    let option = opts.json["stores"][0]["groups"][0]["options"]
         .as_array()
         .unwrap()
         .iter()
@@ -2230,8 +2230,13 @@ async fn checkout_choosing(
         .unwrap_or_else(|| panic!("no {method} option in {}", opts.json))
         .clone();
     let option_id: Uuid = option["id"].as_str().unwrap().parse().unwrap();
+    let group = opts.json["stores"][0]["groups"][0]["group_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(opts.json["stores"][0]["store_id"], json!(l.store_id));
     let res = app
-        .checkout_with(buyer, METHOD, address, &[(l.store_id, option_id)])
+        .checkout_with(buyer, METHOD, address, &[(group, option_id)])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     (

@@ -364,17 +364,8 @@ impl Team {
             let address = app.buyer_address(&self.buyer).await;
             let opts = app.delivery_options(&self.buyer, address).await;
             assert_eq!(opts.status, 200, "{}", opts.json);
-            let option: Uuid = opts.json["stores"][0]["options"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|o| o["method"] == "courier")
-                .expect("a courier option")["id"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap();
-            app.checkout_with(&self.buyer, METHOD, address, &[(self.store_id, option)])
+            let option = common::group_option(&opts.json, "courier");
+            app.checkout_with(&self.buyer, METHOD, address, std::slice::from_ref(&option))
                 .await
         };
         assert_eq!(res.status, 201, "{}", res.json);

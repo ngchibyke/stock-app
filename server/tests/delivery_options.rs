@@ -55,7 +55,7 @@ async fn self_option_is_reused_until_used_or_repriced(pool: PgPool) {
     app.set_cart(&buyer, l.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let self_id = |json: &serde_json::Value| {
-        json["stores"][0]["options"]
+        json["stores"][0]["groups"][0]["options"]
             .as_array()
             .unwrap()
             .iter()
@@ -120,8 +120,10 @@ async fn options_offer_self_and_courier_with_promised_date(pool: PgPool) {
     let store = &stores[0];
     assert_eq!(store["store_id"], json!(l.store_id));
     assert_eq!(store["store_name"], "Mama Put");
-    assert!(store.get("unavailable").is_none(), "{store}");
-    let options = store["options"].as_array().unwrap();
+    assert_eq!(store["unavailable"], json!([]), "{store}");
+    let group = &store["groups"][0];
+    assert!(group.get("unavailable").is_none(), "{store}");
+    let options = group["options"].as_array().unwrap();
     let summary: Vec<(String, i64, Option<String>)> = options
         .iter()
         .map(|o| {
@@ -178,7 +180,8 @@ async fn options_offer_self_and_courier_with_promised_date(pool: PgPool) {
     // Every option of one quote shares the cart fingerprint.
     assert!(rows.iter().all(|r| r.5 == rows[0].5));
 
-    // Both address codes are fetched once and cached on their rows.
+    // Both address codes are fetched once and cached on their rows: the store's on
+    // its branch.
     let codes = || async {
         let buyer_code: Option<i64> =
             sqlx::query_scalar("SELECT courier_address_code FROM buyer_addresses")
@@ -186,7 +189,7 @@ async fn options_offer_self_and_courier_with_promised_date(pool: PgPool) {
                 .await
                 .unwrap();
         let store_code: Option<i64> =
-            sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores")
+            sqlx::query_scalar("SELECT pickup_courier_address_code FROM store_branches")
                 .fetch_one(&app.pool)
                 .await
                 .unwrap();
@@ -218,7 +221,7 @@ async fn options_reuse_a_valid_courier_quote(pool: PgPool) {
     app.set_cart(&buyer, l.variant_id, 1).await;
     let address = app.buyer_address(&buyer).await;
     let ids = |res: &common::TestResponse, method: &str| -> Vec<String> {
-        res.json["stores"][0]["options"]
+        res.json["stores"][0]["groups"][0]["options"]
             .as_array()
             .unwrap()
             .iter()
@@ -244,8 +247,12 @@ async fn options_reuse_a_valid_courier_quote(pool: PgPool) {
 
     // A quote used by a checkout is never offered again.
     let courier: Uuid = ids(&changed, "courier")[0].parse().unwrap();
+    let group = changed.json["stores"][0]["groups"][0]["group_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let res = app
-        .checkout_with(&buyer, "mono_directpay", address, &[(l.store_id, courier)])
+        .checkout_with(&buyer, "mono_directpay", address, &[(group, courier)])
         .await;
     assert_eq!(res.status, 201, "{}", res.json);
     let after = app.delivery_options(&buyer, address).await;
@@ -330,7 +337,7 @@ async fn courier_failure_leaves_self_only(pool: PgPool) {
             .unwrap()
             .clone()
     };
-    let a = find(both.store_id);
+    let a = find(both.store_id)["groups"][0].clone();
     let methods: Vec<&str> = a["options"]
         .as_array()
         .unwrap()
@@ -339,20 +346,16 @@ async fn courier_failure_leaves_self_only(pool: PgPool) {
         .collect();
     assert_eq!(methods, vec!["self"]);
     assert!(a.get("unavailable").is_none());
-    let b = find(courier_only.store_id);
+    let b = find(courier_only.store_id)["groups"][0].clone();
     assert_eq!(b["options"], json!([]));
     assert_eq!(b["unavailable"], "no_delivery_option");
     assert_eq!(app.courier.quote_calls(), 2);
 
     // The store with no option cannot be checked out.
     let option = a["options"][0]["id"].as_str().unwrap().parse().unwrap();
+    let group = a["group_id"].as_str().unwrap().to_string();
     let res = app
-        .checkout_with(
-            &buyer,
-            "mono_directpay",
-            address,
-            &[(both.store_id, option)],
-        )
+        .checkout_with(&buyer, "mono_directpay", address, &[(group, option)])
         .await;
     assert_eq!(res.status, 422, "{}", res.json);
     assert_eq!(res.json["error"]["code"], "delivery_option_required");
@@ -365,7 +368,7 @@ async fn courier_store_without_phone_gets_no_courier_option(pool: PgPool) {
         .make_active_store_with_product(SELLER, "Mama Put", 100_000, 5)
         .await;
     // A legacy courier store from before the phone was required (ruling T6d).
-    sqlx::query("UPDATE stores SET business_phone_enc = NULL")
+    sqlx::query("UPDATE store_branches SET business_phone_enc = NULL")
         .execute(&app.pool)
         .await
         .unwrap();
@@ -374,7 +377,9 @@ async fn courier_store_without_phone_gets_no_courier_option(pool: PgPool) {
     let address = app.buyer_address(&buyer).await;
     let res = app.delivery_options(&buyer, address).await;
     assert_eq!(res.status, 200, "{}", res.json);
-    let options = res.json["stores"][0]["options"].as_array().unwrap();
+    let options = res.json["stores"][0]["groups"][0]["options"]
+        .as_array()
+        .unwrap();
     assert_eq!(options.len(), 1, "{}", res.json);
     assert_eq!(options[0]["method"], "self");
     assert_eq!(app.courier.quote_calls(), 0);

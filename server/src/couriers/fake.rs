@@ -68,6 +68,7 @@ pub struct FakeCourier {
     updates: Mutex<VecDeque<CourierUpdate>>,
     book_calls: AtomicUsize,
     quote_calls: AtomicUsize,
+    quote_senders: Mutex<Vec<i64>>,
     cancel_calls: AtomicUsize,
     status_calls: AtomicUsize,
 }
@@ -88,6 +89,7 @@ impl Default for FakeCourier {
             updates: Mutex::default(),
             book_calls: AtomicUsize::new(0),
             quote_calls: AtomicUsize::new(0),
+            quote_senders: Mutex::default(),
             cancel_calls: AtomicUsize::new(0),
             status_calls: AtomicUsize::new(0),
         }
@@ -160,6 +162,11 @@ impl FakeCourier {
     pub fn quote_calls(&self) -> usize {
         self.quote_calls.load(Ordering::SeqCst)
     }
+
+    /// The sender address code of every `quote` call, in call order.
+    pub fn quote_senders(&self) -> Vec<i64> {
+        self.quote_senders.lock().unwrap().clone()
+    }
     pub fn cancel_calls(&self) -> usize {
         self.cancel_calls.load(Ordering::SeqCst)
     }
@@ -203,12 +210,13 @@ impl CourierProvider for FakeCourier {
 
     async fn quote(
         &self,
-        _sender_code: i64,
+        sender_code: i64,
         _receiver_code: i64,
         _pickup: Date,
         _parcel: &Parcel,
     ) -> Result<RateQuote, CourierError> {
         self.quote_calls.fetch_add(1, Ordering::SeqCst);
+        self.quote_senders.lock().unwrap().push(sender_code);
         if let Some(e) = &*self.quote_failure.lock().unwrap() {
             return Err(copy_err(e));
         }

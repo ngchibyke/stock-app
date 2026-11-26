@@ -75,17 +75,8 @@ async fn paid_order_for(
         let address = app.buyer_address(&buyer).await;
         let opts = app.delivery_options(&buyer, address).await;
         assert_eq!(opts.status, 200, "{}", opts.json);
-        let option: Uuid = opts.json["stores"][0]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|o| o["method"] == "courier")
-            .expect("a courier option")["id"]
-            .as_str()
-            .unwrap()
-            .parse()
-            .unwrap();
-        app.checkout_with(&buyer, METHOD, address, &[(listing.store_id, option)])
+        let option = common::group_option(&opts.json, "courier");
+        app.checkout_with(&buyer, METHOD, address, std::slice::from_ref(&option))
             .await
     };
     let order_id = pay(app, res).await;
@@ -521,7 +512,7 @@ async fn seller_gets_404_until_the_order_is_paid(pool: PgPool) {
 async fn store_contact_reads_only_the_phone(pool: PgPool) {
     let app = TestApp::new(pool).await;
     let f = out_for_delivery(&app).await;
-    sqlx::query("UPDATE stores SET pickup_address_enc = '\\x00'::bytea")
+    sqlx::query("UPDATE store_branches SET pickup_address_enc = '\\x00'::bytea")
         .execute(&app.pool)
         .await
         .unwrap();

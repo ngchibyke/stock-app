@@ -130,7 +130,8 @@ enum Viewer {
 #[derive(sqlx::FromRow)]
 pub(crate) struct Facts {
     buyer_id: Uuid,
-    store_id: Uuid,
+    /// The branch the order is sent from.
+    branch_id: Uuid,
     store_name: String,
     status: String,
     delivery_method: Option<String>,
@@ -175,7 +176,7 @@ impl ShipmentFacts {
     }
 }
 
-const FACTS_SELECT: &str = "SELECT o.buyer_id, o.store_id, s.name AS store_name,         o.status::text AS status, o.delivery_method::text AS delivery_method, o.promised_date,         (o.held_at IS NOT NULL) AS held, o.delivery_area,         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ready_at, o.picked_up_at,         o.out_for_delivery_at, o.delivered_at, o.completed_at,         o.delivery_address_enc, o.handover_code_enc     FROM orders o     JOIN checkouts c ON c.id = o.checkout_id     JOIN stores s ON s.id = o.store_id";
+const FACTS_SELECT: &str = "SELECT o.buyer_id, o.branch_id, s.name AS store_name,         o.status::text AS status, o.delivery_method::text AS delivery_method, o.promised_date,         (o.held_at IS NOT NULL) AS held, o.delivery_area,         COALESCE(o.paid_at, c.paid_at) AS paid_at, o.ready_at, o.picked_up_at,         o.out_for_delivery_at, o.delivered_at, o.completed_at,         o.delivery_address_enc, o.handover_code_enc     FROM orders o     JOIN checkouts c ON c.id = o.checkout_id     JOIN stores s ON s.id = o.store_id";
 
 /// The steps the buyer sees on order `order_id`, for staff reading a dispute.
 /// No contact, code or address is read into the result.
@@ -366,7 +367,7 @@ pub(crate) async fn reveal_delivery_contact(
         }));
     }
     if f.is_self() && f.status == "out_for_delivery" {
-        let phone = store_phone(db, cipher, f.store_id).await?;
+        let phone = branch_phone(db, cipher, f.branch_id).await?;
         if phone.is_none() {
             return Ok(None);
         }
@@ -378,17 +379,18 @@ pub(crate) async fn reveal_delivery_contact(
     Ok(None)
 }
 
-/// The store's business phone and nothing else of its profile. A deleted store
-/// has nothing to call.
-async fn store_phone(
+/// The business phone of the branch the order is sent from, and nothing else of its
+/// profile. A deleted store has nothing to call.
+async fn branch_phone(
     db: &PgPool,
     cipher: &FieldCipher,
-    store_id: Uuid,
+    branch_id: Uuid,
 ) -> Result<Option<String>, AppError> {
     let enc: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-        "SELECT business_phone_enc FROM stores WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT b.business_phone_enc FROM store_branches b JOIN stores s ON s.id = b.store_id \
+         WHERE b.id = $1 AND s.deleted_at IS NULL",
     )
-    .bind(store_id)
+    .bind(branch_id)
     .fetch_optional(db)
     .await
     .context("load store phone")?;

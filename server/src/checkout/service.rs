@@ -1,10 +1,16 @@
 //! Checkout: reserves stock at each order's branch (`reserved_quantity`, through
 //! [`crate::stock::apply`]; on-hand `stock` changes only when the payment settles,
-//! see [`commit_reserved`]) and creates one checkout plus one order per store,
-//! then asks the payment provider for a payment page.
+//! see [`commit_reserved`]) and creates one checkout plus one order per fulfilment
+//! group (a store's branch and the lines it sends), then asks the payment provider
+//! for one payment page.
 //!
-//! Delivery (Part 3): the body names the buyer's address and one stored delivery
-//! option per store (see [`crate::delivery::options`]). Each order snapshots its
+//! Delivery (Part 3; by branch since 7e-1): the body names the buyer's address and
+//! one `{group_id, option_id}` per group from `POST /checkout/delivery-options` (see
+//! [`crate::delivery::options`]). Under the stock locks, the chosen groups must cover
+//! each store's cart lines exactly and every group's branch must still have the
+//! stock for its lines; otherwise 409 `allocation_changed` and nothing is reserved:
+//! a checkout never re-routes a line after the buyer saw its price. A line no open
+//! branch can fill whole is 409 `out_of_stock`, first. Each order snapshots its
 //! option (method, fee, courier quote, promised date) and the address, encrypted;
 //! the checkout total is the items plus every delivery fee. The platform cut is
 //! taken on items only.
@@ -12,9 +18,11 @@
 //! Locking follows the global order `users -> stores -> products ->
 //! product_variants -> branch_stock -> access_codes -> checkouts -> orders -> payouts`.
 //! The create transaction locks the buyer's user row, then the variants (standalone
-//! query, ordered by id), then each line's branch_stock row in the same order;
-//! product and store data are read without locks. Nothing holding a lock waits on the provider: `initiate` runs after
-//! commit.
+//! query, ordered by id), then each line's branch_stock row at its group's branch in
+//! the same order; product, store, branch and option rows are read without locks.
+//! Every stock writer (and a branch close) holds the variant lock first, so what is
+//! read under it is settled. Nothing holding a lock waits on the provider:
+//! `initiate` runs after commit.
 //!
 //! Provider outcomes after commit:
 //! - success with an allowed https `payment_url`: store `provider_payment_id`
@@ -36,9 +44,12 @@ use uuid::Uuid;
 use crate::{
     AppState, audit,
     cart::service::{BUYABLE, own_store_item},
-    delivery::options::{
-        ChosenOption, DeliveryChoice, DeliveryMethod, checkout_address, chosen_options,
-        still_offered,
+    delivery::{
+        allocate::merge_lines,
+        options::{
+            ChosenOption, DeliveryMethod, GroupChoice, checkout_address, chosen_groups,
+            option_invalid, still_offered,
+        },
     },
     error::AppError,
     limits::MAX_CHECKOUT_TOTAL_KOBO,
@@ -70,8 +81,16 @@ pub struct CreatedOrder {
 pub struct CheckoutRequest {
     pub method: String,
     pub address_id: Uuid,
-    /// One `{store_id, option_id}` per store in the cart.
-    pub deliveries: Vec<DeliveryChoice>,
+    /// One `{group_id, option_id}` per fulfilment group of the cart.
+    pub groups: Vec<GroupChoice>,
+}
+
+/// The stock moved since the buyer was shown the groups (a branch sold out or closed).
+fn allocation_changed() -> AppError {
+    AppError::ConflictDetail(
+        "allocation_changed",
+        "Stock has moved since delivery was quoted; please choose delivery again".into(),
+    )
 }
 
 /// The `POST /checkout` response body.
@@ -143,6 +162,8 @@ struct Line {
 }
 
 struct OrderDraft {
+    store_id: Uuid,
+    branch_id: Uuid,
     lines: Vec<Line>,
     items_total_kobo: i64,
     platform_cut_kobo: i64,
@@ -214,20 +235,22 @@ pub async fn create(
 
     // The cart is read, not locked: cart_items rows cascade from variant deletes, and
     // locking them before the variants would invert the lock order.
-    let cart: Vec<(Uuid, i32)> = sqlx::query_as(
+    let raw: Vec<(Uuid, i32)> = sqlx::query_as(
         "SELECT variant_id, quantity FROM cart_items WHERE user_id = $1 ORDER BY variant_id",
     )
     .bind(buyer)
     .fetch_all(&mut *tx)
     .await
     .context("load cart")?;
-    if cart.is_empty() {
+    if raw.is_empty() {
         return Err(AppError::Unprocessable(
             "cart_empty",
             "Your cart is empty".into(),
         ));
     }
-    let ids: Vec<Uuid> = cart.iter().map(|(id, _)| *id).collect();
+    // One line per variant, every quantity at least 1, in variant id order.
+    let cart = merge_lines(&raw)?;
+    let ids: Vec<Uuid> = cart.iter().map(|l| l.variant_id).collect();
 
     // product_variants: one standalone statement, always in id order.
     let variants: HashMap<Uuid, VariantRow> = sqlx::query_as::<_, VariantRow>(
@@ -258,77 +281,107 @@ pub async fn create(
     .map(|p| (p.id, p))
     .collect();
 
-    // Each store's orders are fulfilled from one branch. Until branches are chosen
-    // per order (part 7e-1, tasks 7 and 8), that is the store's first branch.
-    let store_ids: Vec<Uuid> = products.values().map(|p| p.store_id).collect();
-    let branch_of: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "SELECT store_id, id FROM store_branches WHERE store_id = ANY($1) AND position = 0",
-    )
-    .bind(&store_ids)
-    .fetch_all(&mut *tx)
-    .await
-    .context("load branches")?
-    .into_iter()
-    .collect();
-
     let unavailable = |id: Uuid| {
         AppError::Unprocessable(
             "item_unavailable",
             format!("Item {id} is no longer available"),
         )
     };
-    let mut by_store: BTreeMap<Uuid, Vec<Line>> = BTreeMap::new();
-    for &(variant_id, quantity) in &cart {
+    let mut by_variant: HashMap<Uuid, Line> = HashMap::with_capacity(cart.len());
+    let mut carts: BTreeMap<Uuid, Vec<crate::delivery::allocate::Line>> = BTreeMap::new();
+    for l in &cart {
         let v = variants
-            .get(&variant_id)
-            .ok_or_else(|| unavailable(variant_id))?;
+            .get(&l.variant_id)
+            .ok_or_else(|| unavailable(l.variant_id))?;
         let p = products
             .get(&v.product_id)
             .filter(|p| p.buyable)
-            .ok_or_else(|| unavailable(variant_id))?;
+            .ok_or_else(|| unavailable(l.variant_id))?;
         if p.buyer_member {
             return Err(own_store_item());
         }
-        // Available at the store's branch: on hand there minus what other pending
-        // checkouts hold there, read under the variant and branch_stock locks.
-        let branch = *branch_of
-            .get(&p.store_id)
-            .ok_or_else(|| anyhow::anyhow!("store has no first branch"))?;
-        if stock::lock_available(&mut tx, branch, variant_id).await? < quantity {
-            return Err(stock::out_of_stock(variant_id));
-        }
-        by_store.entry(p.store_id).or_default().push(Line {
-            variant_id,
-            product_name: p.name.clone(),
-            attributes: v.attributes.clone(),
-            unit_price_kobo: unit_price(p.base_price_kobo, v.price_kobo),
-            quantity,
-        });
+        carts.entry(p.store_id).or_default().push(l.clone());
+        by_variant.insert(
+            l.variant_id,
+            Line {
+                variant_id: l.variant_id,
+                product_name: p.name.clone(),
+                attributes: v.attributes.clone(),
+                unit_price_kobo: unit_price(p.base_price_kobo, v.price_kobo),
+                quantity: l.quantity,
+            },
+        );
     }
 
-    // Exactly one valid delivery option per store, quoted for these exact lines.
-    let carts: BTreeMap<Uuid, Vec<(Uuid, i32)>> = by_store
+    // The buyer's groups, each one valid option quoted for lines still in the cart.
+    let mut groups =
+        chosen_groups(&mut tx, buyer, request.address_id, &request.groups, &carts).await?;
+    let branch_of: HashMap<Uuid, Uuid> = groups
         .iter()
-        .map(|(store, lines)| {
-            (
-                *store,
-                lines.iter().map(|l| (l.variant_id, l.quantity)).collect(),
-            )
-        })
+        .flat_map(|g| g.variant_ids.iter().map(|v| (*v, g.branch_id)))
         .collect();
-    let mut chosen = chosen_options(
-        &mut tx,
-        buyer,
-        request.address_id,
-        &request.deliveries,
-        &carts,
-    )
-    .await?;
-    // A store may have switched the method off (or moved its pickup) since the quote.
-    still_offered(state, &mut tx, &chosen).await?;
 
-    let mut orders: Vec<(Uuid, OrderDraft)> = Vec::with_capacity(by_store.len());
-    for (store_id, lines) in by_store {
+    // Stock, in variant id order (the variants are locked): each line's row at its
+    // group's branch is locked and read; a line short there is checked against the
+    // most one open branch has. Every writer holds the variant lock, so neither
+    // figure can move before commit.
+    let mut moved = false;
+    for l in &cart {
+        let at_branch = match branch_of.get(&l.variant_id) {
+            Some(branch) => Some(stock::lock_available(&mut tx, *branch, l.variant_id).await?),
+            None => None,
+        };
+        if at_branch.is_some_and(|n| n >= l.quantity) {
+            continue;
+        }
+        let best: i64 = sqlx::query_scalar(&format!(
+            "SELECT {} FROM product_variants v WHERE v.id = $1",
+            stock::MAX_AVAILABLE_SQL
+        ))
+        .bind(l.variant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("load availability")?;
+        if best < i64::from(l.quantity) {
+            // Today's rule: no part of a cart is bought while a line is unavailable.
+            return Err(stock::out_of_stock(l.variant_id));
+        }
+        moved |= at_branch.is_some();
+    }
+    // Every line in exactly one chosen group (overlaps were refused above).
+    for store_lines in carts.values() {
+        let covered = store_lines
+            .iter()
+            .filter(|l| branch_of.contains_key(&l.variant_id))
+            .count();
+        if covered == 0 {
+            return Err(AppError::Unprocessable(
+                "delivery_option_required",
+                "Choose a delivery option for every store".into(),
+            ));
+        }
+        if covered < store_lines.len() {
+            return Err(option_invalid());
+        }
+    }
+    if moved {
+        return Err(allocation_changed());
+    }
+    // A store may have switched the method off (or moved its pickup) since the quote.
+    still_offered(state, &mut tx, &groups).await?;
+
+    groups.sort_by_key(|g| (g.store_id, g.branch_id));
+    let mut orders: Vec<OrderDraft> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let lines: Vec<Line> = g
+            .variant_ids
+            .iter()
+            .map(|v| {
+                by_variant
+                    .remove(v)
+                    .ok_or_else(|| anyhow::anyhow!("validated group line missing"))
+            })
+            .collect::<Result<_, _>>()?;
         let totals = lines
             .iter()
             .map(|l| {
@@ -338,24 +391,20 @@ pub async fn create(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let items_total_kobo = checked_sum(&totals)?;
-        let delivery = chosen
-            .remove(&store_id)
-            .ok_or_else(|| anyhow::anyhow!("validated delivery option missing"))?;
-        orders.push((
-            store_id,
-            OrderDraft {
-                // The platform cut applies to items only, never to delivery.
-                platform_cut_kobo: cut_kobo(items_total_kobo, settings.platform_cut_bps),
-                items_total_kobo,
-                lines,
-                delivery,
-            },
-        ));
+        orders.push(OrderDraft {
+            store_id: g.store_id,
+            branch_id: g.branch_id,
+            // The platform cut applies to items only, never to delivery.
+            platform_cut_kobo: cut_kobo(items_total_kobo, settings.platform_cut_bps),
+            items_total_kobo,
+            lines,
+            delivery: g.option,
+        });
     }
     // The buyer pays the items plus every order's delivery fee.
     let order_totals = orders
         .iter()
-        .map(|(_, o)| {
+        .map(|o| {
             o.items_total_kobo
                 .checked_add(o.delivery.fee_kobo)
                 .ok_or_else(too_large)
@@ -365,7 +414,7 @@ pub async fn create(
     let delivery_kobo = checked_sum(
         &orders
             .iter()
-            .map(|(_, o)| o.delivery.fee_kobo)
+            .map(|o| o.delivery.fee_kobo)
             .collect::<Vec<_>>(),
     )?;
     if total_kobo > MAX_CHECKOUT_TOTAL_KOBO {
@@ -376,11 +425,10 @@ pub async fn create(
     // payment settles (commit_reserved). Variant id order, as locked above.
     let mut reserve: Vec<(Uuid, Uuid, i32)> = orders
         .iter()
-        .flat_map(|(store, o)| {
-            let branch = branch_of[store];
+        .flat_map(|o| {
             o.lines
                 .iter()
-                .map(move |l| (l.variant_id, branch, l.quantity))
+                .map(move |l| (l.variant_id, o.branch_id, l.quantity))
         })
         .collect();
     reserve.sort();
@@ -415,7 +463,7 @@ pub async fn create(
     let (checkout_id, reference) =
         created.ok_or_else(|| anyhow::anyhow!("could not allocate a checkout reference"))?;
 
-    for (store_id, order) in &orders {
+    for order in &orders {
         let d = &order.delivery;
         // The courier quote is what the courier will charge (ruling T6f).
         let courier_quote = match d.method {
@@ -434,7 +482,7 @@ pub async fn create(
              RETURNING id",
         )
         .bind(checkout_id)
-        .bind(store_id)
+        .bind(order.store_id)
         .bind(buyer)
         .bind(order.items_total_kobo)
         .bind(settings.platform_cut_bps)
@@ -450,7 +498,7 @@ pub async fn create(
         .bind(courier_quote.and(d.service_code.as_deref()))
         .bind(courier_quote)
         .bind(courier_quote.and(d.sender_code))
-        .bind(branch_of[store_id])
+        .bind(order.branch_id)
         .fetch_one(&mut *tx)
         .await
         .context("insert order")?;

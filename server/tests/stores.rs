@@ -189,12 +189,18 @@ async fn pickup_address_encrypted(pool: PgPool) {
     let app = TestApp::new(pool.clone()).await;
     let (_, token) = app.make_seller("08011111111").await;
     assert_eq!(create(&app, &token, "Secret").await.status, 201);
-    let raw: Vec<u8> = sqlx::query_scalar("SELECT pickup_address_enc FROM stores")
+    let raw: Vec<u8> = sqlx::query_scalar("SELECT pickup_address_enc FROM store_branches")
         .fetch_one(&pool)
         .await
         .unwrap();
     let needle = b"Unique Street";
     assert!(!raw.windows(needle.len()).any(|w| w == needle));
+    // The address lives on the first branch only: the store row keeps no copy.
+    let copy: Option<Vec<u8>> = sqlx::query_scalar("SELECT pickup_address_enc FROM stores")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(copy, None);
 }
 
 #[sqlx::test]
@@ -369,7 +375,7 @@ async fn courier_store_requires_business_phone(pool: PgPool) {
     assert_eq!(res.status, 201, "{}", res.json);
     // A legacy courier store without a phone stays editable until a delivery field is touched.
     let id = res.json["id"].as_str().unwrap().to_string();
-    sqlx::query("UPDATE stores SET business_phone_enc = NULL")
+    sqlx::query("UPDATE store_branches SET business_phone_enc = NULL")
         .execute(&pool)
         .await
         .unwrap();
@@ -401,12 +407,14 @@ async fn new_business_phone_resets_the_courier_address_code(pool: PgPool) {
     let created = create(&app, &token, "Calls").await;
     let id = created.json["id"].as_str().unwrap().to_string();
     let code = || async {
-        sqlx::query_scalar::<_, Option<i64>>("SELECT pickup_courier_address_code FROM stores")
-            .fetch_one(&pool)
-            .await
-            .unwrap()
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT pickup_courier_address_code FROM store_branches",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
     };
-    sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+    sqlx::query("UPDATE store_branches SET pickup_courier_address_code = 4242")
         .execute(&pool)
         .await
         .unwrap();
@@ -440,7 +448,7 @@ async fn legacy_store_without_delivery_fields_can_still_be_renamed(pool: PgPool)
     let (_, token) = app.make_seller("08011111111").await;
     let created = create(&app, &token, "Legacy").await;
     let id = created.json["id"].as_str().unwrap();
-    sqlx::query("UPDATE stores SET pickup_area_council = NULL")
+    sqlx::query("UPDATE store_branches SET pickup_area_council = NULL")
         .execute(&pool)
         .await
         .unwrap();
@@ -483,7 +491,7 @@ async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
     let slug = res.json["slug"].as_str().unwrap().to_string();
     let id: uuid::Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
 
-    let raw: Vec<u8> = sqlx::query_scalar("SELECT business_phone_enc FROM stores")
+    let raw: Vec<u8> = sqlx::query_scalar("SELECT business_phone_enc FROM store_branches")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -491,7 +499,11 @@ async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
     assert!(!raw.windows(needle.len()).any(|w| w == needle));
 
     // Make the store public, then look at it anonymously and as another signed-in user.
-    sqlx::query("UPDATE stores SET status = 'active', pickup_courier_address_code = 4242")
+    sqlx::query("UPDATE stores SET status = 'active'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE store_branches SET pickup_courier_address_code = 4242")
         .execute(&pool)
         .await
         .unwrap();
@@ -524,10 +536,18 @@ async fn business_phone_encrypted_and_owner_only(pool: PgPool) {
     assert_eq!(mine.json[0]["business_phone"], "+2348031234567");
     assert_eq!(mine.json[0]["self_delivery_fee_kobo"], 150_000);
 
-    // delivery_profile decrypts.
-    let profile = server::stores::service::delivery_profile(&pool, &app.state.cipher, id)
+    // The branch's delivery profile decrypts.
+    let branch: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM store_branches WHERE store_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let profile = server::stores::service::branch_delivery_on(&mut conn, &app.state.cipher, branch)
         .await
         .unwrap();
+    drop(conn);
     assert_eq!(profile.business_phone.as_deref(), Some("+2348031234567"));
     assert_eq!(profile.self_fee_kobo, Some(150_000));
     assert_eq!(profile.pickup_address, "12 Unique Street, Wuse 2");
@@ -588,7 +608,7 @@ async fn moving_the_pickup_resets_the_courier_address_code(pool: PgPool) {
         json!({ "pickup_postcode": "FC01AB12CDE" }),
     ];
     for patch in patches {
-        sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+        sqlx::query("UPDATE store_branches SET pickup_courier_address_code = 4242")
             .execute(&pool)
             .await
             .unwrap();
@@ -602,14 +622,14 @@ async fn moving_the_pickup_resets_the_courier_address_code(pool: PgPool) {
             .await;
         assert_eq!(res.status, 200, "{patch}: {}", res.json);
         let code: Option<i64> =
-            sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores")
+            sqlx::query_scalar("SELECT pickup_courier_address_code FROM store_branches")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(code, None, "{patch}");
     }
     // An unrelated patch keeps it.
-    sqlx::query("UPDATE stores SET pickup_courier_address_code = 4242")
+    sqlx::query("UPDATE store_branches SET pickup_courier_address_code = 4242")
         .execute(&pool)
         .await
         .unwrap();
@@ -622,10 +642,11 @@ async fn moving_the_pickup_resets_the_courier_address_code(pool: PgPool) {
         )
         .await;
     assert_eq!(res.status, 200, "{}", res.json);
-    let code: Option<i64> = sqlx::query_scalar("SELECT pickup_courier_address_code FROM stores")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let code: Option<i64> =
+        sqlx::query_scalar("SELECT pickup_courier_address_code FROM store_branches")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(code, Some(4242));
 }
 

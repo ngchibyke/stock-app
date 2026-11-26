@@ -520,7 +520,8 @@ async fn flag_reused_quotes(conn: &mut PgConnection, checkout_id: Uuid) -> Resul
         "SELECT o.id, other.id FROM orders o \
          JOIN delivery_options d ON d.id = o.delivery_option_id AND d.method = 'courier' \
          JOIN delivery_options u ON u.method = 'courier' AND u.buyer_id = d.buyer_id \
-              AND u.store_id = d.store_id AND u.created_at = d.created_at \
+              AND u.store_id = d.store_id AND u.branch_id = d.branch_id \
+              AND u.created_at = d.created_at \
          JOIN orders other ON other.delivery_option_id = u.id AND other.id <> o.id \
          WHERE o.checkout_id = $1 AND other.status <> 'cancelled' \
          ORDER BY o.id, other.id",

@@ -5,7 +5,7 @@
 //! grouped greedily into at most three branches, and lines no group can fill whole
 //! are reported as unavailable.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Context;
 use sha2::{Digest, Sha256};
@@ -105,6 +105,31 @@ pub fn allocate(lines: &[Line], candidates: &[Candidate], buyer_area: AreaCounci
         groups,
         unavailable: remaining,
     }
+}
+
+/// One line per variant, in variant id order, with repeated variants summed. A
+/// quantity below 1 is refused (422): [`allocate`] counts a line of 0 as filled and
+/// checks repeated lines one by one, so either would oversell.
+pub fn merge_lines(lines: &[(Uuid, i32)]) -> Result<Vec<Line>, AppError> {
+    let mut merged: BTreeMap<Uuid, i32> = BTreeMap::new();
+    for &(variant_id, quantity) in lines {
+        if quantity < 1 {
+            return Err(AppError::Validation(
+                "cart quantities must be at least 1".into(),
+            ));
+        }
+        let total = merged.entry(variant_id).or_default();
+        *total = total
+            .checked_add(quantity)
+            .ok_or_else(|| AppError::Validation("cart quantity is too large".into()))?;
+    }
+    Ok(merged
+        .into_iter()
+        .map(|(variant_id, quantity)| Line {
+            variant_id,
+            quantity,
+        })
+        .collect())
 }
 
 /// SHA-256 (lowercase hex) of `"<branch uuid>"` followed by one `"\n<variant uuid>:<quantity>"`
@@ -258,6 +283,19 @@ mod tests {
         let r = allocate(&[line(1, 3)], &c, A);
         assert!(r.full_fill.is_empty() && r.groups.is_empty());
         assert_eq!(r.unavailable, vec![line(1, 3)]);
+    }
+
+    #[test]
+    fn merge_sums_repeats_and_refuses_non_positive() {
+        let merged = merge_lines(&[(id(2), 1), (id(1), 2), (id(2), 3)]).unwrap();
+        assert_eq!(merged, vec![line(1, 2), line(2, 4)]);
+        for bad in [0, -1] {
+            assert!(matches!(
+                merge_lines(&[(id(1), 1), (id(2), bad)]),
+                Err(AppError::Validation(_))
+            ));
+        }
+        assert!(merge_lines(&[(id(1), i32::MAX), (id(1), 1)]).is_err());
     }
 
     #[test]

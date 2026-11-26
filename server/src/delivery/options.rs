@@ -1,36 +1,46 @@
-//! Delivery options at checkout (Part 3, Task 6).
+//! Delivery options at checkout (Part 3, Task 6; by branch since part 7e-1, task 8).
 //!
-//! `POST /checkout/delivery-options` prices delivery for every store in the
-//! buyer's cart to one of their saved addresses and stores each choice as a
-//! `delivery_options` row. The client only ever sends an option's id back to
+//! `POST /checkout/delivery-options` routes each store's cart lines to its branches
+//! ([`super::allocate`]) and prices delivery for every resulting **group** (store,
+//! branch, the lines that branch sends) to one of the buyer's saved addresses. Each
+//! choice is stored as a `delivery_options` row carrying the group's branch,
+//! fingerprint ([`group_fingerprint`], also the `group_id` the buyer sends back) and
+//! variants. The client only ever sends `{group_id, option_id}` back to
 //! `POST /checkout`; every amount comes from these rows, never from the client.
 //!
-//! - Self-delivery is offered when the store has it switched on with a fee.
-//! - Courier delivery is offered when the store has it switched on, a business
-//!   phone and a pickup area, and a courier provider is configured. The address
-//!   codes of the store and of the buyer's address are fetched lazily and cached
-//!   on their rows. At most the three cheapest rates (by what the courier
+//! - One branch can fill every line: up to three such branches (best ranked first)
+//!   are quoted, and the one with the cheapest option wins (then the earliest
+//!   promised date, then rank). One group. Otherwise the lines are split into at most
+//!   three groups, each quoted from its branch; lines no group can fill whole are
+//!   listed as `unavailable` with the most one open branch has. So at most three
+//!   courier quotes are asked per store per call.
+//! - Self-delivery is offered when the store has it switched on and the branch has a
+//!   fee. Courier delivery is offered when the store has it switched on, the branch
+//!   has a business phone and a pickup area, and a courier provider is configured.
+//!   The address codes of the branch and of the buyer's address are fetched lazily
+//!   and cached on their rows. At most the three cheapest rates (by what the courier
 //!   charges) are offered.
 //! - Every provider call happens before any transaction is opened; the caches and
-//!   options are written afterwards. A provider failure leaves that store with
-//!   self-delivery only; a store left with no option says `no_delivery_option`.
+//!   options are written afterwards. A provider failure leaves that group with
+//!   self-delivery only; a group left with no option says `no_delivery_option`.
 //!   Courier errors are logged by class only (their `Display` carries no detail).
 //! - Quote cost: an unexpired, unused courier quote for the same buyer, store,
-//!   address, cart and sender code is reused without a provider call. Fresh quotes
-//!   are capped at [`MAX_QUOTES_PER_HOUR`] per buyer (429 `too_many_attempts`). An
-//!   unexpired, unused self-delivery option at the same fee is reused too, so
-//!   repeat calls do not add rows.
+//!   address, group and sender code is reused without a provider call. Fresh quotes
+//!   are capped at [`MAX_QUOTES_PER_HOUR`] requests per buyer (429
+//!   `too_many_attempts`). An unexpired, unused self-delivery option at the same fee
+//!   is reused too, so repeat calls do not add rows.
 //!
-//! An option is valid at checkout only for the same buyer, store and address,
-//! before it expires (`courier_quote_ttl_minutes`), while the store's cart lines
-//! are unchanged (`cart_fingerprint`), and while unused: an option (for a courier,
-//! its whole quote) is single-use once an order that is not cancelled points at
-//! it. The store must also still offer the method (and, for a courier, still have
+//! An option is valid at checkout only for the same buyer, store and address, before
+//! it expires (`courier_quote_ttl_minutes`), while the group's lines are unchanged
+//! (`group_fingerprint`), and while unused: an option (for a courier, its whole
+//! quote) is single-use once an order that is not cancelled points at it. The store
+//! must also still offer the method (and, for a courier, the branch must still have
 //! the sender code the quote was made from). Otherwise 422 `delivery_option_invalid`.
 //!
-//! Data protection: option rows hold ids and prices only. The buyer's name, phone
-//! and address line go to the courier provider for address validation (needed for
-//! the label); the landmark is not sent. Nothing personal is logged or audited.
+//! Data protection: option rows hold ids and prices only. A group shows its branch's
+//! name and area council, never its address or phone. The buyer's name, phone and
+//! address line go to the courier provider for address validation (needed for the
+//! label); the landmark is not sent. Nothing personal is logged or audited.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -45,6 +55,7 @@ use uuid::Uuid;
 
 use super::{
     addresses::{DeliveryAddress, load_for_checkout},
+    allocate::{Line, MAX_GROUPS, allocate, group_fingerprint, load_candidates, merge_lines},
     area::AreaCouncil,
     promise::{load_holidays, next_pickup_date, promised_date},
 };
@@ -61,13 +72,13 @@ use crate::{
     settings,
     stores::{
         access::is_member_sql,
-        service::{StoreDelivery, delivery_profile, delivery_profile_on},
+        service::{StoreDelivery, branch_delivery_on},
     },
 };
 
-/// Most courier rates offered per store (ruling T6f).
+/// Most courier rates offered per group (ruling T6f).
 pub const MAX_COURIER_OPTIONS: usize = 3;
-/// What a store with no deliverable option reports.
+/// What a group with no deliverable option reports.
 pub const NO_DELIVERY_OPTION: &str = "no_delivery_option";
 /// Fresh courier quote requests one buyer may make per rolling hour; reused
 /// quotes do not count. Every request costs calls on the platform's courier key.
@@ -113,13 +124,45 @@ pub struct OptionView {
     pub promised_date: String,
 }
 
+/// What a buyer sees of a branch before paying: no address, no phone.
+#[derive(Debug, Serialize)]
+pub struct BranchRef {
+    pub id: Uuid,
+    pub name: String,
+    pub area_council: Option<AreaCouncil>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LineView {
+    pub variant_id: Uuid,
+    pub quantity: i32,
+}
+
+/// One fulfilment group: a branch and the lines it sends.
+#[derive(Debug, Serialize)]
+pub struct GroupView {
+    pub group_id: String,
+    pub branch: BranchRef,
+    pub lines: Vec<LineView>,
+    pub options: Vec<OptionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<&'static str>,
+}
+
+/// A cart line no group can fill whole: `available` is the most one open branch has.
+#[derive(Debug, Serialize)]
+pub struct UnavailableLine {
+    pub variant_id: Uuid,
+    pub wanted: i32,
+    pub available: i32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StoreOptions {
     pub store_id: Uuid,
     pub store_name: String,
-    pub options: Vec<OptionView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unavailable: Option<&'static str>,
+    pub groups: Vec<GroupView>,
+    pub unavailable: Vec<UnavailableLine>,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,8 +170,8 @@ pub struct OptionsResponse {
     pub stores: Vec<StoreOptions>,
 }
 
-/// sha256 hex over a store's cart lines `(variant_id, quantity)`, sorted, so the
-/// order lines arrive in does not matter (ruling T6a).
+/// sha256 hex over cart lines `(variant_id, quantity)`, sorted, so the order lines
+/// arrive in does not matter (ruling T6a). Stored on each option for its group's lines.
 pub fn cart_fingerprint(lines: &[(Uuid, i32)]) -> String {
     let mut sorted = lines.to_vec();
     sorted.sort_unstable();
@@ -184,12 +227,28 @@ struct CartRow {
 
 struct StoreCart {
     name: String,
-    lines: Vec<(Uuid, i32)>,
-    items: Vec<(ProductDims, i32)>,
+    /// One per variant, in variant id order.
+    lines: Vec<Line>,
+    dims: HashMap<Uuid, ProductDims>,
+}
+
+impl StoreCart {
+    /// The parcel items of `lines`.
+    fn items(&self, lines: &[Line]) -> Vec<(ProductDims, i32)> {
+        lines
+            .iter()
+            .filter_map(|l| {
+                self.dims
+                    .get(&l.variant_id)
+                    .map(|d| (d.clone(), l.quantity))
+            })
+            .collect()
+    }
 }
 
 /// The buyer's buyable cart lines grouped by store (their own stores left out:
-/// checkout refuses those items). An empty cart is 422 `cart_empty`.
+/// checkout refuses those items), merged per variant. An empty cart is 422
+/// `cart_empty`.
 async fn load_cart(db: &PgPool, buyer: Uuid) -> Result<Vec<(Uuid, StoreCart)>, AppError> {
     let any: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cart_items WHERE user_id = $1)")
@@ -219,22 +278,26 @@ async fn load_cart(db: &PgPool, buyer: Uuid) -> Result<Vec<(Uuid, StoreCart)>, A
     .fetch_all(db)
     .await
     .context("load cart for delivery")?;
-    let mut out: Vec<(Uuid, StoreCart)> = Vec::new();
+    // (store, cart, raw lines before merging)
+    type Building = (Uuid, StoreCart, Vec<(Uuid, i32)>);
+    let mut out: Vec<Building> = Vec::new();
     for r in rows {
-        if out.last().is_none_or(|(id, _)| *id != r.store_id) {
+        if out.last().is_none_or(|(id, _, _)| *id != r.store_id) {
             out.push((
                 r.store_id,
                 StoreCart {
                     name: r.store_name.clone(),
                     lines: Vec::new(),
-                    items: Vec::new(),
+                    dims: HashMap::new(),
                 },
+                Vec::new(),
             ));
         }
-        let (_, cart) = out.last_mut().expect("just pushed");
-        cart.lines.push((r.variant_id, r.quantity));
+        let (_, cart, raw) = out.last_mut().expect("just pushed");
+        raw.push((r.variant_id, r.quantity));
         // Ruling T6g: the parcel item is valued at the unit price, named after the product.
-        cart.items.push((
+        cart.dims.insert(
+            r.variant_id,
             ProductDims {
                 name: r.product_name,
                 weight_grams: r.weight_grams,
@@ -243,10 +306,14 @@ async fn load_cart(db: &PgPool, buyer: Uuid) -> Result<Vec<(Uuid, StoreCart)>, A
                 width_cm: r.width_cm,
                 height_cm: r.height_cm,
             },
-            r.quantity,
-        ));
+        );
     }
-    Ok(out)
+    out.into_iter()
+        .map(|(id, mut cart, raw)| {
+            cart.lines = merge_lines(&raw)?;
+            Ok((id, cart))
+        })
+        .collect()
 }
 
 /// The buyer's address code with the courier provider, fetched at most once per request.
@@ -259,13 +326,13 @@ enum ReceiverCode {
 struct CourierQuote {
     request_token: String,
     rates: Vec<Rate>,
-    /// The store (sender) address code the quote was made from.
+    /// The branch (sender) address code the quote was made from.
     sender_code: i64,
-    /// A store address code fetched now, to cache after the provider calls.
-    new_store_code: Option<(i64, ContactAddress)>,
+    /// A branch address code fetched now, to cache after the provider calls.
+    new_branch_code: Option<(i64, ContactAddress)>,
 }
 
-/// Every provider call for one store: the store's address code (unless cached),
+/// Every provider call for one group: the branch's address code (unless cached),
 /// the buyer's (unless known), then the quote. `None` on any provider failure,
 /// logged by error class only.
 #[allow(clippy::too_many_arguments)]
@@ -282,7 +349,7 @@ async fn quote_courier(
     let (Some(phone), Some(area)) = (&profile.business_phone, profile.pickup_area) else {
         return None;
     };
-    let mut new_store_code = None;
+    let mut new_branch_code = None;
     let sender = match profile.pickup_courier_address_code {
         Some(code) => code,
         None => {
@@ -296,11 +363,11 @@ async fn quote_courier(
             };
             match provider.validate_address(&contact).await {
                 Ok(code) => {
-                    new_store_code = Some((code, contact));
+                    new_branch_code = Some((code, contact));
                     code
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "store address validation failed; no courier option");
+                    tracing::warn!(error = %e, "branch address validation failed; no courier option");
                     return None;
                 }
             }
@@ -348,27 +415,27 @@ async fn quote_courier(
                 request_token: quote.request_token,
                 rates,
                 sender_code: sender,
-                new_store_code,
+                new_branch_code,
             })
         }
         Err(e) => {
             tracing::warn!(error = %e, "courier quote failed; no courier option");
-            // The store's code is still good; cache it.
-            new_store_code.map(|store_code| CourierQuote {
+            // The branch's code is still good; cache it.
+            new_branch_code.map(|branch_code| CourierQuote {
                 request_token: String::new(),
                 rates: Vec::new(),
                 sender_code: sender,
-                new_store_code: Some(store_code),
+                new_branch_code: Some(branch_code),
             })
         }
     }
 }
 
-/// Caches a store's courier address code, only while the pickup details it was
-/// validated with are still the store's (a seller edit meanwhile resets it).
-async fn cache_store_code(
+/// Caches a branch's courier address code, only while the pickup details it was
+/// validated with are still the branch's (a seller edit meanwhile resets it).
+async fn cache_branch_code(
     state: &AppState,
-    store_id: Uuid,
+    branch_id: Uuid,
     code: i64,
     sent: &ContactAddress,
 ) -> Result<(), AppError> {
@@ -377,32 +444,23 @@ async fn cache_store_code(
     let row: Option<PickupRow> = sqlx::query_as(
         "SELECT pickup_address_enc, business_phone_enc, pickup_area_council, \
                 pickup_courier_address_code \
-         FROM stores WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE",
+         FROM store_branches WHERE id = $1 FOR NO KEY UPDATE",
     )
-    .bind(store_id)
+    .bind(branch_id)
     .fetch_optional(&mut *tx)
     .await
-    .context("lock store for courier code")?;
+    .context("lock branch for courier code")?;
     if let Some((address_enc, Some(phone_enc), area, None)) = row {
         let same = area == Some(sent.area)
             && state.cipher.decrypt(&address_enc)? == sent.address_line
             && state.cipher.decrypt(&phone_enc)? == sent.phone;
         if same {
-            sqlx::query("UPDATE stores SET pickup_courier_address_code = $2 WHERE id = $1")
-                .bind(store_id)
+            sqlx::query("UPDATE store_branches SET pickup_courier_address_code = $2 WHERE id = $1")
+                .bind(branch_id)
                 .bind(code)
                 .execute(&mut *tx)
                 .await
-                .context("cache store courier code")?;
-            sqlx::query(
-                "UPDATE store_branches SET pickup_courier_address_code = $2 \
-                 WHERE store_id = $1 AND position = 0",
-            )
-            .bind(store_id)
-            .bind(code)
-            .execute(&mut *tx)
-            .await
-            .context("cache branch courier code")?;
+                .context("cache branch courier code")?;
         }
     }
     tx.commit().await.context("commit")?;
@@ -418,23 +476,24 @@ struct NewOption {
 
 /// SQL: whether option `d` is used. It is used when an order that is not
 /// cancelled points at it, or, for a courier option, at any courier option of
-/// the same quote (one quote, one request token: never booked twice).
+/// the same quote (one quote, one request token: never booked twice). One request
+/// quotes each branch once, so a quote is its buyer, store, branch and time.
 const USED: &str = "EXISTS (SELECT 1 FROM orders o \
      JOIN delivery_options u ON u.id = o.delivery_option_id \
      WHERE o.status <> 'cancelled' \
        AND (u.id = d.id OR (d.method = 'courier' AND u.method = 'courier' \
             AND u.buyer_id = d.buyer_id AND u.store_id = d.store_id \
-            AND u.created_at = d.created_at)))";
+            AND u.branch_id = d.branch_id AND u.created_at = d.created_at)))";
 
 /// The latest unexpired, unused courier quote for this buyer, store, address and
-/// cart, if it was quoted from the store's current sender address code: reused
+/// group, if it was quoted from the branch's current sender address code: reused
 /// instead of calling the provider again.
 async fn reusable_courier(
     db: &PgPool,
     buyer: Uuid,
     store_id: Uuid,
     address_id: Uuid,
-    fingerprint: &str,
+    group: &str,
     sender_code: i64,
 ) -> Result<Vec<OptionView>, AppError> {
     type Reused = (Uuid, i64, Option<String>, Option<String>, Date);
@@ -442,12 +501,12 @@ async fn reusable_courier(
         "SELECT d.id, d.fee_kobo, d.courier_name, d.delivery_eta, d.promised_date \
          FROM delivery_options d \
          WHERE d.buyer_id = $1 AND d.store_id = $2 AND d.address_id = $3 \
-           AND d.cart_fingerprint = $4 AND d.method = 'courier' \
+           AND d.group_fingerprint = $4 AND d.method = 'courier' \
            AND d.courier_sender_code = $5 \
            AND d.expires_at > now() + make_interval(mins => {REUSE_MARGIN_MINUTES}) \
            AND d.created_at = (SELECT max(x.created_at) FROM delivery_options x \
                                WHERE x.buyer_id = $1 AND x.store_id = $2 \
-                                 AND x.address_id = $3 AND x.cart_fingerprint = $4 \
+                                 AND x.address_id = $3 AND x.group_fingerprint = $4 \
                                  AND x.method = 'courier') \
            AND NOT {USED} \
          ORDER BY d.fee_kobo, d.courier_name, d.id"
@@ -455,7 +514,7 @@ async fn reusable_courier(
     .bind(buyer)
     .bind(store_id)
     .bind(address_id)
-    .bind(fingerprint)
+    .bind(group)
     .bind(sender_code)
     .fetch_all(db)
     .await
@@ -476,19 +535,19 @@ async fn reusable_courier(
 }
 
 /// The latest unexpired, unused self-delivery option for this buyer, store,
-/// address and cart at the store's current fee, if any.
+/// address and group at the branch's current fee, if any.
 async fn reusable_self(
     db: &PgPool,
     buyer: Uuid,
     store_id: Uuid,
     address_id: Uuid,
-    fingerprint: &str,
+    group: &str,
     fee_kobo: i64,
 ) -> Result<Option<OptionView>, AppError> {
     let row: Option<(Uuid, Date)> = sqlx::query_as(&format!(
         "SELECT d.id, d.promised_date FROM delivery_options d \
          WHERE d.buyer_id = $1 AND d.store_id = $2 AND d.address_id = $3 \
-           AND d.cart_fingerprint = $4 AND d.method = 'self' AND d.fee_kobo = $5 \
+           AND d.group_fingerprint = $4 AND d.method = 'self' AND d.fee_kobo = $5 \
            AND d.expires_at > now() + make_interval(mins => {REUSE_MARGIN_MINUTES}) \
            AND NOT {USED} \
          ORDER BY d.created_at DESC, d.id LIMIT 1"
@@ -496,7 +555,7 @@ async fn reusable_self(
     .bind(buyer)
     .bind(store_id)
     .bind(address_id)
-    .bind(fingerprint)
+    .bind(group)
     .bind(fee_kobo)
     .fetch_optional(db)
     .await
@@ -534,16 +593,78 @@ async fn quote_options(
     Ok(Json(options_for(&state, user.id, body.address_id).await?))
 }
 
-/// What one store will offer: fresh options to insert, reused courier options,
-/// and whether the courier provider must be asked.
-struct StorePlan {
-    store_id: Uuid,
-    cart: StoreCart,
+/// What one group will offer: fresh options to insert, reused options, and whether
+/// the courier provider must be asked.
+struct GroupPlan {
+    lines: Vec<Line>,
     fingerprint: String,
     profile: StoreDelivery,
     new: Vec<NewOption>,
     reused: Vec<OptionView>,
     needs_quote: bool,
+    views: Vec<OptionView>,
+}
+
+/// One store's plan: either up to three branches that can each fill the whole cart
+/// (`full_fill`, best ranked first; the cheapest is kept), or the split groups.
+struct StorePlan {
+    store_id: Uuid,
+    cart: StoreCart,
+    full_fill: bool,
+    groups: Vec<GroupPlan>,
+    unavailable: Vec<UnavailableLine>,
+}
+
+/// The group's cheapest `(fee, promised date)`; `None` with no option.
+fn cheapest(plan: &GroupPlan) -> Option<(i64, &str)> {
+    plan.views
+        .iter()
+        .map(|v| (v.fee_kobo, v.promised_date.as_str()))
+        .min()
+}
+
+/// Plans one group at `profile`'s branch: the self option (reused or new) and any
+/// reusable courier quote.
+async fn plan_group(
+    state: &AppState,
+    buyer: Uuid,
+    store_id: Uuid,
+    address_id: Uuid,
+    profile: StoreDelivery,
+    lines: Vec<Line>,
+) -> Result<GroupPlan, AppError> {
+    let fingerprint = group_fingerprint(profile.branch_id, &lines);
+    let mut new = Vec::new();
+    let mut own = None;
+    if profile.self_delivery
+        && let Some(fee) = profile.self_fee_kobo
+    {
+        own = reusable_self(&state.db, buyer, store_id, address_id, &fingerprint, fee).await?;
+        if own.is_none() {
+            new.push(NewOption {
+                method: DeliveryMethod::SelfDelivery,
+                fee_kobo: fee,
+                rate: None,
+            });
+        }
+    }
+    let courier = state.courier.is_some() && courier_offered(&profile);
+    let mut reused = Vec::new();
+    if courier && let Some(sender) = profile.pickup_courier_address_code {
+        reused =
+            reusable_courier(&state.db, buyer, store_id, address_id, &fingerprint, sender).await?;
+    }
+    let needs_quote = courier && reused.is_empty();
+    reused.extend(own);
+    Ok(GroupPlan {
+        lines,
+        fingerprint,
+        profile,
+        new,
+        reused,
+        needs_quote,
+        views: Vec::new(),
+    })
 }
 
 /// Quotes and stores the delivery options for the buyer's cart (module docs).
@@ -560,85 +681,114 @@ pub async fn options_for(
     let promised = promised_date(now, settings.delivery_cutoff_minutes, &holidays);
     let pickup = next_pickup_date(now, settings.delivery_cutoff_minutes, &holidays);
 
-    // What each store offers; a still-valid courier quote is reused, not re-asked.
+    // Which branches send what, and what each group offers; a still-valid courier
+    // quote is reused, not re-asked. Plain reads: nothing is locked here.
     let mut plans: Vec<StorePlan> = Vec::with_capacity(carts.len());
-    for (store_id, cart) in carts {
-        let profile = match delivery_profile(&state.db, &state.cipher, store_id).await {
-            Ok(p) => p,
-            // Deleted since the cart was read: nothing to offer, checkout refuses it.
-            Err(AppError::NotFound) => continue,
-            Err(e) => return Err(e),
-        };
-        let fingerprint = cart_fingerprint(&cart.lines);
-        let mut new = Vec::new();
-        let mut own = None;
-        if profile.self_delivery
-            && let Some(fee) = profile.self_fee_kobo
-        {
-            own = reusable_self(&state.db, buyer, store_id, address.id, &fingerprint, fee).await?;
-            if own.is_none() {
-                new.push(NewOption {
-                    method: DeliveryMethod::SelfDelivery,
-                    fee_kobo: fee,
-                    rate: None,
-                });
+    let mut wanted_plans = Vec::with_capacity(carts.len());
+    {
+        let mut conn = state.db.acquire().await.context("acquire")?;
+        for (store_id, cart) in carts {
+            let variants: Vec<Uuid> = cart.lines.iter().map(|l| l.variant_id).collect();
+            let candidates = load_candidates(&mut conn, store_id, &variants).await?;
+            let allocation = allocate(&cart.lines, &candidates, address.area_council);
+            let full_fill = !allocation.full_fill.is_empty();
+            let wanted: Vec<(Uuid, Vec<Line>)> = if full_fill {
+                allocation
+                    .full_fill
+                    .iter()
+                    .map(|b| (*b, cart.lines.clone()))
+                    .collect()
+            } else {
+                allocation
+                    .groups
+                    .into_iter()
+                    .map(|g| (g.branch_id, g.lines))
+                    .collect()
+            };
+            let mut profiles = Vec::with_capacity(wanted.len());
+            for (branch, lines) in wanted.into_iter().take(MAX_GROUPS) {
+                match branch_delivery_on(&mut conn, &state.cipher, branch).await {
+                    Ok(p) => profiles.push((p, lines)),
+                    // Closed (or the store deleted) since the stock was read.
+                    Err(AppError::NotFound) => continue,
+                    Err(e) => return Err(e),
+                }
             }
+            let unavailable = allocation
+                .unavailable
+                .iter()
+                .map(|l| UnavailableLine {
+                    variant_id: l.variant_id,
+                    wanted: l.quantity,
+                    available: candidates
+                        .iter()
+                        .filter_map(|c| c.available.get(&l.variant_id).copied())
+                        .max()
+                        .unwrap_or(0),
+                })
+                .collect();
+            wanted_plans.push((store_id, cart, full_fill, profiles, unavailable));
         }
-        let courier = state.courier.is_some() && courier_offered(&profile);
-        let mut reused = Vec::new();
-        if courier && let Some(sender) = profile.pickup_courier_address_code {
-            reused = reusable_courier(&state.db, buyer, store_id, address.id, &fingerprint, sender)
-                .await?;
+    }
+    // Planning reads on the pool, so the connection above is released first (a pool
+    // of one must still answer).
+    for (store_id, cart, full_fill, profiles, unavailable) in wanted_plans {
+        let mut groups = Vec::with_capacity(profiles.len());
+        for (profile, lines) in profiles {
+            groups.push(plan_group(state, buyer, store_id, address.id, profile, lines).await?);
         }
-        let needs_quote = courier && reused.is_empty();
-        reused.extend(own);
         plans.push(StorePlan {
-            needs_quote,
             store_id,
             cart,
-            fingerprint,
-            profile,
-            new,
-            reused,
+            full_fill,
+            groups,
+            unavailable,
         });
     }
-    let quotes = plans.iter().filter(|p| p.needs_quote).count();
+    let quotes = plans
+        .iter()
+        .flat_map(|p| &p.groups)
+        .filter(|g| g.needs_quote)
+        .count();
     if quotes > 0 && recent_quotes(&state.db, buyer).await? >= MAX_QUOTES_PER_HOUR {
         return Err(AppError::TooManyRequests("too_many_attempts"));
     }
 
-    // Provider calls, with no transaction open.
+    // Provider calls, with no transaction open: at most three per store.
     let mut receiver = match address.courier_address_code {
         Some(code) => ReceiverCode::Known(code),
         None => ReceiverCode::Unknown,
     };
-    let mut store_codes: Vec<(Uuid, i64, ContactAddress)> = Vec::new();
+    let mut branch_codes: Vec<(Uuid, i64, ContactAddress)> = Vec::new();
     if let Some(provider) = &state.courier {
-        for plan in plans.iter_mut().filter(|p| p.needs_quote) {
-            let Some(quote) = quote_courier(
-                provider.as_ref(),
-                &plan.cart.name,
-                &plan.profile,
-                &address,
-                &mut receiver,
-                &plan.cart.items,
-                settings.courier_category_id,
-                pickup,
-            )
-            .await
-            else {
-                continue;
-            };
-            if let Some((code, sent)) = quote.new_store_code {
-                store_codes.push((plan.store_id, code, sent));
-            }
-            for rate in quote.rates {
-                plan.new.push(NewOption {
-                    method: DeliveryMethod::Courier,
-                    // Ruling T6f: the buyer pays what the courier will charge.
-                    fee_kobo: rate.charged_kobo,
-                    rate: Some((quote.request_token.clone(), rate, quote.sender_code)),
-                });
+        for plan in &mut plans {
+            for group in plan.groups.iter_mut().filter(|g| g.needs_quote) {
+                let items = plan.cart.items(&group.lines);
+                let Some(quote) = quote_courier(
+                    provider.as_ref(),
+                    &plan.cart.name,
+                    &group.profile,
+                    &address,
+                    &mut receiver,
+                    &items,
+                    settings.courier_category_id,
+                    pickup,
+                )
+                .await
+                else {
+                    continue;
+                };
+                if let Some((code, sent)) = quote.new_branch_code {
+                    branch_codes.push((group.profile.branch_id, code, sent));
+                }
+                for rate in quote.rates {
+                    group.new.push(NewOption {
+                        method: DeliveryMethod::Courier,
+                        // Ruling T6f: the buyer pays what the courier will charge.
+                        fee_kobo: rate.charged_kobo,
+                        rate: Some((quote.request_token.clone(), rate, quote.sender_code)),
+                    });
+                }
             }
         }
     }
@@ -659,9 +809,9 @@ pub async fn options_for(
     {
         tracing::warn!(error = %e, "could not cache the buyer's courier address code");
     }
-    for (store_id, code, sent) in &store_codes {
-        if let Err(e) = cache_store_code(state, *store_id, *code, sent).await {
-            tracing::warn!(error = %e, "could not cache the store's courier address code");
+    for (branch_id, code, sent) in &branch_codes {
+        if let Err(e) = cache_branch_code(state, *branch_id, *code, sent).await {
+            tracing::warn!(error = %e, "could not cache the branch's courier address code");
         }
     }
 
@@ -676,62 +826,115 @@ pub async fn options_for(
     .execute(&mut *tx)
     .await
     .context("prune delivery options")?;
-    let mut stores = Vec::with_capacity(plans.len());
-    let mut offered = 0usize;
-    for plan in plans {
-        let mut views = Vec::with_capacity(plan.new.len() + plan.reused.len());
-        for o in plan.new {
-            let (token, rate, sender) = match &o.rate {
-                Some((token, rate, sender)) => (Some(token.as_str()), Some(rate), Some(*sender)),
-                None => (None, None, None),
-            };
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO delivery_options \
-                 (buyer_id, store_id, address_id, method, fee_kobo, cart_fingerprint, \
-                  courier_id, service_code, request_token, courier_name, delivery_eta, \
-                  charged_kobo, courier_sender_code, promised_date, expires_at, branch_id) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                         now() + make_interval(mins => $15), \
-                         (SELECT id FROM store_branches WHERE store_id = $2 AND position = 0)) \
-                 RETURNING id",
-            )
-            .bind(buyer)
-            .bind(plan.store_id)
-            .bind(address.id)
-            .bind(o.method)
-            .bind(o.fee_kobo)
-            .bind(&plan.fingerprint)
-            .bind(rate.map(|r| r.courier_id.as_str()))
-            .bind(rate.map(|r| r.service_code.as_str()))
-            .bind(token)
-            .bind(rate.map(|r| r.courier_name.as_str()))
-            .bind(rate.and_then(|r| r.delivery_eta.as_deref()))
-            .bind(rate.map(|r| r.charged_kobo))
-            .bind(sender)
-            .bind(promised)
-            .bind(settings.courier_quote_ttl_minutes)
-            .fetch_one(&mut *tx)
-            .await
-            .context("insert delivery option")?;
-            views.push(OptionView {
-                id,
-                method: o.method,
-                fee_kobo: o.fee_kobo,
-                courier_name: rate.map(|r| r.courier_name.clone()),
-                delivery_eta: rate.and_then(|r| r.delivery_eta.clone()),
-                promised_date: promised.to_string(),
-            });
+    // Every group's options are stored, a full-fill loser's too, so a repeat call
+    // reuses them instead of asking the courier again.
+    for plan in &mut plans {
+        for group in &mut plan.groups {
+            let pairs: Vec<(Uuid, i32)> = group
+                .lines
+                .iter()
+                .map(|l| (l.variant_id, l.quantity))
+                .collect();
+            let lines_fingerprint = cart_fingerprint(&pairs);
+            let variant_ids: Vec<Uuid> = group.lines.iter().map(|l| l.variant_id).collect();
+            for o in std::mem::take(&mut group.new) {
+                let (token, rate, sender) = match &o.rate {
+                    Some((token, rate, sender)) => {
+                        (Some(token.as_str()), Some(rate), Some(*sender))
+                    }
+                    None => (None, None, None),
+                };
+                let id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO delivery_options \
+                     (buyer_id, store_id, address_id, method, fee_kobo, cart_fingerprint, \
+                      courier_id, service_code, request_token, courier_name, delivery_eta, \
+                      charged_kobo, courier_sender_code, promised_date, expires_at, branch_id, \
+                      group_fingerprint, group_variant_ids) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
+                             now() + make_interval(mins => $15), $16, $17, $18) \
+                     RETURNING id",
+                )
+                .bind(buyer)
+                .bind(plan.store_id)
+                .bind(address.id)
+                .bind(o.method)
+                .bind(o.fee_kobo)
+                .bind(&lines_fingerprint)
+                .bind(rate.map(|r| r.courier_id.as_str()))
+                .bind(rate.map(|r| r.service_code.as_str()))
+                .bind(token)
+                .bind(rate.map(|r| r.courier_name.as_str()))
+                .bind(rate.and_then(|r| r.delivery_eta.as_deref()))
+                .bind(rate.map(|r| r.charged_kobo))
+                .bind(sender)
+                .bind(promised)
+                .bind(settings.courier_quote_ttl_minutes)
+                .bind(group.profile.branch_id)
+                .bind(&group.fingerprint)
+                .bind(&variant_ids)
+                .fetch_one(&mut *tx)
+                .await
+                .context("insert delivery option")?;
+                group.views.push(OptionView {
+                    id,
+                    method: o.method,
+                    fee_kobo: o.fee_kobo,
+                    courier_name: rate.map(|r| r.courier_name.clone()),
+                    delivery_eta: rate.and_then(|r| r.delivery_eta.clone()),
+                    promised_date: promised.to_string(),
+                });
+            }
+            let reused = std::mem::take(&mut group.reused);
+            group.views.extend(reused);
         }
-        views.extend(plan.reused);
-        offered += views.len();
+    }
+
+    let mut stores = Vec::with_capacity(plans.len());
+    let (mut offered, mut groups_shown, mut without, mut lines_unavailable) = (0, 0, 0, 0);
+    for plan in plans {
+        let mut groups = plan.groups;
+        if plan.full_fill && groups.len() > 1 {
+            // The cheapest option wins, then the earliest date, then rank (the list
+            // order); a branch with nothing to offer loses to any that has.
+            let best = groups
+                .iter()
+                .enumerate()
+                .min_by_key(|&(rank, g)| (cheapest(g).is_none(), cheapest(g), rank))
+                .map_or(0, |(rank, _)| rank);
+            groups = vec![groups.swap_remove(best)];
+        }
+        let views: Vec<GroupView> = groups
+            .into_iter()
+            .map(|g| GroupView {
+                group_id: g.fingerprint,
+                branch: BranchRef {
+                    id: g.profile.branch_id,
+                    name: g.profile.branch_name.clone(),
+                    area_council: g.profile.pickup_area,
+                },
+                lines: g
+                    .lines
+                    .iter()
+                    .map(|l| LineView {
+                        variant_id: l.variant_id,
+                        quantity: l.quantity,
+                    })
+                    .collect(),
+                unavailable: g.views.is_empty().then_some(NO_DELIVERY_OPTION),
+                options: g.views,
+            })
+            .collect();
+        offered += views.iter().map(|g| g.options.len()).sum::<usize>();
+        groups_shown += views.len();
+        without += views.iter().filter(|g| g.unavailable.is_some()).count();
+        lines_unavailable += plan.unavailable.len();
         stores.push(StoreOptions {
             store_id: plan.store_id,
             store_name: plan.cart.name,
-            unavailable: views.is_empty().then_some(NO_DELIVERY_OPTION),
-            options: views,
+            groups: views,
+            unavailable: plan.unavailable,
         });
     }
-    let unavailable = stores.iter().filter(|s| s.unavailable.is_some()).count();
     audit::record(
         &mut tx,
         Some(buyer),
@@ -740,8 +943,10 @@ pub async fn options_for(
         Some(address.id),
         json!({
             "stores": stores.len(),
+            "groups": groups_shown,
             "options": offered,
-            "stores_unavailable": unavailable,
+            "groups_unavailable": without,
+            "lines_unavailable": lines_unavailable,
             "courier_quotes": quotes
         }),
     )
@@ -750,17 +955,17 @@ pub async fn options_for(
     Ok(OptionsResponse { stores })
 }
 
-/// Whether a store offers courier delivery: switched on, with the business phone
-/// (sender contact) and pickup area the courier needs (ruling T6d).
+/// Whether a branch offers courier delivery: switched on for the store, with the
+/// business phone (sender contact) and pickup area the courier needs (ruling T6d).
 fn courier_offered(profile: &StoreDelivery) -> bool {
     profile.courier && profile.business_phone.is_some() && profile.pickup_area.is_some()
 }
 
-/// One `{store_id, option_id}` of the checkout body.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// One `{group_id, option_id}` of the checkout body.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DeliveryChoice {
-    pub store_id: Uuid,
+pub struct GroupChoice {
+    pub group_id: String,
     pub option_id: Uuid,
 }
 
@@ -774,9 +979,19 @@ pub struct ChosenOption {
     pub service_code: Option<String>,
     pub request_token: Option<String>,
     pub charged_kobo: Option<i64>,
-    /// Courier only: the store address code the quote was made from.
+    /// Courier only: the branch address code the quote was made from.
     pub sender_code: Option<i64>,
     pub promised_date: Date,
+}
+
+/// A chosen group: the branch that sends these variants of the store, and how.
+#[derive(Debug, Clone)]
+pub struct ChosenGroup {
+    pub store_id: Uuid,
+    pub branch_id: Uuid,
+    /// In variant id order.
+    pub variant_ids: Vec<Uuid>,
+    pub option: ChosenOption,
 }
 
 #[derive(sqlx::FromRow)]
@@ -785,9 +1000,11 @@ struct OptionRow {
     buyer_id: Uuid,
     store_id: Uuid,
     address_id: Uuid,
+    branch_id: Uuid,
     method: DeliveryMethod,
     fee_kobo: i64,
-    cart_fingerprint: String,
+    group_fingerprint: Option<String>,
+    group_variant_ids: Option<Vec<Uuid>>,
     courier_id: Option<String>,
     service_code: Option<String>,
     request_token: Option<String>,
@@ -798,39 +1015,37 @@ struct OptionRow {
     used: bool,
 }
 
-fn option_invalid() -> AppError {
+pub(crate) fn option_invalid() -> AppError {
     AppError::Unprocessable(
         "delivery_option_invalid",
         "A delivery option is no longer valid; please choose delivery again".into(),
     )
 }
 
-/// Validates the checkout's choices against the cart (`store -> its lines`):
-/// exactly one live option per store, the buyer's own, quoted for this address
-/// and for these exact lines, and not used yet: an option is single-use (see
-/// [`USED`]). Unknown, foreign, expired, used, mismatched, duplicate or extra
-/// choices are 422 `delivery_option_invalid`; a store without a choice is 422
-/// `delivery_option_required`. Callers hold the buyer's users-row lock, which
-/// serialises this check against the buyer's other checkouts.
-pub async fn chosen_options(
+/// Validates each of the checkout's choices against the cart (`store -> its lines`):
+/// a live option, the buyer's own, quoted for this address and for a group whose
+/// lines are still exactly in the cart (its fingerprint is the `group_id`), and not
+/// used yet (see [`USED`]). No variant may be in two chosen groups. Unknown, foreign,
+/// expired, used, mismatched or overlapping choices are 422 `delivery_option_invalid`.
+/// Whether the groups cover the cart, and whether their branches still hold the
+/// stock, is for the caller to check under the stock locks. Callers hold the buyer's
+/// users-row lock, which serialises this check against the buyer's other checkouts.
+pub async fn chosen_groups(
     conn: &mut PgConnection,
     buyer: Uuid,
     address_id: Uuid,
-    choices: &[DeliveryChoice],
-    carts: &BTreeMap<Uuid, Vec<(Uuid, i32)>>,
-) -> Result<HashMap<Uuid, ChosenOption>, AppError> {
-    let mut seen = HashSet::new();
-    for c in choices {
-        if !carts.contains_key(&c.store_id) || !seen.insert(c.store_id) {
-            return Err(option_invalid());
-        }
+    choices: &[GroupChoice],
+    carts: &BTreeMap<Uuid, Vec<Line>>,
+) -> Result<Vec<ChosenGroup>, AppError> {
+    if choices.len() > carts.len() * MAX_GROUPS {
+        return Err(option_invalid());
     }
     let ids: Vec<Uuid> = choices.iter().map(|c| c.option_id).collect();
     let mut rows: HashMap<Uuid, OptionRow> = sqlx::query_as::<_, OptionRow>(&format!(
-        "SELECT d.id, d.buyer_id, d.store_id, d.address_id, d.method, d.fee_kobo, \
-                d.cart_fingerprint, d.courier_id, d.service_code, d.request_token, \
-                d.charged_kobo, d.courier_sender_code, d.promised_date, \
-                d.expires_at > now() AS live, {USED} AS used \
+        "SELECT d.id, d.buyer_id, d.store_id, d.address_id, d.branch_id, d.method, \
+                d.fee_kobo, d.group_fingerprint, d.group_variant_ids, d.courier_id, \
+                d.service_code, d.request_token, d.charged_kobo, d.courier_sender_code, \
+                d.promised_date, d.expires_at > now() AS live, {USED} AS used \
          FROM delivery_options d WHERE d.id = ANY($1)"
     ))
     .bind(&ids)
@@ -840,22 +1055,35 @@ pub async fn chosen_options(
     .into_iter()
     .map(|r| (r.id, r))
     .collect();
-    let mut chosen = HashMap::with_capacity(choices.len());
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut chosen = Vec::with_capacity(choices.len());
     for c in choices {
         let row = rows.remove(&c.option_id).ok_or_else(option_invalid)?;
-        let lines = &carts[&c.store_id];
+        let lines = carts.get(&row.store_id).ok_or_else(option_invalid)?;
+        let mut variant_ids = row.group_variant_ids.clone().unwrap_or_default();
+        variant_ids.sort_unstable();
+        let group_lines: Vec<Line> = lines
+            .iter()
+            .filter(|l| variant_ids.binary_search(&l.variant_id).is_ok())
+            .cloned()
+            .collect();
         let valid = row.buyer_id == buyer
-            && row.store_id == c.store_id
             && row.address_id == address_id
             && row.live
             && !row.used
-            && row.cart_fingerprint == cart_fingerprint(lines);
+            && row.group_fingerprint.as_deref() == Some(c.group_id.as_str())
+            && !variant_ids.is_empty()
+            && group_lines.len() == variant_ids.len()
+            && group_fingerprint(row.branch_id, &group_lines) == c.group_id
+            && variant_ids.iter().all(|v| seen.insert(*v));
         if !valid {
             return Err(option_invalid());
         }
-        chosen.insert(
-            c.store_id,
-            ChosenOption {
+        chosen.push(ChosenGroup {
+            store_id: row.store_id,
+            branch_id: row.branch_id,
+            variant_ids,
+            option: ChosenOption {
                 id: row.id,
                 method: row.method,
                 fee_kobo: row.fee_kobo,
@@ -866,34 +1094,29 @@ pub async fn chosen_options(
                 sender_code: row.courier_sender_code,
                 promised_date: row.promised_date,
             },
-        );
-    }
-    if carts.keys().any(|store| !chosen.contains_key(store)) {
-        return Err(AppError::Unprocessable(
-            "delivery_option_required",
-            "Choose a delivery option for every store".into(),
-        ));
+        });
     }
     Ok(chosen)
 }
 
-/// Re-checks, at checkout, that every chosen store still offers the chosen
-/// method (a seller may have switched it off since the quote), and that a
-/// courier quote was made from the store's current pickup address code (a moved
-/// pickup resets it). Otherwise 422 `delivery_option_invalid`. No network call.
-/// Reads on the checkout's own connection: the transaction holds locks, so it
+/// Re-checks, at checkout, that every chosen group's store still offers the chosen
+/// method from its branch (a seller may have switched it off since the quote), and
+/// that a courier quote was made from the branch's current pickup address code (a
+/// moved pickup resets it). Otherwise 422 `delivery_option_invalid`. No network
+/// call. Reads on the checkout's own connection: the transaction holds locks, so it
 /// must not wait for a second pooled connection.
 pub async fn still_offered(
     state: &AppState,
     conn: &mut PgConnection,
-    chosen: &HashMap<Uuid, ChosenOption>,
+    chosen: &[ChosenGroup],
 ) -> Result<(), AppError> {
-    for (store_id, option) in chosen {
-        let profile = match delivery_profile_on(&mut *conn, &state.cipher, *store_id).await {
+    for group in chosen {
+        let profile = match branch_delivery_on(&mut *conn, &state.cipher, group.branch_id).await {
             Ok(p) => p,
             Err(AppError::NotFound) => return Err(option_invalid()),
             Err(e) => return Err(e),
         };
+        let option = &group.option;
         let offered = match option.method {
             DeliveryMethod::SelfDelivery => {
                 profile.self_delivery && profile.self_fee_kobo.is_some()
