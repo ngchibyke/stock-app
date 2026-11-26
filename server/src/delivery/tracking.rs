@@ -58,6 +58,15 @@ const STEPS: [(&str, &str); 6] = [
     ("confirmed", "Confirmed"),
 ];
 
+/// A collect order's timeline: no courier steps; "delivered" is the handover at
+/// the counter.
+const COLLECT_STEPS: [(&str, &str); 4] = [
+    ("paid", "Paid"),
+    ("ready", "Ready to collect"),
+    ("collected", "Collected"),
+    ("confirmed", "Confirmed"),
+];
+
 #[derive(Debug, Serialize)]
 pub struct Step {
     pub key: &'static str,
@@ -302,6 +311,9 @@ fn shown_status(status: &str, who: Viewer) -> String {
 }
 
 fn steps(f: &Facts) -> Vec<Step> {
+    if f.is_collect() {
+        return collect_steps(f);
+    }
     let current = match f.status.as_str() {
         "paid" => Some("preparing"),
         "picked_up" => Some("picked_up"),
@@ -317,8 +329,8 @@ fn steps(f: &Facts) -> Vec<Step> {
             label,
             at: match key {
                 "paid" => f.paid_at,
-                // Courier and collect orders have a ready step; a self order is never "ready".
-                "preparing" if f.is_courier() || f.is_collect() => f.ready_at,
+                // Courier orders have a ready step; a self order is never "ready".
+                "preparing" if f.is_courier() => f.ready_at,
                 "preparing" => None,
                 "picked_up" => f.picked_up_at,
                 "out_for_delivery" => f.out_for_delivery_at,
@@ -330,9 +342,37 @@ fn steps(f: &Facts) -> Vec<Step> {
         .collect()
 }
 
+fn collect_steps(f: &Facts) -> Vec<Step> {
+    let current = match f.status.as_str() {
+        "paid" if f.ready_at.is_some() => Some("ready"),
+        "paid" => Some("paid"),
+        "delivered" => Some("collected"),
+        "completed" => Some("confirmed"),
+        _ => None,
+    };
+    COLLECT_STEPS
+        .iter()
+        .map(|&(key, label)| Step {
+            key,
+            label,
+            at: match key {
+                "paid" => f.paid_at,
+                "ready" => f.ready_at,
+                "collected" => f.delivered_at,
+                _ => f.completed_at,
+            },
+            current: current == Some(key),
+        })
+        .collect()
+}
+
 /// Derived, never stored: today (Africa/Lagos) is past the promised date and
-/// the order is not delivered or later. Changes no state.
+/// the order is not delivered or later. Changes no state. A collect order the
+/// branch has made ready is waiting for the buyer, so it is never late.
 fn delay_note(f: &Facts, now: OffsetDateTime) -> Option<String> {
+    if f.is_collect() && f.ready_at.is_some() {
+        return None;
+    }
     let promised = f.promised_date?;
     let open = matches!(f.status.as_str(), "paid" | "picked_up" | "out_for_delivery");
     (open && promise::lagos_date(now) > promised)

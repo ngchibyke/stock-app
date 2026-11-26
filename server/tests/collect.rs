@@ -744,3 +744,77 @@ async fn late_collection_races_expiry_one_wins(pool: PgPool) {
         }
     }
 }
+
+/// A collect order late to be made ready is late; once ready, the buyer's own wait
+/// is never called the seller's delay.
+#[sqlx::test]
+async fn no_delay_note_once_ready_for_collection(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let fx = paid_collect(&app, 9).await;
+    sqlx::query(
+        "UPDATE orders SET promised_date = (now() AT TIME ZONE 'Africa/Lagos')::date - 2 \
+         WHERE id = $1",
+    )
+    .bind(fx.order_id)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    // Not ready by the ready date: the branch is late.
+    let t = tracking(&app, fx.order_id, &fx.buyer).await;
+    assert!(t.json["delay_note"].is_string(), "{}", t.json);
+
+    ready_since(&app, &fx, "1 day").await;
+    for token in [&fx.buyer, &fx.listing.seller_token] {
+        let t = tracking(&app, fx.order_id, token).await;
+        assert_eq!(t.status, 200, "{}", t.json);
+        assert!(t.json.get("delay_note").is_none(), "{}", t.json);
+    }
+}
+
+fn step_keys(json: &Value) -> Vec<&str> {
+    json["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect()
+}
+
+fn current_step(json: &Value) -> Option<&str> {
+    json["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["current"] == true)
+        .map(|s| s["key"].as_str().unwrap())
+}
+
+/// A collect order's timeline has no courier steps: paid, ready, collected.
+#[sqlx::test]
+async fn collect_timeline_has_its_own_steps(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let fx = paid_collect(&app, 10).await;
+    let t = tracking(&app, fx.order_id, &fx.buyer).await;
+    assert_eq!(t.status, 200, "{}", t.json);
+    assert_eq!(
+        step_keys(&t.json),
+        vec!["paid", "ready", "collected", "confirmed"],
+        "{}",
+        t.json
+    );
+    assert_eq!(current_step(&t.json), Some("paid"), "{}", t.json);
+    let first = &t.json["steps"][0];
+    assert!(first["at"].is_string() && first["label"].is_string());
+
+    let seller = &fx.listing.seller_token;
+    assert_eq!(step(&app, fx.order_id, "ready", seller).await.status, 200);
+    let t = tracking(&app, fx.order_id, &fx.buyer).await;
+    assert_eq!(current_step(&t.json), Some("ready"), "{}", t.json);
+    assert!(t.json["steps"][1]["at"].is_string(), "{}", t.json);
+
+    let code = code_of(&app, fx.order_id).await;
+    assert_eq!(deliver(&app, fx.order_id, &code, seller).await.status, 200);
+    let t = tracking(&app, fx.order_id, &fx.buyer).await;
+    assert_eq!(current_step(&t.json), Some("collected"), "{}", t.json);
+    assert!(t.json["steps"][2]["at"].is_string(), "{}", t.json);
+}
