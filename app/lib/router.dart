@@ -28,6 +28,7 @@ import 'features/list/list_page.dart';
 import 'features/list/store_page.dart';
 import 'features/market/market_page.dart';
 import 'features/product/product_page.dart';
+import 'features/sell/sell_shell.dart';
 
 const String splashPath = '/splash';
 const String blockedPath = '/blocked';
@@ -54,6 +55,7 @@ const List<String> _signedInPrefixes = [
   accountPath,
   addressesPath,
   cartPath,
+  sellPath,
 ];
 
 bool _isUnder(String path, String prefix) =>
@@ -323,6 +325,10 @@ GoRouter buildRouter(
         builder: (context, state) => const AddressFormPage(),
       ),
       GoRoute(path: cartPath, builder: (context, state) => const CartPage()),
+      GoRoute(
+        path: sellPath,
+        builder: (context, state) => const SellEntryPage(),
+      ),
       ...extraRoutes,
     ],
   );

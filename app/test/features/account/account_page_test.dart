@@ -12,6 +12,10 @@ import 'package:market/core/strings.dart';
 import 'package:market/core/theme/theme.dart';
 import 'package:market/core/ui/states.dart';
 import 'package:market/features/account/account_page.dart';
+import 'package:market/features/sell/sell_repository.dart';
+
+import '../../support/fake_sell.dart';
+
 import 'package:market/features/auth/auth_repository.dart';
 import 'package:market/features/auth/pending_credential.dart';
 import 'package:market/features/auth/pending_reset.dart';
@@ -90,6 +94,7 @@ Future<void> _pumpPage(
         sessionProvider.overrideWith(() => _ScriptedSession(script)),
         appConfigProvider.overrideWith(() => FakeConfigNotifier()),
         packageVersionProvider.overrideWith((ref) async => '1.0.0'),
+        sellRepositoryProvider.overrideWithValue(FakeSellRepository()),
       ],
       child: MaterialApp(
         theme: lightTheme(),
