@@ -5,7 +5,7 @@
     <!-- Rough location only, for the "coming soon to your location" hint. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <application
-        android:label="market"
+        android:label="Market"
         android:allowBackup="false"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
