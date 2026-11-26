@@ -12,6 +12,7 @@ use common::{Listing, TestApp, TestResponse};
 use serde_json::{Value, json};
 use server::{
     checkout::{SettleOutcome, settle_payment},
+    disputes::decide::{Decision, decide},
     escrow::{
         ReleaseReason, SettlePayoutOutcome, refund::refund_order, release_by_owner, release_order,
         settle_payout,
@@ -25,16 +26,19 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 const METHOD: &str = "mono_directpay";
-const OWNER: &str = "08071300001";
-const BUYER: &str = "08072300001";
 const STAFF: &str = "08073300001";
+const COMPLAINT: &str = "The zip was torn and the lining was stained when it arrived";
+const REPLY: &str = "It left the shop in perfect condition and was packed in a box";
+const NOTE: &str = "Photos confirm the damage";
 
 /// A paid checkout of one store split across two branches, its payment old
-/// enough for payouts to go at once. `a` is the small order (first branch, under the stamp-duty threshold), `b` the Garki one (over it).
+/// enough for payouts to go at once. `a` is the small order (first branch,
+/// under the stamp-duty threshold), `b` the Garki one (over it).
 struct Split {
     a: Uuid,
     b: Uuid,
     seller_token: String,
+    buyer_token: String,
 }
 
 async fn add_branch(app: &TestApp, l: &Listing, name: &str, fee: i64) -> Uuid {
@@ -90,7 +94,12 @@ async fn pay(app: &TestApp, res: &TestResponse) {
 
 /// [`paid_split`] with both orders picked up.
 async fn split(app: &TestApp) -> Split {
-    let s = paid_split(app).await;
+    split_n(app, 1).await
+}
+
+/// [`split`] by the `n`th seller and buyer (1..=9), for several in one test.
+async fn split_n(app: &TestApp, n: u8) -> Split {
+    let s = paid_split_n(app, n).await;
     for id in [s.a, s.b] {
         mark_picked_up(&app.pool, id, OffsetDateTime::now_utc())
             .await
@@ -100,8 +109,17 @@ async fn split(app: &TestApp) -> Split {
 }
 
 async fn paid_split(app: &TestApp) -> Split {
+    paid_split_n(app, 1).await
+}
+
+async fn paid_split_n(app: &TestApp, n: u8) -> Split {
     let l = app
-        .make_active_store_with_product(OWNER, "Split Shop", 10_000, 5)
+        .make_active_store_with_product(
+            &format!("0807130000{n}"),
+            &format!("Split Shop {n}"),
+            10_000,
+            5,
+        )
         .await;
     let product = app
         // Two of these put the Garki order over the stamp-duty threshold;
@@ -120,7 +138,7 @@ async fn paid_split(app: &TestApp) -> Split {
         .await;
     assert_eq!(res.status, 200, "{}", res.json);
 
-    let (_, buyer) = app.sign_up_verified(BUYER).await;
+    let (_, buyer) = app.sign_up_verified(&format!("0807230000{n}")).await;
     assert_eq!(app.set_cart(&buyer, l.variant_id, 1).await.status, 200);
     assert_eq!(app.set_cart(&buyer, other, 2).await.status, 200);
     let address = app.buyer_address(&buyer).await;
@@ -150,6 +168,26 @@ async fn paid_split(app: &TestApp) -> Split {
         a: ids[0],
         b: ids[1],
         seller_token: l.seller_token.clone(),
+        buyer_token: buyer,
+    }
+}
+
+/// The fee schedule snapshotted on the order.
+async fn schedule_of(app: &TestApp, order: Uuid) -> FeeSchedule {
+    let (small_fee, large_fee, threshold, stamp_duty_kobo, stamp_duty_threshold) = sqlx::query_as(
+        "SELECT fee_small_kobo, fee_large_kobo, fee_threshold_kobo, \
+                    stamp_duty_kobo, stamp_duty_threshold_kobo FROM orders WHERE id = $1",
+    )
+    .bind(order)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    FeeSchedule {
+        small_fee,
+        large_fee,
+        threshold,
+        stamp_duty_kobo,
+        stamp_duty_threshold,
     }
 }
 
@@ -406,5 +444,143 @@ async fn owner_and_buyer_releasing_siblings_at_once_charge_one_fee(pool: PgPool)
     a.unwrap();
     b.unwrap();
     assert_one_fee(&app, &s).await;
+    assert_ledger_balances(&app).await;
+}
+
+// ------------------------------------------------- dispute decisions
+
+/// The buyer disputes `order` and the seller answers: `awaiting_decision`
+/// (the order is held). Returns the dispute id.
+async fn answered_dispute(app: &TestApp, s: &Split, order: Uuid) -> Uuid {
+    let evidence = app.ready_photo_for(&s.buyer_token, "dispute").await;
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/orders/{order}/dispute"),
+            Some(json!({ "reason": "damaged", "body": COMPLAINT, "photo_keys": [evidence] })),
+            Some(&s.buyer_token),
+        )
+        .await;
+    assert_eq!(res.status, 201, "{}", res.json);
+    let id: Uuid = res.json["id"].as_str().unwrap().parse().unwrap();
+    let res = app
+        .request(
+            Method::POST,
+            &format!("/disputes/{id}/response"),
+            Some(json!({ "body": REPLY, "photo_keys": [] })),
+            Some(&s.seller_token),
+        )
+        .await;
+    assert_eq!(res.status, 200, "{}", res.json);
+    id
+}
+
+/// The platform owner's id (created if the fixture has not made it yet).
+async fn owner(app: &TestApp) -> Uuid {
+    app.owner_token().await;
+    sqlx::query_scalar("SELECT id FROM users WHERE role = 'owner'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn dispute_release_after_sibling_pays_only_stamp_duty(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let actor = owner(&app).await;
+    let s = split(&app).await;
+    let (before_a, fee_a, _) = before_and_fee(&app, s.a).await;
+    let (before_b, _, duty_b) = before_and_fee(&app, s.b).await;
+    assert!(duty_b > 0);
+    let dispute = answered_dispute(&app, &s, s.b).await;
+    release(&app, s.a).await;
+    decide(&app.state, actor, dispute, Decision::Release, NOTE)
+        .await
+        .unwrap();
+    assert_eq!(payout_of(&app, s.a).await.0, before_a - fee_a);
+    assert_eq!(payout_of(&app, s.a).await.1, fee_a);
+    let (amount_b, charged_b, _) = payout_of(&app, s.b).await;
+    assert_eq!(charged_b, duty_b);
+    assert_eq!(amount_b, before_b - duty_b);
+    assert_eq!(total_fees_charged(&app).await, fee_a + duty_b);
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_ledger_balances(&app).await;
+}
+
+#[sqlx::test]
+async fn dispute_partial_refund_after_sibling_pays_stamp_duty_on_kept_items(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let actor = owner(&app).await;
+    let s = split(&app).await;
+    let (_, fee_a, _) = before_and_fee(&app, s.a).await;
+    let dispute = answered_dispute(&app, &s, s.b).await;
+    release(&app, s.a).await;
+    // 1,200,000 of items, 100,000 back: the kept part stays over the duty
+    // threshold.
+    let refund = 100_000;
+    decide(
+        &app.state,
+        actor,
+        dispute,
+        Decision::PartialRefund(refund),
+        NOTE,
+    )
+    .await
+    .unwrap();
+    // The order's cut is now the cut on the kept items; its items total is
+    // unchanged, so the kept payout before fee is the formula less the refund.
+    let (before_full, _, _) = before_and_fee(&app, s.b).await;
+    let kept = before_full - refund;
+    let duty = money::stamp_duty_kobo(kept, &schedule_of(&app, s.b).await);
+    assert!(duty > 0, "{kept}");
+    let (amount_b, charged_b, _) = payout_of(&app, s.b).await;
+    assert_eq!(charged_b, duty);
+    assert_eq!(amount_b, kept - duty);
+    assert_eq!(total_fees_charged(&app).await, fee_a + duty);
+    assert_eq!(balance(&app, "escrow").await, 0);
+    assert_ledger_balances(&app).await;
+}
+
+#[sqlx::test]
+async fn dispute_release_first_pays_the_fee_and_sibling_pays_none(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let actor = owner(&app).await;
+    let s = split(&app).await;
+    let (before_a, _, duty_a) = before_and_fee(&app, s.a).await;
+    let (before_b, fee_b, _) = before_and_fee(&app, s.b).await;
+    let dispute = answered_dispute(&app, &s, s.b).await;
+    decide(&app.state, actor, dispute, Decision::Release, NOTE)
+        .await
+        .unwrap();
+    assert_eq!(payout_of(&app, s.b).await.0, before_b - fee_b);
+    assert_eq!(payout_of(&app, s.b).await.1, fee_b);
+    release(&app, s.a).await;
+    assert_eq!(duty_a, 0);
+    assert_eq!(payout_of(&app, s.a).await.0, before_a);
+    assert_eq!(payout_of(&app, s.a).await.1, 0);
+    assert_eq!(total_fees_charged(&app).await, fee_b);
+    assert_ledger_balances(&app).await;
+}
+
+/// A dispute decision on one order racing a buyer's release of its sibling:
+/// both take the sibling locks first, so neither deadlocks and exactly one
+/// pays the fee. Three rounds, each its own checkout.
+#[sqlx::test]
+async fn dispute_decision_racing_sibling_release_charges_one_fee(pool: PgPool) {
+    let app = TestApp::new(pool).await;
+    let actor = owner(&app).await;
+    for n in 1..=3u8 {
+        let s = split_n(&app, n).await;
+        let dispute = answered_dispute(&app, &s, s.b).await;
+        let (released, decided) = tokio::join!(
+            release_order(&app.state, s.a, ReleaseReason::BuyerConfirmed),
+            decide(&app.state, actor, dispute, Decision::Release, NOTE),
+        );
+        released.unwrap();
+        decided.unwrap();
+        assert_one_fee(&app, &s).await;
+    }
+    assert_eq!(scalar(&app, "SELECT count(*) FROM payouts").await, 6);
+    assert_eq!(balance(&app, "escrow").await, 0);
     assert_ledger_balances(&app).await;
 }
