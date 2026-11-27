@@ -83,7 +83,10 @@ async fn main() -> anyhow::Result<()> {
     // Before connecting or migrating: a production server with no payment
     // provider would fail every checkout. Admin commands still run.
     if matches!(command, Command::Serve) {
-        require_payment_provider(&config.app_env, config.mono.is_some())?;
+        require_payment_provider(
+            &config.app_env,
+            config.mono.is_some() || config.paystack.is_some(),
+        )?;
         require_moderation(&config.app_env, config.claude.is_some())?;
         require_push(&config.app_env, config.fcm.is_some())?;
         require_uploads(&config.app_env, config.s3.is_some())?;
@@ -110,7 +113,18 @@ async fn main() -> anyhow::Result<()> {
             providers.register(Arc::new(MonoProvider::new(mono_cfg)?));
             tracing::info!(live, "mono payment provider registered");
         }
-        None => tracing::warn!("MONO_SECRET_KEY not set: no payment provider is configured"),
+        None => tracing::warn!("MONO_SECRET_KEY not set: Mono is not configured"),
+    }
+
+    match config.paystack.clone() {
+        Some(ps_cfg) => {
+            let live = ps_cfg.live;
+            providers.register(Arc::new(server::payments::paystack::PaystackProvider::new(
+                ps_cfg,
+            )?));
+            tracing::info!(live, "paystack payment provider registered");
+        }
+        None => tracing::warn!("PAYSTACK_SECRET_KEY not set: Paystack is not configured"),
     }
 
     let courier: Option<Arc<dyn server::couriers::CourierProvider>> =
@@ -309,9 +323,11 @@ async fn shutdown_signal() {
 
 /// Production refuses to start without a payment provider: every checkout
 /// would fail and webhooks would 404.
-fn require_payment_provider(app_env: &str, mono_configured: bool) -> anyhow::Result<()> {
-    if app_env == "production" && !mono_configured {
-        bail!("APP_ENV is production but no payment provider is configured (set MONO_SECRET_KEY)");
+fn require_payment_provider(app_env: &str, configured: bool) -> anyhow::Result<()> {
+    if app_env == "production" && !configured {
+        bail!(
+            "APP_ENV is production but no payment provider is configured (set MONO_SECRET_KEY or PAYSTACK_SECRET_KEY)"
+        );
     }
     Ok(())
 }
@@ -436,6 +452,7 @@ mod tests {
     fn production_requires_a_payment_provider() {
         let err = require_payment_provider("production", false).unwrap_err();
         assert!(err.to_string().contains("MONO_SECRET_KEY"), "{err}");
+        assert!(err.to_string().contains("PAYSTACK_SECRET_KEY"), "{err}");
         assert!(require_payment_provider("production", true).is_ok());
         for env in ["development", "test", "staging"] {
             assert!(require_payment_provider(env, false).is_ok(), "{env}");

@@ -192,6 +192,13 @@ impl TestApp {
     }
 
     /// Replaces what `GET /app/config` answers.
+    /// Replaces the payment providers (for example with one that talks to a local mock) and
+    /// rebuilds the router around them.
+    pub fn use_providers(&mut self, providers: server::payments::ProviderRegistry) {
+        self.state.providers = Arc::new(providers);
+        self.router = build_app(self.state.clone());
+    }
+
     pub fn use_app_config(&mut self, config: server::app_config::AppClientConfig) {
         self.state.app_config = Arc::new(config);
         self.router = build_app(self.state.clone());

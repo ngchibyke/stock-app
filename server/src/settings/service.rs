@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{audit, error::AppError, limits, money::FeeSchedule, payments::ProviderRegistry};
 
 /// Payout providers the owner may select.
-const KNOWN_PAYOUT_PROVIDERS: &[&str] = &["mono"];
+const KNOWN_PAYOUT_PROVIDERS: &[&str] = &["mono", "paystack"];
 /// `ship_deadline_enforce_from` may not lie further ahead than this.
 const MAX_ENFORCE_FROM_AHEAD_DAYS: i64 = 30;
 
