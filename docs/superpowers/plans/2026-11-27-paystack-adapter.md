@@ -38,3 +38,9 @@ Request and response bodies never logged; the secret key in `Secret`; https only
 ## Not in scope
 
 A Paystack statement source for reconciliation (the endpoint is not confirmed), refund webhooks, split payments, and subscriptions.
+
+## Status
+
+Built on `feat/paystack`: `server/src/payments/paystack.rs`, its config and registration (`PAYSTACK_SECRET_KEY`, `PAYSTACK_BASE_URL`, `PAYSTACK_PAYER_EMAIL_DOMAIN`; production accepts Mono or Paystack), `paystack_checkout` in `ALL_METHODS`, `paystack` among the payout providers, `server/tests/paystack_adapter.rs` (19 tests against a mock), `server/tests/paystack_flow.rs` (3 tests through the real routes: a checkout, a signed webhook that settles it, a wrong amount that does not, and choosing Paystack in Settings), and the go-live setup steps.
+
+**Not run against Paystack itself.** Not built: refund webhooks, a statement source, split payments.
