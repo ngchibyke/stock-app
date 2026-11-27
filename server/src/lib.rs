@@ -30,12 +30,14 @@ pub mod payout_accounts;
 pub mod phone;
 pub mod privacy;
 pub mod products;
+pub mod ready;
 pub mod reviews;
 pub mod settings;
 pub mod statement;
 pub mod stock;
 pub mod stores;
 pub mod uploads;
+pub mod web;
 
 use axum::{Json, Router, extract::MatchedPath, http::Request, routing::get};
 use std::sync::Arc;
@@ -149,6 +151,8 @@ pub fn build_app(state: AppState) -> Router {
         .merge(disputes::routes::router())
         .merge(identity::routes::router())
         .merge(privacy::routes::router())
+        .merge(ready::router())
+        .merge(web::router())
         .merge(partners::routes::router())
         .merge(notify::routes::router())
         .merge(delivery::addresses::router())
