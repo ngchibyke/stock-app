@@ -93,7 +93,31 @@ class ApiSellRepository implements SellRepository {
     final attempt = readString(j['attempt_id']);
     final token = readString(j['session_token']);
     if (attempt == null || token == null) throw _badResponse();
-    return IdentityStart(attemptId: attempt, sessionToken: token);
+    return IdentityStart(
+      attemptId: attempt,
+      sessionToken: token,
+      sdk: _sdk(j['sdk']),
+    );
+  }
+
+  IdentitySdk? _sdk(Object? raw) {
+    if (raw is! Map<String, dynamic>) return null;
+    final partner = readString(raw['partner_id']);
+    final type = readString(raw['id_type']);
+    final country = readString(raw['country']);
+    final sandbox = raw['sandbox'];
+    if (partner == null ||
+        type == null ||
+        country == null ||
+        sandbox is! bool) {
+      return null;
+    }
+    return IdentitySdk(
+      partnerId: partner,
+      idType: type,
+      country: country,
+      sandbox: sandbox,
+    );
   }
 
   @override

@@ -110,14 +110,38 @@ class IdentityStatus {
   final DateTime? requiredBy;
 }
 
+/// Settings for the provider's capture SDK. Not secret: the token is what authorises it.
+@immutable
+class IdentitySdk {
+  const IdentitySdk({
+    required this.partnerId,
+    required this.idType,
+    required this.country,
+    required this.sandbox,
+  });
+
+  final String partnerId;
+  final String idType;
+  final String country;
+  final bool sandbox;
+}
+
 /// The provider's job for the selfie. The session token goes to the capture SDK
 /// only: never shown, logged or stored.
 @immutable
 class IdentityStart {
-  const IdentityStart({required this.attemptId, required this.sessionToken});
+  const IdentityStart({
+    required this.attemptId,
+    required this.sessionToken,
+    this.sdk,
+  });
 
   final String attemptId;
   final String sessionToken;
+
+  /// What the provider's SDK needs besides the token; null when the provider has no
+  /// SDK step (the development fake).
+  final IdentitySdk? sdk;
 
   @override
   String toString() => 'IdentityStart(<redacted>)';

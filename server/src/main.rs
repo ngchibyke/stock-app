@@ -178,6 +178,13 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("IDENTITY_PROVIDER=fake: identity checks are scripted, not real");
             Some(Arc::new(server::identity::fake::FakeIdentity::new()))
         }
+        Some("smile_id") => {
+            let cfg = config
+                .smile_id
+                .clone()
+                .context("IDENTITY_PROVIDER=smile_id without SMILE_ID_* settings")?;
+            Some(Arc::new(server::identity::smile::SmileIdentity::new(cfg)?))
+        }
         _ => {
             tracing::warn!("IDENTITY_PROVIDER not set: the seller identity check is unavailable");
             None

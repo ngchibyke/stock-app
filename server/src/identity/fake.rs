@@ -110,7 +110,12 @@ impl IdentityProvider for FakeIdentity {
         FAKE_NAME
     }
 
-    async fn start(&self, nin: &Nin, reference: Uuid) -> Result<StartedJob, IdentityError> {
+    async fn start(
+        &self,
+        nin: &Nin,
+        reference: Uuid,
+        _display_name: &str,
+    ) -> Result<StartedJob, IdentityError> {
         let mut inner = self.inner.lock().unwrap();
         if inner.fail_start {
             return Err(IdentityError::Unavailable);
