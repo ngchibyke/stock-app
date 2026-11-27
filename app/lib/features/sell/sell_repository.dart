@@ -106,7 +106,10 @@ class ApiSellRepository implements SellRepository {
     final type = readString(raw['id_type']);
     final country = readString(raw['country']);
     final sandbox = raw['sandbox'];
-    if (partner == null || type == null || country == null || sandbox is! bool) {
+    if (partner == null ||
+        type == null ||
+        country == null ||
+        sandbox is! bool) {
       return null;
     }
     return IdentitySdk(
