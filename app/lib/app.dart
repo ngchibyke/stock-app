@@ -4,6 +4,7 @@ import 'package:material_ui/material_ui.dart';
 
 import 'core/config/app_config.dart';
 import 'core/config/app_gate.dart';
+import 'core/links/external_link.dart';
 import 'core/session/session_controller.dart';
 import 'core/strings.dart';
 import 'core/theme/theme.dart';
@@ -54,9 +55,19 @@ class MarketApp extends ConsumerWidget {
       builder: (context, child) {
         if (gate == Gate.open) return child ?? const SizedBox.shrink();
         // Nothing of the app is built behind the notice.
+        final platform = ref.watch(appPlatformProvider);
+        final storeUrl = switch (platform) {
+          'android' => config?.storeUrlAndroid,
+          'ios' => config?.storeUrlIos,
+          _ => null,
+        };
         return GateNotice(
           gate: gate,
           maintenanceMessage: config?.maintenanceMessage,
+          // Only for an old app: the button opens the store page the server named.
+          onUpdate: gate == Gate.updateRequired && storeUrl != null
+              ? () => ref.read(externalLinkOpenerProvider)(Uri.parse(storeUrl))
+              : null,
         );
       },
     );
@@ -67,10 +78,18 @@ class MarketApp extends ConsumerWidget {
 /// the service is in maintenance. It is only text; there is no way into the app
 /// from here, and it goes away by itself when the gate opens.
 class GateNotice extends StatelessWidget {
-  const GateNotice({super.key, required this.gate, this.maintenanceMessage});
+  const GateNotice({
+    super.key,
+    required this.gate,
+    this.maintenanceMessage,
+    this.onUpdate,
+  });
 
   final Gate gate;
   final String? maintenanceMessage;
+
+  /// Opens the store page. Null when the server has not named one.
+  final VoidCallback? onUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -122,6 +141,16 @@ class GateNotice extends StatelessWidget {
                     style: theme.textTheme.bodyLarge,
                   ),
                 ),
+                if (onUpdate != null) ...[
+                  const SizedBox(height: Tokens.s4),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, Tokens.minTap),
+                    ),
+                    onPressed: onUpdate,
+                    child: const Text(Strings.updateNow),
+                  ),
+                ],
               ],
             ),
           ),

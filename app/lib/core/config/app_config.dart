@@ -63,6 +63,8 @@ class AppConfig {
     this.termsUrl,
     this.privacyUrl,
     this.supportEmail,
+    this.storeUrlAndroid,
+    this.storeUrlIos,
     this.maintenanceActive = false,
     this.maintenanceMessage,
     this.assetsVersion,
@@ -74,12 +76,15 @@ class AppConfig {
     final min = json['min_version'];
     final maintenance = json['maintenance'];
     final assets = json['assets'];
+    final store = json['store_url'];
     return AppConfig(
       minVersionAndroid: min is Map ? _text(min['android']) : null,
       minVersionIos: min is Map ? _text(min['ios']) : null,
       termsUrl: _httpsUrl(json['terms_url']),
       privacyUrl: _httpsUrl(json['privacy_url']),
       supportEmail: _text(json['support_email']),
+      storeUrlAndroid: store is Map ? _httpsUrl(store['android']) : null,
+      storeUrlIos: store is Map ? _httpsUrl(store['ios']) : null,
       maintenanceActive: maintenance is Map && maintenance['active'] == true,
       maintenanceMessage: maintenance is Map
           ? _text(maintenance['message'])
@@ -98,6 +103,10 @@ class AppConfig {
   final String? termsUrl;
   final String? privacyUrl;
   final String? supportEmail;
+
+  /// Where each platform's store page is, for the update notice (https only).
+  final String? storeUrlAndroid;
+  final String? storeUrlIos;
   final bool maintenanceActive;
   final String? maintenanceMessage;
 
@@ -119,6 +128,8 @@ class AppConfig {
     termsUrl: termsUrl,
     privacyUrl: privacyUrl,
     supportEmail: supportEmail,
+    storeUrlAndroid: storeUrlAndroid,
+    storeUrlIos: storeUrlIos,
     assetsVersion: assetsVersion,
     assetsBaseUrl: assetsBaseUrl,
     paymentReturnUrl: paymentReturnUrl,
@@ -130,6 +141,7 @@ class AppConfig {
     'min_version': {'android': minVersionAndroid, 'ios': minVersionIos},
     'terms_url': termsUrl,
     'privacy_url': privacyUrl,
+    'store_url': {'android': storeUrlAndroid, 'ios': storeUrlIos},
     'support_email': supportEmail,
     'maintenance': {'active': maintenanceActive, 'message': maintenanceMessage},
     'assets': {'version': assetsVersion, 'base_url': assetsBaseUrl},

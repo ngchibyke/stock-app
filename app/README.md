@@ -2,11 +2,7 @@
 
 The Flutter app for Android and iOS. It talks to the server in `../server`.
 
-Today it does: sign-up with a phone code, sign-in, password recovery, an
-account page and an address book, and the **market**: a map of the market you
-pan and pinch, a camera flight into a store's room with its products on the
-shelves, a plain list view with search, product pages and the cart. Checkout,
-orders and selling are not built yet.
+Today it does: sign-up and sign-in, the **market** (a map you pan and pinch, a camera flight into a store's room, a plain list with search), product pages, the cart and checkout, orders and tracking, chat with sellers and their teams, the whole selling area (stores, branches, team, products with a guided camera, orders), and Privacy and data (download your data, delete your account).
 
 ## Status: not yet run on a device
 
@@ -143,8 +139,9 @@ who does not want the map, and with TalkBack.
 
 ### Device checklist
 
-Run on a real mid-range Android phone (2 to 3 GB of RAM), release build
-(`flutter run --release`), signed in, on 4G not Wi-Fi:
+Run on a real mid-range Android phone (2 to 3 GB of RAM), profile build
+(`flutter run --profile`, or a signed release build; a release build needs the upload key,
+see `docs/release/release-howto.md`), signed in, on 4G not Wi-Fi:
 
 - [ ] First view of the market under 1.5 s from opening the tab (the base image
       first, then tiles sharpen).
@@ -165,17 +162,9 @@ Run on a real mid-range Android phone (2 to 3 GB of RAM), release build
 - [ ] Airplane mode after one visit: the market shows from cache with the
       offline line; opening a room shows its error with a retry.
 
-## Before the first store upload
+## Releasing
 
-- Change the Android `applicationId` and the iOS bundle id. The project name
-  `market` and organisation `ng.market` are placeholders until the product is
-  named; they produced `ng.market.market` in `android/app/build.gradle.kts`
-  and in `ios/Runner.xcodeproj/project.pbxproj`. Neither can be changed after
-  the app has been published.
-- Set real release signing. The Android release build still uses the debug
-  key, which is a template default.
-- Add the store link to the app config later. The update notice has no store
-  link today because `/app/config` has no store URL field (plan 7e adds it).
+The name, ids and icons live in `brand.json`: `dart run tool/apply_brand.dart` applies them to Android and iOS, and `--check` (CI) fails if a platform file has drifted. A release build is signed with the upload key or it does not build, and it refuses to start pointed at a missing, non-https or development address. Everything else (the manual release workflow, the secrets, the store forms, the merged device checklist) is in `docs/release/`: start with `release-howto.md`. **The release workflow has never run, and nothing has been run on an iPhone.** `docs/release/go-live-costs-and-placeholders.md` lists what to pay for and every placeholder to replace.
 
 ## Platform floors
 

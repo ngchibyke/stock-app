@@ -1,13 +1,18 @@
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'core/api/providers.dart' show apiBaseUrl;
+import 'core/api/release_guard.dart';
 import 'core/config/app_gate.dart';
 import 'core/session/session_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // A release build never starts pointed at a missing or development server.
+  validateApiBaseUrl(apiBaseUrl, release: kReleaseMode);
   const store = SecureSessionStore();
   // Before the session is restored, so a token from an earlier install is
   // never used.

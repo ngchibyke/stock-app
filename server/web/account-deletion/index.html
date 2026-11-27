@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Delete your account</title>
+  <link rel="stylesheet" href="/account-deletion/page.css">
+</head>
+<body>
+  <main>
+    <h1>Delete your account</h1>
+    <p>You can delete your account in the app: open <strong>Account</strong>, then <strong>Privacy and data</strong>, then <strong>Delete my account</strong>. If you cannot open the app, for example because you uninstalled it, you can do the same here.</p>
+
+    <h2>What happens</h2>
+    <ul>
+      <li>Your account is switched off at once and you are signed out everywhere else.</li>
+      <li>You have 30 days to change your mind. Come back here or sign in to the app and choose <strong>Keep my account</strong>.</li>
+      <li>After 30 days your name, phone number, saved addresses, photos and notices are erased, and your phone number can be used to sign up again.</li>
+      <li>Orders and payment records stay, without your name or address, for as long as the law needs. Messages you wrote stay for the other person, shown as &ldquo;Deleted user&rdquo;, until their retention period ends.</li>
+      <li>We cannot delete an account while an order, a report or return, a store you own, or a payout or refund is still open. We will tell you what to finish first.</li>
+    </ul>
+
+    <p>To download your data first, use <strong>Download my data</strong> in the app, under the same page.</p>
+
+    <section aria-labelledby="signin-h">
+      <h2 id="signin-h">Sign in to continue</h2>
+      <form id="signin" novalidate>
+        <label for="phone">Phone number</label>
+        <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Sign in</button>
+      </form>
+    </section>
+
+    <section id="decide" hidden aria-labelledby="decide-h">
+      <h2 id="decide-h">Your account</h2>
+      <p id="decide-text"></p>
+      <ul id="blockers"></ul>
+      <p>
+        <input id="confirm" type="checkbox">
+        <label for="confirm" class="inline">I understand my account will be deleted after 30 days.</label>
+      </p>
+      <button id="delete" type="button">Delete my account</button>
+    </section>
+
+    <section id="pending" hidden aria-labelledby="pending-h">
+      <h2 id="pending-h">Your account is waiting to be deleted</h2>
+      <p id="pending-text"></p>
+      <button id="keep" type="button">Keep my account</button>
+    </section>
+
+    <p id="message" role="status" aria-live="polite"></p>
+    <p id="support">{{SUPPORT}}</p>
+  </main>
+  <script src="/account-deletion/page.js"></script>
+</body>
+</html>

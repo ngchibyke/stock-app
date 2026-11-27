@@ -20,6 +20,14 @@ fn full() -> AppClientConfig {
         ("APP_TERMS_URL", "https://shop.example/terms"),
         ("APP_PRIVACY_URL", "https://shop.example/privacy"),
         ("APP_SUPPORT_EMAIL", "help@shop.example"),
+        (
+            "APP_STORE_URL_ANDROID",
+            "https://play.google.com/store/apps/details?id=ng.shop.app",
+        ),
+        (
+            "APP_STORE_URL_IOS",
+            "https://apps.apple.com/ng/app/id1234567890",
+        ),
         ("APP_MAINTENANCE_MESSAGE", "Back at 6pm."),
     ])
     .unwrap()
@@ -37,6 +45,10 @@ async fn config_route_reads_settings(pool: PgPool) {
             "min_version": { "android": "1.4.0", "ios": "1.5.2" },
             "terms_url": "https://shop.example/terms",
             "privacy_url": "https://shop.example/privacy",
+            "store_url": {
+                "android": "https://play.google.com/store/apps/details?id=ng.shop.app",
+                "ios": "https://apps.apple.com/ng/app/id1234567890",
+            },
             "support_email": "help@shop.example",
             "maintenance": { "active": true, "message": "Back at 6pm." },
             "assets": null,
@@ -61,6 +73,12 @@ fn bad_version_or_http_link_refuses_to_start() {
         ("APP_TERMS_URL", "https://"),
         ("APP_PRIVACY_URL", "https://shop example/privacy"),
         ("APP_PRIVACY_URL", "javascript:alert(1)"),
+        (
+            "APP_STORE_URL_ANDROID",
+            "http://play.google.com/store/apps/details?id=x",
+        ),
+        ("APP_STORE_URL_IOS", "itms-apps://apps.apple.com/app/id1"),
+        ("APP_STORE_URL_IOS", "javascript:alert(1)"),
         ("APP_SUPPORT_EMAIL", "not-an-email"),
         ("APP_SUPPORT_EMAIL", "a@b"),
         ("APP_SUPPORT_EMAIL", "a b@shop.example"),
@@ -95,6 +113,7 @@ async fn defaults_are_null_not_empty(pool: PgPool) {
             "min_version": { "android": null, "ios": null },
             "terms_url": null,
             "privacy_url": null,
+            "store_url": { "android": null, "ios": null },
             "support_email": null,
             "maintenance": { "active": false, "message": null },
             "assets": null,

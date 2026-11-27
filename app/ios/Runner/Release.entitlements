@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Passed to xcodebuild by the release workflow only (CODE_SIGN_ENTITLEMENTS), so debug
+	     builds need no push capability. Push needs the Push Notifications capability on the
+	     app id and a Firebase project with the APNs key. -->
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

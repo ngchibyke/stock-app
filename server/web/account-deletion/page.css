@@ -1,0 +1,14 @@
+:root { color-scheme: light dark; }
+body { margin: 0; font: 18px/1.5 system-ui, sans-serif; background: Canvas; color: CanvasText; }
+main { max-width: 38rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+h1 { font-size: 1.8rem; margin: 0 0 1rem; }
+h2 { font-size: 1.25rem; margin-top: 2rem; }
+label { display: block; margin-top: 1rem; font-weight: 600; }
+label.inline { display: inline; margin: 0 0 0 .4rem; font-weight: 400; }
+input[type="tel"], input[type="password"] { width: 100%; box-sizing: border-box; padding: .7rem; font: inherit; border: 2px solid GrayText; border-radius: .4rem; background: Field; color: FieldText; }
+input[type="checkbox"] { width: 1.5rem; height: 1.5rem; vertical-align: middle; }
+button { min-height: 3rem; min-width: 3rem; margin-top: 1rem; padding: .6rem 1.2rem; font: inherit; font-weight: 700; border: 0; border-radius: .4rem; background: #6b2f5c; color: #fff; cursor: pointer; }
+button[disabled] { opacity: .5; cursor: default; }
+#message { min-height: 1.5rem; font-weight: 600; }
+#message.bad { color: #b00020; }
+:focus-visible { outline: 3px solid #f4b942; outline-offset: 2px; }

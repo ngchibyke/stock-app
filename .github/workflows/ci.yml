@@ -113,8 +113,32 @@ jobs:
       - run: flutter pub get
       - run: dart run build_runner build --delete-conflicting-outputs
       - run: dart format --output=none --set-exit-if-changed .
+      # The name, ids and icons in brand.json match every Android and iOS file.
+      - run: dart run tool/apply_brand.dart --check
       - run: flutter analyze
       - run: flutter test
+
+  android-build:
+    name: Android debug build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.1'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart run build_runner build --delete-conflicting-outputs
+      # Catches a broken Gradle or manifest change on every push. Not signed, not uploaded.
+      - run: flutter build apk --debug
 
   e2e:
     name: Browser tests

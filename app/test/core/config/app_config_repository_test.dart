@@ -99,6 +99,27 @@ void main() {
     expect(config.privacyUrl, isNull);
   });
 
+  test('the_store_pages_are_read_kept_and_only_when_https', () {
+    final config = AppConfig.fromJson({
+      'store_url': {
+        'android': 'https://play.google.com/store/apps/details?id=x',
+        'ios': 'itms-apps://apps.apple.com/app/id1',
+      },
+    });
+    expect(
+      config.storeUrlAndroid,
+      'https://play.google.com/store/apps/details?id=x',
+    );
+    expect(config.storeUrlIos, isNull, reason: 'not https');
+    // They survive being stored, and a failed fetch.
+    final back = AppConfig.fromJson(config.toJson());
+    expect(back.storeUrlAndroid, config.storeUrlAndroid);
+    expect(config.withoutMaintenance().storeUrlAndroid, config.storeUrlAndroid);
+    // An older server that does not send them, or sends nonsense.
+    expect(AppConfig.fromJson({}).storeUrlAndroid, isNull);
+    expect(AppConfig.fromJson({'store_url': 'x'}).storeUrlIos, isNull);
+  });
+
   test('a good answer is stored and a fresh answer replaces it', () async {
     final (repo, adapter) = await _build();
     expect(repo.lastGood, isNull);
