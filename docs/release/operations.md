@@ -18,7 +18,7 @@ For the person who keeps it running. What is built is small and deliberate: two 
 - **The database:** automated backups, **a tested restore** (a backup you have never restored is a hope), free disk, connection count.
 - **The host:** CPU, memory and disk of the API and database machines.
 - **The dashboard's Alerts page** (`/admin/alerts`): payout mismatches, courier wallet warnings, statement mismatches, the identity budget, and the partner call budget. Check it daily at first.
-- **Provider balances and limits:** the Shipbubble wallet (a low-balance alert is raised), Mono settlement, SMS credit, the Anthropic usage limit, Firebase quotas.
+- **Provider balances and limits:** the Shipbubble wallet (a low-balance alert is raised), Paystack settlements and the transfer balance (a payout fails if the balance is empty), SMS credit, the Anthropic usage limit, Firebase quotas.
 - **Backups of the three keys** (`FIELD_KEY`, `INDEX_KEY`, `NIN_INDEX_KEY`) somewhere that survives losing the server. Without `FIELD_KEY` the encrypted data cannot be read, ever.
 
 ## Runbook

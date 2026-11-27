@@ -22,7 +22,7 @@ Write down **the moment anyone in the team first became aware**. The 72 hours ru
 
 ## 3. Steps
 
-1. **Detect and report.** Anyone who suspects a breach tells the incident lead at once. Signals: the `/ready` monitor or dashboard alerts, odd rows in the audit log, a provider's warning (Mono, Shipbubble, the identity provider, the AI provider, the object store, Firebase), a user report, a lost or stolen device with access.
+1. **Detect and report.** Anyone who suspects a breach tells the incident lead at once. Signals: the `/ready` monitor or dashboard alerts, odd rows in the audit log, a provider's warning (Paystack, Mono, Shipbubble, the identity provider, the AI provider, the object store, Firebase), a user report, a lost or stolen device with access.
 2. **Contain** (technical lead). Stop it getting worse, without destroying evidence:
    - Revoke sessions: `UPDATE sessions SET revoked_at = now() WHERE revoked_at IS NULL;` (everyone is signed out; or narrow it to the people involved).
    - Rotate what leaked: provider keys and webhook secrets are changed at the provider and in the server's settings, then the server is restarted. **`FIELD_KEY`, `INDEX_KEY` and `NIN_INDEX_KEY` cannot be rotated in place** (the stored data is encrypted or indexed under them): a leaked field key is a data-recovery project, so decide with the DPO before touching it, and keep the old key until data is re-encrypted.

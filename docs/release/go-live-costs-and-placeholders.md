@@ -5,7 +5,7 @@ Written 2026-11-26, when the roadmap's build parts (7a to 9) were done. **This i
 ## Read this first: two things block a production server
 
 1. **A real identity-provider adapter does not exist.** The only provider the server knows is `fake` (`KNOWN_IDENTITY_PROVIDERS` in `server/src/config.rs`), and the server **refuses to run with `APP_ENV=production` without a real one**. The app's selfie step also has no provider SDK plugged in (`UnavailableSelfieCapture`). Choosing a licensed NIN-and-selfie verification provider, and building its adapter and the app's SDK step, is the biggest unbuilt item.
-2. **Seven things the production server will not start without:** a payment provider (Mono), a tone-check key (Anthropic), push (Firebase), photo storage (S3-compatible), an SMS sender (Termii), the identity provider above, and `NIN_INDEX_KEY`. Each has an `.env.example` entry.
+2. **Seven things the production server will not start without:** a payment provider (**Paystack**, or Mono), a tone-check key (Anthropic), push (Firebase), photo storage (S3-compatible), an SMS sender (Termii), the identity provider above, and `NIN_INDEX_KEY`. Each has an `.env.example` entry.
 
 So "live testing" has two levels. **Level 1** is a closed test on a staging server with the fake providers (`APP_ENV=development`): near-zero provider cost, no real money, good for phones and testers. **Level 2** is real: real SMS, real payments, real identity checks, real stores. Everything below says which level needs it.
 
@@ -23,15 +23,15 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | Apple Developer Program | TestFlight | yearly (about US$99, confirm) | iPhone |
 | GitHub Actions minutes | the iOS build runs on a macOS runner, billed at a higher rate than Linux | usage | the Android build is cheap; check your plan |
 | A mid-range Android phone and an iPhone | the device checklist | one-time | you already have an Android phone |
-| Mono sandbox account | checkout needs a payment provider even for review | free sandbox | the server has no payment provider of its own |
+| **Paystack test account** | checkout needs a payment provider even for review | free: test keys (`sk_test_...`) move no real money | the Paystack adapter is built but has not been tried against a real or sandbox account |
 | Firebase project | push notices | free tier | needed for the push checks |
 
 ### Added for Level 2 (real money, real people)
 
 | What | Why | Kind | Note |
 |---|---|---|---|
-| **Mono live account** (DirectPay and Disburse) | collect payments, hold them, pay sellers out | per transaction, plus setup | Disburse needs a source bank account approved by mandate; confirm the amount units in writing |
-| **Business bank account** | the account Mono debits and credits | bank fees | the escrow arrangement is regulated: see legal |
+| **Paystack live account** | collect payments (Checkout), pay sellers out (Transfers) and refund | a fee per transaction and per transfer; get the current rates and who bears each | needs business verification (registration documents, director ID, a settlement bank account). **Ask Paystack in writing whether a marketplace that holds money until the buyer confirms delivery is allowed**, and fund the transfer balance. See "Setting up Paystack" below |
+| **Business bank account** | the account Paystack settles to | bank fees | the escrow arrangement is regulated: see legal |
 | **Termii (SMS)** | sign-up and reset codes | per SMS | register a sender ID early: approval can take weeks |
 | **Identity provider** (NIN and selfie) | verify every seller and team member | per check, usually | not chosen; see "blocks" above |
 | **Shipbubble** (courier) | book couriers for delivery orders | wallet funded in advance, then per shipment | production needs the key and a funded wallet |
@@ -88,7 +88,8 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | `APP_ENV` | `production` (and `OTP_DEV_ECHO=0`; the server refuses the echo outside development) |
 | `FIELD_KEY`, `INDEX_KEY`, `NIN_INDEX_KEY` | three different, random, 32-byte keys, kept in a secret store. **Losing `FIELD_KEY` makes encrypted data unreadable; back it up** |
 | `DATABASE_URL` | the production database |
-| `MONO_SECRET_KEY` (a `live_sk_` key in production), `MONO_WEBHOOK_SECRET`, `MONO_DISBURSE_*`, `MONO_PAYOUT_RECIPIENT_EMAIL`, `PUBLIC_REDIRECT_URL` | from your Mono account; the redirect page must exist |
+| `PAYSTACK_SECRET_KEY` (an `sk_live_` key in production, `sk_test_` anywhere else), `PAYSTACK_PAYER_EMAIL_DOMAIN`, `PUBLIC_REDIRECT_URL` | from your Paystack account. The payer email domain is one you own (buyers have no email; Paystack needs one, so a synthetic address on that domain is sent, and no name). The redirect page must exist. The webhook is verified with the same secret key. `PAYSTACK_BASE_URL` is optional |
+| `MONO_*` | only if you also keep Mono; leave them empty for Paystack alone |
 | `SHIPBUBBLE_API_KEY`, `SHIPBUBBLE_CONTACT_EMAIL` | from Shipbubble |
 | `ANTHROPIC_API_KEY`, `MODERATION_MODEL` | from Anthropic |
 | `FCM_SERVICE_ACCOUNT_FILE` | the Firebase service account, kept outside the repository |
@@ -107,7 +108,7 @@ These are placeholders from the build, not decisions: **platform cut 5%**, **col
 
 - **The real identity-provider adapter and the app's selfie SDK step** (see the top of this page).
 - **The NIPOST postcode check:** `ManualPostcode` accepts what people type until NIPOST publishes a usable source.
-- **The provider's daily statement** for reconciliation: `statements` is `None` until Mono's statement endpoint is confirmed.
+- **The provider's daily statement** for reconciliation: `statements` is `None` until a provider's statement endpoint is confirmed. **Paystack refund webhooks** are not handled either (a refund stays "processing" until the owner marks it, as with Mono).
 - **Firebase files and the Android Google services Gradle plugin:** push is off until they are added (`docs/release/release-howto.md`).
 - **Deep links and the app's link domain** (they need the final domain and name), and **key rotation** (today: change the setting and restart; the three data keys cannot be rotated in place).
 - **Crash reporting** (your choice, with a DPO look).
@@ -123,14 +124,28 @@ These are placeholders from the build, not decisions: **platform cut 5%**, **col
 | A store link for the update notice | `APP_STORE_URL_ANDROID` and `APP_STORE_URL_IOS` in the server's settings; the app's "Please update" notice has an **Update now** button when its platform's page is named | set them after the first store release |
 | A web page for account deletion (both stores ask for one) | `https://<api host>/account-deletion`: a person who cannot open the app signs in and asks for deletion, or keeps the account; strict content-security policy, nothing stored in the browser; tested in a real browser | give the stores that address; the support email shows on it when `APP_SUPPORT_EMAIL` is set |
 | A breach-notification procedure | `docs/release/breach-procedure.md`: roles, the 72-hour clock, containment, assessment, notices and a register | **fill in the names, have the DPO and a lawyer adopt it**, and run an exercise |
+| A second payment provider | **Paystack**: collection, payouts, refunds, webhooks and a hosted checkout page (`paystack_checkout`); production accepts Mono or Paystack | every step in "Setting up Paystack": none has been run against a real account |
 | Monitoring and alerting basics | `GET /ready` (database and background jobs) and `docs/release/operations.md` with a runbook | subscribe an uptime monitor to `/ready`, set up database backups and a restore test, and watch the dashboard's Alerts |
+
+## Setting up Paystack
+
+The server supports Paystack as of 2026-11-27 (the plan is `docs/superpowers/plans/2026-11-27-paystack-adapter.md`). **It has been tested only against a mock of Paystack's documented API, never against a real or sandbox account.** The plan lists every Paystack fact it relies on, and which are unconfirmed. Do this in order:
+
+1. Create the Paystack account and take the **test keys**. Set `PAYSTACK_SECRET_KEY=sk_test_...` and `PAYSTACK_PAYER_EMAIL_DOMAIN` (a domain you own) on the staging server.
+2. In the Paystack dashboard set the **webhook URL** to `https://<api host>/webhooks/paystack`. The server checks each call's `x-paystack-signature` against the secret key.
+3. In the server's dashboard Settings choose **`paystack_checkout`** as the payment method and **`paystack`** as the payout provider (the defaults are Mono's names, so this step is needed).
+4. In the Paystack dashboard **turn off the OTP requirement for transfers** made with the API, and enable transfers. Otherwise every payout waits at "otp" for a person to type a code. If your account requires the OTP, the server can finish a transfer with it, but nothing asks for it automatically.
+5. Run the sandbox smoke test: a test payment from the app (the page opens on `checkout.paystack.com`, the order turns paid), a refund, and a payout to a test bank account. **Confirm in the real answers the shapes the plan marks unconfirmed:** the transfer fee field, the refund listing, the bank-name lookup.
+6. For live: business verification, `sk_live_` key, fund the transfer balance, repeat step 5 with a very small real payment to an account you own, and check the settlement and the fees against your bank statement.
+
+**Ask Paystack, in writing:** is a marketplace that holds money until delivery allowed, can they pay many sellers (Transfers or split payments) and at what cost, what do refunds cost, what are the settlement time and limits, is there a daily statement to reconcile against.
 
 ## Suggested order
 
 1. Decide the name and the ids; replace the logo.
-2. Stand up staging (server, database, domain, https, Mono sandbox, Firebase); run the device checklist on your Android phone and an iPhone.
+2. Stand up staging (server, database, domain, https, Paystack test keys, Firebase); run the device checklist on your Android phone and an iPhone.
 3. Choose the identity provider; build its adapter and the app step.
 4. Lawyer, DPO and accountant reviews, in parallel, from the start: they take the longest.
-5. Open the Play and Apple accounts and the Mono, Termii and Shipbubble live accounts; register the SMS sender ID early.
+5. Open the Play and Apple accounts and the Paystack, Termii and Shipbubble live accounts; register the SMS sender ID early.
 6. Replace the art; publish it; verify it.
 7. Fill the store forms from the drafts; release to internal testing; then a small, real, supervised pilot.
