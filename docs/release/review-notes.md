@@ -6,7 +6,7 @@
 
 Both stores ask for a way to use the whole app without real money and without waiting for an SMS.
 
-- **A staging server** that answers over https, with the fake identity provider and the fake tone check (`IDENTITY_PROVIDER=fake`, `TONE_PROVIDER=fake`), a payment provider **sandbox** (the server has no payment provider of its own: the Mono sandbox keys are needed for checkout to work at all), and a seeded market. Production, with real payments, is not suitable for review.
+- **A staging server** that answers over https, with the fake identity provider and the fake tone check (`IDENTITY_PROVIDER=fake`, `TONE_PROVIDER=fake`), a payment provider **sandbox** (Paystack test keys, `sk_test_...`: checkout needs a payment provider to work at all, and test mode moves no real money), and a seeded market. Production, with real payments, is not suitable for review.
 - **Pre-made, already verified accounts**, because signing up needs an SMS code the reviewer cannot read. Sign-in with a verified account needs only the phone number and password:
   - Buyer: phone `{{DEMO_BUYER_PHONE}}`, password `{{DEMO_BUYER_PASSWORD}}`
   - Seller (owner of a demo store): phone `{{DEMO_SELLER_PHONE}}`, password `{{DEMO_SELLER_PASSWORD}}`

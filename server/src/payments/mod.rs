@@ -8,6 +8,7 @@
 
 pub mod fake;
 pub mod mono;
+pub mod paystack;
 pub mod verify_gate;
 pub mod webhooks;
 
@@ -28,7 +29,7 @@ use crate::error::AppError;
 ///
 /// [`ProviderRegistry::register`] refuses a provider whose methods are not
 /// listed here, which keeps this list in step with the providers.
-pub const ALL_METHODS: &[&str] = &["mono_directpay"];
+pub const ALL_METHODS: &[&str] = &["mono_directpay", "paystack_checkout"];
 
 /// Length of the random part of a [`new_reference`].
 const REFERENCE_RANDOM_LEN: usize = 20;

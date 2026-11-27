@@ -5,7 +5,10 @@ use crate::auth::sms_termii::{self, TermiiConfig};
 use crate::couriers::shipbubble::{self, ShipbubbleConfig};
 use crate::moderation::claude::{self, ClaudeConfig};
 use crate::notify::fcm::FcmConfig;
-use crate::payments::mono::{self, AmountUnit, MonoConfig, Secret};
+use crate::payments::{
+    mono::{self, AmountUnit, MonoConfig, Secret},
+    paystack::{self, PaystackConfig},
+};
 use crate::uploads::s3::{self, S3Config};
 
 #[derive(Clone)]
@@ -22,6 +25,9 @@ pub struct Config {
     /// Mono settings; `None` when `MONO_SECRET_KEY` is unset (Mono is then not
     /// registered and nothing else about Mono is required).
     pub mono: Option<MonoConfig>,
+    /// Paystack settings; `None` when `PAYSTACK_SECRET_KEY` is unset. Either Mono or Paystack
+    /// (or both) satisfies production's need for a payment provider.
+    pub paystack: Option<PaystackConfig>,
     /// Shipbubble settings; `None` when `SHIPBUBBLE_API_KEY` is unset (courier
     /// delivery is then unavailable; the server still starts).
     pub shipbubble: Option<ShipbubbleConfig>,
@@ -59,6 +65,7 @@ impl std::fmt::Debug for Config {
             .field("bind_addr", &self.bind_addr)
             .field("app_env", &self.app_env)
             .field("mono", &self.mono)
+            .field("paystack", &self.paystack)
             .field("shipbubble", &self.shipbubble)
             .field("claude", &self.claude)
             .field("fcm", &self.fcm)
@@ -115,6 +122,64 @@ fn redirect_url(raw: Option<String>, dev: bool) -> Result<String> {
 ///
 /// Outside live mode the Disburse settings may be left out; payouts are then
 /// `NotSupported` (manual). Errors name the variable, never its value.
+/// Paystack: `PAYSTACK_SECRET_KEY` switches it on (`sk_live_` in production, `sk_test_`
+/// elsewhere, a mismatch refused). The webhook signature uses the same key. Errors name the
+/// variable, never its value.
+fn paystack_config(
+    var: &impl Fn(&str) -> Option<String>,
+    live: bool,
+) -> Result<Option<PaystackConfig>> {
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let Some(secret_key) = get("PAYSTACK_SECRET_KEY") else {
+        return Ok(None);
+    };
+    // Fail closed: production accepts only a key that says it is live, and a live key is
+    // refused anywhere else.
+    if live && !secret_key.starts_with("sk_live_") {
+        bail!("PAYSTACK_SECRET_KEY must be a live key (sk_live_) when APP_ENV is production");
+    }
+    if !live && secret_key.starts_with("sk_live_") {
+        bail!("PAYSTACK_SECRET_KEY is a live key but APP_ENV is not production");
+    }
+    if !secret_key.starts_with("sk_") || secret_key.contains(char::is_whitespace) {
+        bail!("PAYSTACK_SECRET_KEY is not a Paystack secret key (it starts with sk_)");
+    }
+    let base_url = get("PAYSTACK_BASE_URL").unwrap_or_else(|| paystack::DEFAULT_BASE_URL.into());
+    if !base_url.starts_with("https://") || base_url.contains(char::is_whitespace) {
+        bail!("PAYSTACK_BASE_URL must be an https URL");
+    }
+    // Buyers have no email (they sign up with a phone), but Paystack needs one: a synthetic
+    // address on a domain we own. Required in production, so receipts do not go to a stranger.
+    let payer_email_domain = match get("PAYSTACK_PAYER_EMAIL_DOMAIN") {
+        Some(d) => d.to_ascii_lowercase(),
+        None if live => bail!("PAYSTACK_PAYER_EMAIL_DOMAIN is required in production"),
+        None => "payer.invalid".to_string(),
+    };
+    let domain_ok = payer_email_domain.contains('.')
+        && payer_email_domain.len() <= 100
+        && !payer_email_domain.starts_with(['.', '-'])
+        && !payer_email_domain.ends_with(['.', '-'])
+        && payer_email_domain
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    if !domain_ok {
+        bail!("PAYSTACK_PAYER_EMAIL_DOMAIN must be a domain name such as pay.example.ng");
+    }
+    Ok(Some(PaystackConfig {
+        secret_key: Secret::new(&secret_key),
+        base_url,
+        live,
+        payer_email_domain,
+        connect_timeout: paystack::CONNECT_TIMEOUT,
+        timeout: paystack::REQUEST_TIMEOUT,
+        insecure_http_for_tests: false,
+    }))
+}
+
 fn mono_config(var: &impl Fn(&str) -> Option<String>, live: bool) -> Result<Option<MonoConfig>> {
     let get = |name: &str| {
         var(name)
@@ -488,6 +553,7 @@ impl Config {
             DEV_ECHO_ENVS.contains(&app_env.as_str()),
         )?;
         let mono = mono_config(&var, app_env == "production")?;
+        let paystack = paystack_config(&var, app_env == "production")?;
         let shipbubble = shipbubble_config(&var, app_env == "production")?;
         let claude = claude_config(&var)?;
         let fcm = fcm_config(&var)?;
@@ -500,6 +566,7 @@ impl Config {
             nin_index_key,
             public_redirect_url,
             mono,
+            paystack,
             shipbubble,
             claude,
             fcm,
@@ -889,6 +956,88 @@ mod tests {
         drop: &str,
     ) -> Vec<(&'static str, &'static str)> {
         pairs.iter().copied().filter(|(k, _)| *k != drop).collect()
+    }
+
+    const PAYSTACK_LIVE: &[(&str, &str)] = &[
+        ("APP_ENV", "production"),
+        ("PAYSTACK_SECRET_KEY", "sk_live_abcdef123456"),
+        ("PAYSTACK_PAYER_EMAIL_DOMAIN", "pay.example.ng"),
+    ];
+
+    #[test]
+    fn paystack_is_optional_and_other_settings_alone_do_nothing() {
+        assert!(load(&[]).unwrap().paystack.is_none());
+        let cfg = load(&[
+            ("APP_ENV", "production"),
+            ("PAYSTACK_PAYER_EMAIL_DOMAIN", "bogus"),
+            ("PAYSTACK_BASE_URL", "http://nope"),
+        ])
+        .unwrap();
+        assert!(cfg.paystack.is_none());
+    }
+
+    #[test]
+    fn paystack_live_loads_and_its_key_never_shows() {
+        let p = load(PAYSTACK_LIVE).unwrap().paystack.unwrap();
+        assert!(p.live);
+        assert_eq!(p.base_url, "https://api.paystack.co");
+        assert_eq!(p.payer_email_domain, "pay.example.ng");
+        assert!(!p.insecure_http_for_tests);
+        let shown = format!("{p:?}");
+        assert!(!shown.contains("sk_live_abcdef123456"), "{shown}");
+        let all = format!("{:?}", load(PAYSTACK_LIVE).unwrap());
+        assert!(!all.contains("sk_live_abcdef123456"), "{all}");
+    }
+
+    #[test]
+    fn paystack_key_prefix_must_match_the_environment() {
+        // A test key in production, and a live key anywhere else, are both refused.
+        let mut v = PAYSTACK_LIVE.to_vec();
+        v[1].1 = "sk_test_abcdef123456";
+        let err = load(&v).unwrap_err().to_string();
+        assert!(
+            err.contains("PAYSTACK_SECRET_KEY") && err.contains("live"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("sk_test_abcdef"),
+            "the value must not be echoed: {err}"
+        );
+        let err = load(&[("PAYSTACK_SECRET_KEY", "sk_live_abcdef123456")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PAYSTACK_SECRET_KEY"), "{err}");
+        // A public key, or junk, is not a secret key.
+        for bad in ["pk_test_abcdef", "not a key", "abc"] {
+            assert!(load(&[("PAYSTACK_SECRET_KEY", bad)]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn paystack_sandbox_needs_only_a_key_and_the_other_rules_hold() {
+        let p = load(&[("PAYSTACK_SECRET_KEY", "sk_test_abcdef123456")])
+            .unwrap()
+            .paystack
+            .unwrap();
+        assert!(!p.live);
+        assert_eq!(p.payer_email_domain, "payer.invalid");
+        // Production needs the payer email domain.
+        let err = load(&without(PAYSTACK_LIVE, "PAYSTACK_PAYER_EMAIL_DOMAIN"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PAYSTACK_PAYER_EMAIL_DOMAIN"), "{err}");
+        for bad in ["nodots", "has space.ng", "-x.ng", "a@b.ng", "UPPER..ng."] {
+            let mut v = PAYSTACK_LIVE.to_vec();
+            v[2].1 = bad;
+            assert!(load(&v).is_err(), "{bad}");
+        }
+        let err = load(&[
+            ("PAYSTACK_SECRET_KEY", "sk_test_abcdef123456"),
+            ("PAYSTACK_BASE_URL", "http://api.paystack.co"),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("PAYSTACK_BASE_URL"), "{err}");
     }
 
     #[test]

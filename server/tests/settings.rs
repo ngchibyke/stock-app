@@ -201,7 +201,7 @@ async fn numeric_bounds_enforced(pool: PgPool) {
         json!({ "backstop_days": 91 }),
         json!({ "payout_settlement_buffer_hours": -1 }),
         json!({ "payout_settlement_buffer_hours": 73 }),
-        json!({ "payout_provider": "paystack" }),
+        json!({ "payout_provider": "stripe" }),
     ];
     for body in bad {
         let res = patch(&app, &owner, body.clone()).await;
