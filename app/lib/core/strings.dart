@@ -125,6 +125,7 @@ abstract final class Strings {
   static const String updateRequiredBody =
       'This version is too old to keep working. '
       'Open your app store and install the latest version.';
+  static const String updateNow = 'Update now';
   static const String maintenanceTitle = 'Back soon';
   static const String maintenanceFallback =
       'We are making improvements. Please try again in a little while.';

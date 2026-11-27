@@ -49,3 +49,6 @@ app.*.map.json
 
 # Generated code (rebuilt by build_runner; never committed)
 *.g.dart
+
+# Firebase config for iOS is supplied at build time, never committed.
+ios/Runner/GoogleService-Info.plist

@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:market/core/api/api_error.dart';
 import 'package:market/core/api/providers.dart';
 import 'package:market/core/config/app_config.dart';
+import 'package:market/core/links/external_link.dart';
 import 'package:market/core/session/session_controller.dart';
 import 'package:market/core/strings.dart';
 import 'package:market/features/auth/auth_errors.dart';
@@ -28,6 +29,65 @@ void main() {
       expect(find.text(Strings.signInTitle), findsNothing);
       expect(find.byType(TextField), findsNothing);
     });
+
+    testWidgets('the_update_notice_opens_the_store_page_the_server_named', (
+      tester,
+    ) async {
+      final opened = <Uri>[];
+      final h = AppHarness(
+        config: const AppConfig(
+          minVersionAndroid: '2.0.0',
+          storeUrlAndroid: 'https://play.google.com/store/apps/details?id=x',
+          storeUrlIos: 'https://apps.apple.com/ng/app/id1',
+        ),
+      );
+      await h.pump(
+        tester,
+        extra: [
+          externalLinkOpenerProvider.overrideWithValue((uri) async {
+            opened.add(uri);
+            return true;
+          }),
+        ],
+      );
+      await tester.tap(find.text(Strings.updateNow));
+      await settle(tester);
+      // The harness runs as Android, so it is the Android page, not the iPhone one.
+      expect(
+        opened.single.toString(),
+        'https://play.google.com/store/apps/details?id=x',
+      );
+    });
+
+    testWidgets(
+      'there_is_no_update_button_without_a_store_page_or_for_maintenance',
+      (tester) async {
+        // No link named: text only, as before.
+        var h = AppHarness(config: _update);
+        await h.pump(tester);
+        expect(find.text(Strings.updateNow), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+        // Only the other platform's page is named: nothing to open here.
+        h = AppHarness(
+          config: const AppConfig(
+            minVersionAndroid: '2.0.0',
+            storeUrlIos: 'https://apps.apple.com/ng/app/id1',
+          ),
+        );
+        await h.pump(tester);
+        expect(find.text(Strings.updateNow), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+        // Maintenance is not an update.
+        h = AppHarness(
+          config: const AppConfig(
+            maintenanceActive: true,
+            storeUrlAndroid: 'https://play.google.com/store/apps/details?id=x',
+          ),
+        );
+        await h.pump(tester);
+        expect(find.text(Strings.updateNow), findsNothing);
+      },
+    );
 
     testWidgets('maintenance_shows_the_servers_message', (tester) async {
       final h = AppHarness(

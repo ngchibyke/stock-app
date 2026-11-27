@@ -27,6 +27,9 @@ pub struct AppClientConfig {
     pub min_version_ios: Option<String>,
     pub terms_url: Option<String>,
     pub privacy_url: Option<String>,
+    /// Where each platform's store page is, for the "please update" notice. https only.
+    pub store_url_android: Option<String>,
+    pub store_url_ios: Option<String>,
     pub support_email: Option<String>,
     /// A notice shown while the service is down for maintenance; `maintenance.active`
     /// is true exactly when this is set.
@@ -133,6 +136,12 @@ impl AppClientConfig {
             privacy_url: get("APP_PRIVACY_URL")
                 .map(|v| https_url("APP_PRIVACY_URL", v))
                 .transpose()?,
+            store_url_android: get("APP_STORE_URL_ANDROID")
+                .map(|v| https_url("APP_STORE_URL_ANDROID", v))
+                .transpose()?,
+            store_url_ios: get("APP_STORE_URL_IOS")
+                .map(|v| https_url("APP_STORE_URL_IOS", v))
+                .transpose()?,
             support_email: get("APP_SUPPORT_EMAIL")
                 .map(|v| email("APP_SUPPORT_EMAIL", v))
                 .transpose()?,
@@ -161,6 +170,10 @@ impl AppClientConfig {
             },
             "terms_url": self.terms_url,
             "privacy_url": self.privacy_url,
+            "store_url": {
+                "android": self.store_url_android,
+                "ios": self.store_url_ios,
+            },
             "support_email": self.support_email,
             "maintenance": {
                 "active": self.maintenance_message.is_some(),
