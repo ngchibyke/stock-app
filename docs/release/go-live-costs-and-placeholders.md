@@ -4,7 +4,7 @@ Written 2026-11-26, when the roadmap's build parts (7a to 9) were done. **This i
 
 ## Read this first: two things block a production server
 
-1. **A real identity-provider adapter does not exist.** The only provider the server knows is `fake` (`KNOWN_IDENTITY_PROVIDERS` in `server/src/config.rs`), and the server **refuses to run with `APP_ENV=production` without a real one**. The app's selfie step also has no provider SDK plugged in (`UnavailableSelfieCapture`). Choosing a licensed NIN-and-selfie verification provider, and building its adapter and the app's SDK step, is the biggest unbuilt item.
+1. **The identity provider is Smile ID, built but not yet tried against a real account.** The server adapter exists (`server/src/identity/smile.rs`, `IDENTITY_PROVIDER=smile_id`) and is tested against a mock. The app's selfie step still has no SDK plugged in (`UnavailableSelfieCapture`), so no seller can be verified in the app yet. See "Setting up Smile ID" below for what to do and what is unconfirmed.
 2. **Seven things the production server will not start without:** a payment provider (**Paystack**, or Mono), a tone-check key (Anthropic), push (Firebase), photo storage (S3-compatible), an SMS sender (Termii), the identity provider above, and `NIN_INDEX_KEY`. Each has an `.env.example` entry.
 
 So "live testing" has two levels. **Level 1** is a closed test on a staging server with the fake providers (`APP_ENV=development`): near-zero provider cost, no real money, good for phones and testers. **Level 2** is real: real SMS, real payments, real identity checks, real stores. Everything below says which level needs it.
@@ -33,7 +33,7 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | **Paystack live account** | collect payments (Checkout), pay sellers out (Transfers) and refund | a fee per transaction and per transfer; get the current rates and who bears each | needs business verification (registration documents, director ID, a settlement bank account). **Ask Paystack in writing whether a marketplace that holds money until the buyer confirms delivery is allowed**, and fund the transfer balance. See "Setting up Paystack" below |
 | **Business bank account** | the account Paystack settles to | bank fees | the escrow arrangement is regulated: see legal |
 | **Termii (SMS)** | sign-up and reset codes | per SMS | register a sender ID early: approval can take weeks |
-| **Identity provider** (NIN and selfie) | verify every seller and team member | per check, usually | not chosen; see "blocks" above |
+| **Identity provider: Smile ID** (NIN and selfie) | verify every seller and team member | per check; **price not confirmed**, ask Smile ID | adapter built, account needed; see "Setting up Smile ID" |
 | **Shipbubble** (courier) | book couriers for delivery orders | wallet funded in advance, then per shipment | production needs the key and a funded wallet |
 | **Anthropic API** | the chat tone check (`claude-haiku-5-5`) | per use | get zero data retention and a no-training statement in writing |
 | **Object storage and a CDN** (S3-compatible) | product, review and dispute photos, and the market art | per GB stored and served | also serves `market/<version>/` |
@@ -95,7 +95,7 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | `FCM_SERVICE_ACCOUNT_FILE` | the Firebase service account, kept outside the repository |
 | `S3_*`, `UPLOADS_PUBLIC_BASE_URL` | the object store and its public address |
 | `SMS_PROVIDER`, `TERMII_API_KEY`, `TERMII_SENDER_ID` | Termii, with an approved sender ID |
-| `IDENTITY_PROVIDER`, `IDENTITY_API_KEY`, `IDENTITY_WEBHOOK_SECRET` | a real provider (needs its adapter built first) |
+| `IDENTITY_PROVIDER=smile_id`, `SMILE_ID_PARTNER_ID`, `SMILE_ID_API_KEY`, `SMILE_ID_CALLBACK_URL`, `SMILE_ID_PRIVACY_URL`, optional `SMILE_ID_BASE_URL` | Smile ID (see "Setting up Smile ID") |
 | `APP_MIN_VERSION_ANDROID`, `APP_MIN_VERSION_IOS`, `APP_MAINTENANCE_MESSAGE` | set when you need to force an update |
 | `APP_STORE_URL_ANDROID`, `APP_STORE_URL_IOS` | the store pages, after the first store release; the "please update" notice opens them |
 | `PARTNER_*` | only when the partner's contract exists |
@@ -106,7 +106,7 @@ These are placeholders from the build, not decisions: **platform cut 5%**, **col
 
 ### Stubs: not placeholders, things that do not exist yet
 
-- **The real identity-provider adapter and the app's selfie SDK step** (see the top of this page).
+- **The app's Smile ID SDK step** (`usesmileid` Flutter package) and a real-sandbox run of the adapter (see "Setting up Smile ID").
 - **The NIPOST postcode check:** `ManualPostcode` accepts what people type until NIPOST publishes a usable source.
 - **The provider's daily statement** for reconciliation: `statements` is `None` until a provider's statement endpoint is confirmed. **Paystack refund webhooks** are not handled either (a refund stays "processing" until the owner marks it, as with Mono).
 - **Firebase files and the Android Google services Gradle plugin:** push is off until they are added (`docs/release/release-howto.md`).
@@ -144,8 +144,30 @@ The server supports Paystack as of 2026-11-27 (the plan is `docs/superpowers/pla
 
 1. Decide the name and the ids; replace the logo.
 2. Stand up staging (server, database, domain, https, Paystack test keys, Firebase); run the device checklist on your Android phone and an iPhone.
-3. Choose the identity provider; build its adapter and the app step.
+3. Open a Smile ID account, get NIMC `enterprise_id` registered in its dashboard, run the sandbox, then build the app's SDK step.
 4. Lawyer, DPO and accountant reviews, in parallel, from the start: they take the longest.
 5. Open the Play and Apple accounts and the Paystack, Termii and Shipbubble live accounts; register the SMS sender ID early.
 6. Replace the art; publish it; verify it.
 7. Fill the store forms from the drafts; release to internal testing; then a small, real, supervised pilot.
+
+
+## Setting up Smile ID
+
+Built from Smile ID's public v3 documentation (docs.usesmileid.com, read 2026-11-27); not yet run against a real account. The seller types the NIN in the app; the server asks Smile ID for a short-lived token bound to that NIN and the seller's name; the app's Smile ID SDK sends the selfie straight to Smile ID (it never reaches our server); Smile ID calls our webhook with the verdict, and we keep only a keyed NIN fingerprint, the verified name (encrypted) and the year of birth.
+
+**What you do**
+1. Open a Smile ID account and ask for the price per Biometric KYC check, in writing, along with a data-processing agreement and where NINs and selfies are stored and for how long.
+2. Register your **NIMC `enterprise_id`** in the Smile ID dashboard. Smile ID's docs say the `NIN_V2` type needs one. Without it Nigerian NIN checks will not run.
+3. Register the webhook domain for sandbox and production (Smile ID checks callback domains), and set `SMILE_ID_CALLBACK_URL` to `https://<api host>/webhooks/identity/smile_id`.
+4. Set the five `SMILE_ID_*` values in `server/.env.example`'s style. Sandbox keys and live keys are different; production refuses a sandbox URL.
+
+**Unconfirmed: settle these in the sandbox before going live**
+- The token request's `payload` field is sent as a JSON string in the multipart form; its exact shape is not in the docs I could read.
+- Whether Smile ID accepts our own `user_id` (we use `user_<attempt id>`) and echoes it in the webhook's `partner_params`. The webhook match depends on this.
+- The webhook signature: HMAC-SHA256 under the API key over timestamp + partner id + `sid_request`, base64. The docs give no separator; none is used. A wrong guess shows as every webhook being refused.
+- Biometric KYC lists `user_details` with an email or phone as required. We send the name only.
+- `NIN_V2` against `NIN_SLIP`, and virtual NINs (`V_NIN`, 16 characters), which the app does not accept yet.
+- The status endpoint needs a job id only the webhook carries, so the poll backup cannot ask for a result. A missed webhook means the attempt times out and the seller tries again.
+- Whether the SDK needs the NIN passed on the phone as well as in the token. If it does, the app keeps it in memory only for the capture.
+
+**Still to build:** the app step. Add the `usesmileid` package (needs Flutter 3.44, Dart 3.12), implement `SelfieCapture` with `UseSmileIDBuilder` using the `sdk` block the start call now returns (`partner_id`, `id_type`, `country`, `sandbox`) and the session token, and test it on a device with the sandbox.

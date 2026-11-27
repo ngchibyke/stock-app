@@ -12,6 +12,7 @@ pub mod fake;
 pub mod jobs;
 pub mod routes;
 pub mod service;
+pub mod smile;
 
 use std::fmt;
 
@@ -100,6 +101,16 @@ impl fmt::Debug for StartedJob {
     }
 }
 
+/// What the app's SDK needs besides the session token. Not secret: the partner id is
+/// public to the SDK by design, and the token is what authorises it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SdkParams {
+    pub partner_id: String,
+    pub id_type: &'static str,
+    pub country: &'static str,
+    pub sandbox: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityEvent {
     pub provider_ref: String,
@@ -121,9 +132,20 @@ pub enum IdentityError {
 pub trait IdentityProvider: Send + Sync {
     fn name(&self) -> &'static str;
 
+    /// Settings the app's SDK needs; `None` for a provider without an SDK step.
+    fn sdk_params(&self) -> Option<SdkParams> {
+        None
+    }
+
     /// Opens a job for the NIN. `reference` is our attempt id, which carries no
-    /// personal data and may be sent as the provider's own reference.
-    async fn start(&self, nin: &Nin, reference: Uuid) -> Result<StartedJob, IdentityError>;
+    /// personal data and may be sent as the provider's own reference. `display_name` is
+    /// the name the seller gave us, for providers that want one; it is never stored.
+    async fn start(
+        &self,
+        nin: &Nin,
+        reference: Uuid,
+        display_name: &str,
+    ) -> Result<StartedJob, IdentityError>;
 
     /// Verifies the signature over the raw bytes first, then reads the result.
     fn parse_webhook(

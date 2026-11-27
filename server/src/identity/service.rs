@@ -126,6 +126,8 @@ pub struct StartView {
     pub attempt_id: Uuid,
     pub provider: &'static str,
     pub session_token: String,
+    /// What the provider's SDK needs; absent for a provider without one.
+    pub sdk: Option<super::SdkParams>,
     pub expires_in_secs: i64,
 }
 
@@ -318,7 +320,13 @@ pub async fn start(
     tx.commit().await.context("commit")?;
 
     // The provider call happens outside any transaction.
-    match provider.start(&nin, id).await {
+    let display_name: String = sqlx::query_scalar("SELECT display_name FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .context("read display name")?
+        .unwrap_or_default();
+    match provider.start(&nin, id, &display_name).await {
         Ok(job) => {
             let mut conn = state.db.acquire().await.context("acquire")?;
             sqlx::query(
@@ -342,6 +350,7 @@ pub async fn start(
                 attempt_id: id,
                 provider: provider.name(),
                 session_token: job.session_token,
+                sdk: provider.sdk_params(),
                 expires_in_secs: i64::from(STALE_MINUTES) * 60,
             })
         }

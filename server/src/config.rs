@@ -52,6 +52,8 @@ pub struct Config {
     /// Which identity provider checks sellers (`IDENTITY_PROVIDER`); `None` when unset
     /// (production then refuses to serve; elsewhere the check answers 503).
     pub identity_provider: Option<String>,
+    /// Smile ID settings (`SMILE_ID_*`); present when `IDENTITY_PROVIDER=smile_id`.
+    pub smile_id: Option<crate::identity::smile::SmileConfig>,
     /// Key of the NIN fingerprint (`NIN_INDEX_KEY`). Never rotate it: every verified
     /// seller would have to verify again.
     pub nin_index_key: Option<[u8; 32]>,
@@ -483,7 +485,7 @@ fn s3_config(var: &impl Fn(&str) -> Option<String>, dev: bool) -> Result<Option<
 }
 
 /// Identity providers this build knows. Only the fake exists until the owner picks one.
-const KNOWN_IDENTITY_PROVIDERS: &[&str] = &["fake"];
+const KNOWN_IDENTITY_PROVIDERS: &[&str] = &["fake", "smile_id"];
 
 /// `IDENTITY_PROVIDER` and `NIN_INDEX_KEY` (production needing both is `main`'s check, like
 /// the other providers). A provider needs the key; the key must differ
@@ -520,6 +522,67 @@ fn identity_config(
         }
     }
     Ok((provider, key))
+}
+
+/// `SMILE_ID_*`, read only when `IDENTITY_PROVIDER=smile_id`. Production uses the live API
+/// and refuses a sandbox URL; elsewhere the sandbox is the default. Errors name the variable,
+/// never its value.
+fn smile_config(
+    var: &impl Fn(&str) -> Option<String>,
+    provider: Option<&str>,
+    production: bool,
+) -> Result<Option<crate::identity::smile::SmileConfig>> {
+    use crate::identity::smile;
+    if provider != Some("smile_id") {
+        return Ok(None);
+    }
+    let get = |name: &str| {
+        var(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let need = |name: &str| get(name).with_context(|| format!("{name} is required for smile_id"));
+    let partner_id = need("SMILE_ID_PARTNER_ID")?;
+    // Smile ID's header takes the numeric id with no leading zeros.
+    if !partner_id.bytes().all(|b| b.is_ascii_digit()) || partner_id.starts_with('0') {
+        bail!("SMILE_ID_PARTNER_ID must be the numeric partner id, without leading zeros");
+    }
+    let api_key = need("SMILE_ID_API_KEY")?;
+    if api_key.contains(char::is_whitespace) {
+        bail!("SMILE_ID_API_KEY must not contain whitespace");
+    }
+    let https = |name: &str, v: &str| -> Result<()> {
+        if !v.starts_with("https://") || v.contains(char::is_whitespace) {
+            bail!("{name} must be an https URL");
+        }
+        Ok(())
+    };
+    let default_url = if production {
+        smile::LIVE_URL
+    } else {
+        smile::SANDBOX_URL
+    };
+    let base_url = get("SMILE_ID_BASE_URL").unwrap_or_else(|| default_url.to_string());
+    https("SMILE_ID_BASE_URL", &base_url)?;
+    let sandbox = base_url != smile::LIVE_URL;
+    if production && sandbox {
+        bail!("SMILE_ID_BASE_URL must be the live API when APP_ENV is production");
+    }
+    let callback_url = need("SMILE_ID_CALLBACK_URL")?;
+    https("SMILE_ID_CALLBACK_URL", &callback_url)?;
+    let privacy_policy_url = need("SMILE_ID_PRIVACY_URL")?;
+    https("SMILE_ID_PRIVACY_URL", &privacy_policy_url)?;
+    Ok(Some(smile::SmileConfig {
+        partner_id,
+        api_key: Secret::new(&api_key),
+        base_url,
+        callback_url,
+        privacy_policy_url,
+        sandbox,
+        connect_timeout: smile::CONNECT_TIMEOUT,
+        timeout: smile::REQUEST_TIMEOUT,
+        insecure_http_for_tests: false,
+    }))
 }
 
 impl Config {
@@ -561,8 +624,10 @@ impl Config {
         let (sms_provider, termii) = sms_config(&var)?;
         let (identity_provider, nin_index_key) =
             identity_config(&var, app_env == "production", &[field_key, index_key])?;
+        let smile_id = smile_config(&var, identity_provider.as_deref(), app_env == "production")?;
         Ok(Self {
             identity_provider,
+            smile_id,
             nin_index_key,
             public_redirect_url,
             mono,
@@ -612,6 +677,58 @@ mod tests {
         .into();
         env.extend(pairs.iter().copied());
         Config::from_lookup(|k| env.get(k).map(|v| v.to_string()))
+    }
+
+    const SMILE_OK: &[(&str, &str)] = &[
+        ("IDENTITY_PROVIDER", "smile_id"),
+        (
+            "NIN_INDEX_KEY",
+            "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=",
+        ),
+        ("SMILE_ID_PARTNER_ID", "1234"),
+        ("SMILE_ID_API_KEY", "key-abc"),
+        (
+            "SMILE_ID_CALLBACK_URL",
+            "https://api.example.ng/webhooks/identity/smile_id",
+        ),
+        ("SMILE_ID_PRIVACY_URL", "https://example.ng/privacy"),
+    ];
+
+    #[test]
+    fn smile_id_config_rules() {
+        // Outside production the sandbox is the default, and the key never shows.
+        let cfg = load(SMILE_OK).unwrap();
+        let s = cfg.smile_id.unwrap();
+        assert!(s.sandbox && s.base_url == "https://testapi.smileidentity.com");
+        assert!(!format!("{s:?}").contains("key-abc"));
+        // Not selected: ignored.
+        assert!(load(&[]).unwrap().smile_id.is_none());
+        // Each required setting, and bad values, are refused by name.
+        for name in [
+            "SMILE_ID_PARTNER_ID",
+            "SMILE_ID_API_KEY",
+            "SMILE_ID_CALLBACK_URL",
+            "SMILE_ID_PRIVACY_URL",
+        ] {
+            let rest: Vec<_> = SMILE_OK
+                .iter()
+                .filter(|(k, _)| *k != name)
+                .copied()
+                .collect();
+            let err = load(&rest).unwrap_err();
+            assert!(err.to_string().contains(name), "{err}");
+        }
+        for (name, bad) in [
+            ("SMILE_ID_PARTNER_ID", "0123"),
+            ("SMILE_ID_PARTNER_ID", "12a"),
+            ("SMILE_ID_CALLBACK_URL", "http://api.example.ng/hook"),
+            ("SMILE_ID_BASE_URL", "http://x"),
+        ] {
+            let mut env = SMILE_OK.to_vec();
+            env.push((name, bad));
+            env.retain(|(k, v)| *k != name || *v == bad);
+            assert!(load(&env).is_err(), "{name}={bad}");
+        }
     }
 
     #[test]
