@@ -27,11 +27,11 @@
 
 ## Your rights and how to use them
 - Download your data and delete your account in the app (Account, Privacy and data). Deletion has a 30-day cooling-off and is refused while an order, dispute, store or payout is still open.
-- **A web page or email address for people who cannot open the app** (the stores require it).
+- **For people who cannot open the app:** the page `https://<your api host>/account-deletion` (the stores require one) and the support email.
 - Correct your details, object to or restrict processing, and complain to the regulator.
 
 ## Other
 - Automated checks: chat messages are checked automatically; a person can review flagged ones.
 - Children: the app is for adults.
-- Breach notification: the 72-hour procedure is an owner action and is not written yet.
+- Breach notification: a 72-hour procedure is drafted in `docs/release/breach-procedure.md` for the DPO and a lawyer to adopt.
 - Changes to the policy, and the date it was last updated.

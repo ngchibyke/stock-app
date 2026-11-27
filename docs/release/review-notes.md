@@ -25,4 +25,3 @@ For adults: sellers must be 18 or older, and the app has user-to-user messages t
 
 - No staging server or demo accounts exist yet.
 - The identity selfie step has no provider SDK plugged in (`UnavailableSelfieCapture`); the demo seller account is therefore already verified.
-- The store link for the in-app update notice needs a field in the server's app config (not built).

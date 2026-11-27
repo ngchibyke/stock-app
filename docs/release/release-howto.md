@@ -72,7 +72,11 @@ A release build refuses to start pointed at a missing, non-https or development 
 
 The Firebase project and its two files are the only missing steps, plus one thing this repository does not do for you: **add the Google services Gradle plugin on Android** (and check the build) when the real `google-services.json` exists. It was left out because its version cannot be checked against this project's very new Android Gradle plugin from a machine without Android tooling, and a wrong version would break every build. iOS needs the APNs key uploaded in Firebase and the Push Notifications capability on the app id. Until then push stays off and the rest of the app works.
 
-## 8. What nobody has verified
+## 8. After the first store release
+
+Set `APP_STORE_URL_ANDROID` and `APP_STORE_URL_IOS` in the server's settings (the Play and App Store pages) so the "Please update" notice can send people there, and give both stores `https://<your api host>/account-deletion` as the data-deletion link.
+
+## 9. What nobody has verified
 
 - That the workflow runs end to end (it never has).
 - That a signed bundle installs, or that either store accepts it.

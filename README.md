@@ -34,6 +34,12 @@ Delivery and tracking (part 3):
 - **Ship deadline:** the 48-hour rule is now enforced for orders paid after `ship_deadline_enforce_from`, and overdue pickups are flagged for the owner.
 - **Owner view:** the reconciliation list shows bookings that failed or are unknown, courier cancels after pickup, overdue pickups and paid orders without a delivery method.
 
+Operating the server (part 7g follow-ups):
+
+- **`GET /health`** says the process is up. **`GET /ready`** says whether it can do its work: it answers 503 when the database is unreachable or a background job has stopped or keeps failing, naming only the jobs. Point an uptime monitor at `/ready`; `docs/release/operations.md` has the runbook.
+- **`GET /account-deletion`** is a public page, served by the API itself, where a person who cannot open the app signs in and asks for deletion or keeps the account (both app stores ask for such a link). Give the stores `https://<api host>/account-deletion`. If the dashboard is on its own host, it only needs `/auth`, `/me` and `/admin` sent to the API.
+- **`APP_STORE_URL_ANDROID` / `APP_STORE_URL_IOS`** name the store pages the app's "Please update" notice opens.
+
 Partner services (part 9):
 
 - **A seam, not a feature.** One gateway (`server/src/partners/`) is the only door to a service built by the owner's other company. No capability exists yet, because the partner's contract does not. With no `PARTNER_*` settings, or the switch off, every call answers "not configured" or "disabled" without a network call, and nothing else in the server changes. A partner is optional, even in production.

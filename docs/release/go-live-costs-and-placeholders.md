@@ -38,7 +38,8 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | **Anthropic API** | the chat tone check (`claude-haiku-5-5`) | per use | get zero data retention and a no-training statement in writing |
 | **Object storage and a CDN** (S3-compatible) | product, review and dispute photos, and the market art | per GB stored and served | also serves `market/<version>/` |
 | **Firebase** | push delivery (FCM) | free tier | the iOS key comes from your Apple account |
-| **Production hosting, backups, monitoring** | the live API, the dashboard (one origin behind a reverse proxy) | monthly | automated database backups and a restore test are yours to set up; no monitoring or alerting exists yet |
+| **Production hosting and backups** | the live API, the dashboard (one origin behind a reverse proxy) | monthly | automated database backups and a restore test are yours to set up |
+| **An uptime monitor** | polls `/ready` and pages you when the server or its jobs stop (`docs/release/operations.md`) | free tier or monthly | the server's side is built; the subscription and the paging are yours |
 | **The market art** | real renders to replace the placeholder | one-time | Unreal work you offered, or hire an artist; renders must not show real people |
 | **A support channel** | a support email and someone to answer it | monthly | the app shows `APP_SUPPORT_EMAIL` |
 | **Crash reporting** (optional) | see crashes from real phones | free tier or monthly | not chosen; needs a DPO look |
@@ -53,7 +54,7 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 ### Later, optional
 
 - **The partner company's pricing service:** per call or per month, with the monthly call budget you set. Nothing is called until a contract exists.
-- **A second payment provider (Paystack),** a postcode data feed, a **web page for account deletion** (the stores require one), and a staging server kept running for reviewers.
+- **A second payment provider (Paystack),** a postcode data feed, and a staging server kept running for reviewers.
 
 ---
 
@@ -95,6 +96,7 @@ So "live testing" has two levels. **Level 1** is a closed test on a staging serv
 | `SMS_PROVIDER`, `TERMII_API_KEY`, `TERMII_SENDER_ID` | Termii, with an approved sender ID |
 | `IDENTITY_PROVIDER`, `IDENTITY_API_KEY`, `IDENTITY_WEBHOOK_SECRET` | a real provider (needs its adapter built first) |
 | `APP_MIN_VERSION_ANDROID`, `APP_MIN_VERSION_IOS`, `APP_MAINTENANCE_MESSAGE` | set when you need to force an update |
+| `APP_STORE_URL_ANDROID`, `APP_STORE_URL_IOS` | the store pages, after the first store release; the "please update" notice opens them |
 | `PARTNER_*` | only when the partner's contract exists |
 
 ### Business defaults the Owner confirms (dashboard, Settings)
@@ -107,11 +109,21 @@ These are placeholders from the build, not decisions: **platform cut 5%**, **col
 - **The NIPOST postcode check:** `ManualPostcode` accepts what people type until NIPOST publishes a usable source.
 - **The provider's daily statement** for reconciliation: `statements` is `None` until Mono's statement endpoint is confirmed.
 - **Firebase files and the Android Google services Gradle plugin:** push is off until they are added (`docs/release/release-howto.md`).
-- **The store link in the app's update notice,** deep links and the app's link domain, a **web page for account deletion,** the **breach-notification procedure,** and **key rotation** (today: change the setting and restart).
-- **Crash reporting,** and **monitoring and alerting** for the server.
+- **Deep links and the app's link domain** (they need the final domain and name), and **key rotation** (today: change the setting and restart; the three data keys cannot be rotated in place).
+- **Crash reporting** (your choice, with a DPO look).
+- **An external uptime monitor and paging** (the checks exist, see below).
 - **The release workflow has never run,** and nothing has been run on an iPhone.
 
 ---
+
+## Built since the first version of this page (2026-11-27)
+
+| Was unbuilt | Now | What is still yours |
+|---|---|---|
+| A store link for the update notice | `APP_STORE_URL_ANDROID` and `APP_STORE_URL_IOS` in the server's settings; the app's "Please update" notice has an **Update now** button when its platform's page is named | set them after the first store release |
+| A web page for account deletion (both stores ask for one) | `https://<api host>/account-deletion`: a person who cannot open the app signs in and asks for deletion, or keeps the account; strict content-security policy, nothing stored in the browser; tested in a real browser | give the stores that address; the support email shows on it when `APP_SUPPORT_EMAIL` is set |
+| A breach-notification procedure | `docs/release/breach-procedure.md`: roles, the 72-hour clock, containment, assessment, notices and a register | **fill in the names, have the DPO and a lawyer adopt it**, and run an exercise |
+| Monitoring and alerting basics | `GET /ready` (database and background jobs) and `docs/release/operations.md` with a runbook | subscribe an uptime monitor to `/ready`, set up database backups and a restore test, and watch the dashboard's Alerts |
 
 ## Suggested order
 

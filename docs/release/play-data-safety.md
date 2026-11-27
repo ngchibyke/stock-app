@@ -12,7 +12,7 @@
 | Does the app follow the Families policy? | No, it is not for children |
 | Independent security review | No |
 
-**A web page for deletion is also required by Play** (a link users can open without the app, for example if they uninstalled it). The app has the in-app path only. **Gap:** a web page or a documented email process for deletion requests must exist before the form is submitted.
+**A web page for deletion is also required by Play** (a link users can open without the app, for example if they uninstalled it). It exists: `https://<your api host>/account-deletion` (served by the server). Give Play that address, with your real host.
 
 ## Data types
 

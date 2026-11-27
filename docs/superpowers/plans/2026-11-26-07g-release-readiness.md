@@ -30,4 +30,6 @@ This container has no Android SDK, no Gradle run and no Mac. Anything in `*.grad
 
 Built on `feat/release-readiness`: `app/brand.json` with `tool/brand.dart`, `tool/apply_brand.dart` and the placeholder icon; `lib/core/api/release_guard.dart`; release signing in `android/app/build.gradle.kts`; the iOS push settings and `Release.entitlements`; `.github/workflows/release.yml` and the Android debug-build job in `ci.yml`; `test/accessibility_walk_test.dart` and `test/platform_release_test.dart`; `docs/release/` (including the go-live costs and placeholders list).
 
+Follow-ups on the same branch, 2026-11-27, from the go-live list: the store-link config and the update button, `GET /ready`, the public `/account-deletion` page with a browser test, `docs/release/breach-procedure.md` and `docs/release/operations.md`.
+
 As built, also different from the plan as written: the brand tool and its tests are the only part of the platform edits that run here; Gradle, the iOS project and both workflows are checked by reading, YAML parsing and `actionlint` only.
